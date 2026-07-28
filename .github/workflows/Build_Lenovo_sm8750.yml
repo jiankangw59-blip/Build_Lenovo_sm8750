@@ -50,12 +50,6 @@ on:
         default: false
         type: boolean
 
-      enable_ntsync:
-        description: "启用 ntsync（Wine/Windows 游戏同步加速）"
-        required: true
-        default: true
-        type: boolean
-
       enable_kpm:
         description: "启用KPM"
         required: false
@@ -88,7 +82,7 @@ jobs:
       ENABLE_REKERNEL: ${{ github.event.inputs.enable_ReKernel }}
       ENABLE_ADIOS: ${{ github.event.inputs.enable_Adios }}
       ENABLE_DROIDSPACES: ${{ github.event.inputs.enable_droidspaces }}
-      ENABLE_NTSYNC: ${{ github.event.inputs.enable_ntsync }}
+      ENABLE_NTSYNC: ${{ github.event.inputs.enable_droidspaces }}
       ENABLE_BBG: ${{ github.event.inputs.enable_bbg }}
       ENABLE_KPM: ${{ github.event.inputs.enable_kpm }}
       ENABLE_SUSFS: ${{ github.event.inputs.enable_susfs }}
@@ -608,7 +602,7 @@ jobs:
             echo "==> Droidspaces 内核配置完成"
           fi
 
-          # ntsync 与 Droidspaces 解耦，避免勾选状态或后续改动让配置静默丢失。
+          # Droidspaces 构建强制启用 ntsync，并在后续阶段验证最终结果。
           if [ "${{ env.ENABLE_NTSYNC }}" = "true" ]; then
             ./common/scripts/config --file "$DEFCONFIG" --enable NTSYNC
             grep -qx 'CONFIG_NTSYNC=y' "$DEFCONFIG"
