@@ -50,6 +50,12 @@ on:
         default: false
         type: boolean
 
+      enable_ntsync:
+        description: "启用 ntsync（Wine/Windows 游戏同步加速）"
+        required: true
+        default: true
+        type: boolean
+
       enable_kpm:
         description: "启用KPM"
         required: false
@@ -82,6 +88,7 @@ jobs:
       ENABLE_REKERNEL: ${{ github.event.inputs.enable_ReKernel }}
       ENABLE_ADIOS: ${{ github.event.inputs.enable_Adios }}
       ENABLE_DROIDSPACES: ${{ github.event.inputs.enable_droidspaces }}
+      ENABLE_NTSYNC: ${{ github.event.inputs.enable_ntsync }}
       ENABLE_BBG: ${{ github.event.inputs.enable_bbg }}
       ENABLE_KPM: ${{ github.event.inputs.enable_kpm }}
       ENABLE_SUSFS: ${{ github.event.inputs.enable_susfs }}
@@ -207,6 +214,9 @@ jobs:
           CACHE_VARIANT=""
           if [ "${{ env.ENABLE_DROIDSPACES }}" = "true" ]; then
             CACHE_VARIANT="${CACHE_VARIANT}-ds"
+          fi
+          if [ "${{ env.ENABLE_NTSYNC }}" = "true" ]; then
+            CACHE_VARIANT="${CACHE_VARIANT}-ntsync"
           fi
           echo "CACHE_VARIANT=$CACHE_VARIANT" >> $GITHUB_ENV
           echo "当前构建内核：${{ env.KERNEL_VERSION }}，缓存变体：${CACHE_VARIANT:-(无)}"
@@ -491,10 +501,29 @@ jobs:
           echo "==> Droidspaces SYSVIPC kABI 修复完成"
 
       - name: 🔧 Apply ntsync Patch (应用 ntsync 补丁)
-        if: ${{ env.ENABLE_DROIDSPACES == 'true' }}
+        if: ${{ env.ENABLE_NTSYNC == 'true' }}
         working-directory: kernel_workspace/common
         run: |
+          set -euo pipefail
           echo "==> 开始应用 ntsync 补丁..."
+
+          apply_patch_strict() {
+            local patch_path="$1"
+            local patch_name
+            patch_name="$(basename "$patch_path")"
+
+            if git apply --check --ignore-whitespace "$patch_path"; then
+              git apply --ignore-whitespace "$patch_path"
+              echo "  已应用: $patch_name"
+            elif git apply --reverse --check --ignore-whitespace "$patch_path"; then
+              echo "  已存在，跳过: $patch_name"
+            else
+              echo "::error::ntsync 补丁无法应用: $patch_name"
+              git apply --check --verbose --ignore-whitespace "$patch_path" || true
+              exit 1
+            fi
+          }
+
           for PATCH_NAME in "ntsync_base.patch" "ntsync_compat_6.6.patch"; do
             PATCH_PATH="${GITHUB_WORKSPACE}/patch/${PATCH_NAME}"
             if [ ! -f "$PATCH_PATH" ]; then
@@ -503,10 +532,13 @@ jobs:
             fi
             echo "  应用: $PATCH_NAME"
             dos2unix "$PATCH_PATH"
-            if ! git apply --ignore-whitespace "$PATCH_PATH"; then
-              echo "::warning::补丁 $PATCH_NAME 应用失败，可能已应用或上下文不匹配"
-            fi
+            apply_patch_strict "$PATCH_PATH"
           done
+
+          test -s drivers/misc/ntsync.c
+          test -s include/uapi/linux/ntsync.h
+          grep -qx 'config NTSYNC' drivers/misc/Kconfig
+          grep -qF 'obj-$(CONFIG_NTSYNC)' drivers/misc/Makefile
           echo "==> ntsync 补丁应用完成"
 
       - name: 🔧 Set gki_defconfig (设置编译配置)
@@ -572,9 +604,16 @@ jobs:
             enable_config_if_defined CONFIG_NETFILTER_XT_TARGET_REJECT
             enable_config_if_defined CONFIG_IP_NF_TARGET_REJECT
             disable_config CONFIG_ANDROID_PARANOID_NETWORK
-            echo "CONFIG_NTSYNC=y" >> "$DEFCONFIG"
 
             echo "==> Droidspaces 内核配置完成"
+          fi
+
+          # ntsync 与 Droidspaces 解耦，避免勾选状态或后续改动让配置静默丢失。
+          if [ "${{ env.ENABLE_NTSYNC }}" = "true" ]; then
+            ./common/scripts/config --file "$DEFCONFIG" --enable NTSYNC
+            grep -qx 'CONFIG_NTSYNC=y' "$DEFCONFIG"
+          else
+            ./common/scripts/config --file "$DEFCONFIG" --disable NTSYNC
           fi
 
           # ==================== KSU 配置 ====================
@@ -697,8 +736,21 @@ jobs:
           sudo rm -rf /usr/local/lib/android &
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig &&
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
+
+          if [ "${{ env.ENABLE_NTSYNC }}" = "true" ]; then
+            if ! grep -qx 'CONFIG_NTSYNC=y' out/.config; then
+              echo "::error::gki_defconfig 生成后 CONFIG_NTSYNC 不等于 y"
+              grep 'NTSYNC' out/.config || true
+              exit 1
+            fi
+          fi
+
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
+
+          if [ "${{ env.ENABLE_NTSYNC }}" = "true" ]; then
+            test -s out/drivers/misc/ntsync.o
+          fi
           
           # 编译后时间劫持二次校验
           echo "--- 编译后环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
@@ -784,6 +836,20 @@ jobs:
           ./patch_linux
           rm -f Image
           mv oImage Image
+
+      - name: ✅ Verify ntsync in final Image (验证最终镜像中的 ntsync)
+        if: ${{ env.ENABLE_NTSYNC == 'true' }}
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          FINAL_CONFIG="$(mktemp)"
+          scripts/extract-ikconfig out/arch/arm64/boot/Image > "$FINAL_CONFIG"
+          if ! grep -qx 'CONFIG_NTSYNC=y' "$FINAL_CONFIG"; then
+            echo "::error::KPM 后最终 Image 中未找到 CONFIG_NTSYNC=y"
+            grep 'NTSYNC' "$FINAL_CONFIG" || true
+            exit 1
+          fi
+          echo "最终 Image 已确认包含 CONFIG_NTSYNC=y"
           
       - name: 📦 ReName Image  (修改镜像名)
         run: |
@@ -795,6 +861,13 @@ jobs:
         with:
          name: kernel_image_${{ env.KERNEL_VERSION }}
          path: kernel_workspace/common/out/arch/arm64/boot/kernel
+
+      - name: 📤 Upload final kernel config (上传最终内核配置)
+        uses: actions/upload-artifact@v5
+        with:
+         name: kernel_config_${{ env.KERNEL_VERSION }}
+         path: kernel_workspace/common/out/.config
+         include-hidden-files: true
          
       - name: 📦 Sign boot using AOSP test key (使用AOSP测试密钥签名boot)
         if: ${{ env.ENABLE_SIGNED == 'true' }}
