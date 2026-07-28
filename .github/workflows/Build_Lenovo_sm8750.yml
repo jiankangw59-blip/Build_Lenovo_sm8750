@@ -506,14 +506,14 @@ jobs:
             local patch_name
             patch_name="$(basename "$patch_path")"
 
-            if git apply --check --ignore-whitespace "$patch_path"; then
-              git apply --ignore-whitespace "$patch_path"
+            if patch --dry-run --silent --batch --forward -p1 < "$patch_path"; then
+              patch --batch --forward -p1 < "$patch_path"
               echo "  已应用: $patch_name"
-            elif git apply --reverse --check --ignore-whitespace "$patch_path"; then
+            elif patch --dry-run --silent --batch --reverse -p1 < "$patch_path"; then
               echo "  已存在，跳过: $patch_name"
             else
               echo "::error::ntsync 补丁无法应用: $patch_name"
-              git apply --check --verbose --ignore-whitespace "$patch_path" || true
+              patch --dry-run --batch --forward -p1 < "$patch_path" || true
               exit 1
             fi
           }
