@@ -451,12 +451,35 @@ jobs:
       
       - name: ⚙️ Set ReSukiSU (设置ReSukiSU)
         run: |
+          set -euo pipefail
           cd kernel_workspace
           echo "正在配置ReSukiSU..."
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/refs/heads/main/kernel/setup.sh" | bash -s dev
-          cd ./KernelSU 
-          KSU_VERSION=$(expr $(git rev-list --count origin/dev 2>/dev/null) + 30700 2>/dev/null || echo 114514)
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/refs/heads/main/kernel/setup.sh" | bash
+          cd ./KernelSU
+
+          if [ -f .git/shallow ]; then
+            git fetch --unshallow
+          fi
+
+          KSU_COMMIT_COUNT="$(git rev-list --count HEAD)"
+          KSU_VERSION_LINE="$(grep -E '^KSU_VERSION := \$\(shell expr [0-9]+ \+ \$\(KSU_LOCAL_VERSION\) \+ [0-9]+\)$' kernel/Kbuild || true)"
+          if [ -z "$KSU_VERSION_LINE" ]; then
+            echo "::error::无法识别 ReSukiSU kernel/Kbuild 中的版本公式"
+            exit 1
+          fi
+          read -r KSU_BASE KSU_OFFSET <<< "$(sed -E 's/^KSU_VERSION := \$\(shell expr ([0-9]+) \+ \$\(KSU_LOCAL_VERSION\) \+ ([0-9]+)\)$/\1 \2/' <<< "$KSU_VERSION_LINE")"
+          KSU_VERSION=$((KSU_BASE + KSU_COMMIT_COUNT + KSU_OFFSET))
+
+          if [ "$KSU_VERSION" -lt 35000 ]; then
+            echo "::error::ReSukiSU 版本异常: $KSU_VERSION"
+            exit 1
+          fi
+
+          echo "ReSukiSU commit: $(git rev-parse --short=8 HEAD)"
+          echo "ReSukiSU commit count: $KSU_COMMIT_COUNT"
+          echo "ReSukiSU expected version code: $KSU_VERSION"
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          echo "KSU_COMMIT_SHA=$(git rev-parse --short=8 HEAD)" >> $GITHUB_ENV
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
 
       - name: 🔧 Set up SUSFS (配置 SUSFS)
@@ -681,6 +704,7 @@ jobs:
 
       - name: 🔨 Build Kernel (构建内核)
         run: |
+          set -euo pipefail
           WORKDIR="$(pwd)"
           export PATH="/usr/lib/ccache:$PATH"
           export PATH="$WORKDIR/kernel_workspace/clang18/bin:$PATH"
@@ -762,7 +786,18 @@ jobs:
             fi
           fi
 
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image 2>&1 | tee build.log
+
+          BUILT_KSU_VERSION="$(grep -oE 'ReSukiSU version code: [0-9]+' build.log | awk '{print $NF}' | tail -n 1 || true)"
+          if [ -z "$BUILT_KSU_VERSION" ]; then
+            echo "::error::构建日志中未找到 ReSukiSU version code"
+            exit 1
+          fi
+          if [ "$BUILT_KSU_VERSION" != "${KSUVER}" ]; then
+            echo "::error::ReSukiSU 版本不一致: 产物名=$KSUVER, 内核实际=$BUILT_KSU_VERSION"
+            exit 1
+          fi
+          echo "ReSukiSU 版本校验通过: $BUILT_KSU_VERSION"
 
           if [ "${{ env.ENABLE_NTSYNC }}" = "true" ]; then
             test -s out/drivers/misc/ntsync.o
