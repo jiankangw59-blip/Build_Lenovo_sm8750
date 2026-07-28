@@ -529,10 +529,28 @@ jobs:
             apply_patch_strict "$PATCH_PATH"
           done
 
-          test -s drivers/misc/ntsync.c
-          test -s include/uapi/linux/ntsync.h
-          grep -qx 'config NTSYNC' drivers/misc/Kconfig
-          grep -qF 'obj-$(CONFIG_NTSYNC)' drivers/misc/Makefile
+          require_nonempty_file() {
+            local path="$1"
+            if [ ! -s "$path" ]; then
+              echo "::error::ntsync 补丁未生成必需文件: $path"
+              exit 1
+            fi
+          }
+
+          require_nonempty_file drivers/misc/ntsync.c
+          require_nonempty_file include/uapi/linux/ntsync.h
+
+          if ! grep -qE '^[[:space:]]*(menuconfig|config)[[:space:]]+NTSYNC([[:space:]]|$)' drivers/misc/Kconfig; then
+            echo "::error::drivers/misc/Kconfig 未注册 NTSYNC"
+            grep -n -C 2 'NTSYNC' drivers/misc/Kconfig || true
+            exit 1
+          fi
+
+          if ! grep -qE 'CONFIG_NTSYNC.*ntsync\.o' drivers/misc/Makefile; then
+            echo "::error::drivers/misc/Makefile 未注册 ntsync.o"
+            grep -n -C 2 'ntsync' drivers/misc/Makefile || true
+            exit 1
+          fi
           echo "==> ntsync 补丁应用完成"
 
       - name: 🔧 Set gki_defconfig (设置编译配置)
@@ -612,7 +630,11 @@ jobs:
 
           # ==================== KSU 配置 ====================
           echo "CONFIG_KSU=y" >> "$DEFCONFIG"
-          echo "CONFIG_KPM=y" >> "$DEFCONFIG"
+          if [ "${{ env.ENABLE_KPM }}" = "true" ]; then
+            ./common/scripts/config --file "$DEFCONFIG" --enable KPM
+          else
+            ./common/scripts/config --file "$DEFCONFIG" --disable KPM
+          fi
 
           echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%-Re-TG@qdykernel"' >> "$DEFCONFIG"
 
