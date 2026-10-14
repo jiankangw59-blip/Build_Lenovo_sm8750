@@ -486,22 +486,52 @@ jobs:
         if: ${{ env.ENABLE_SUSFS == 'true' }}
         run: |
           cd kernel_workspace
-          git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-android15-6.6
-          wget https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/main/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
-          cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./common/
+
+          # ============================================================
+          # [bakasu-fix] BakaSU sync-susfs 分支已内置 SUSFS (kernel/feature/selinux_hide.c
+          # 里已有 security_context_to_sid_with_policy / fake_state / ksu_selinux_hide_running)
+          # 因此【不需要】再从 susfs4oki 打补丁 —— 重复打会在 fs/proc/task_mmu.c
+          # Hunk #6 冲突 (实测: 1 out of 9 hunks FAILED at 1057)。
+          # ============================================================
+          ALREADY=0
+          [ -f ./common/fs/susfs.c ] && ALREADY=1
+          grep -rqs "CONFIG_KSU_SUSFS" ./KernelSU/kernel 2>/dev/null && ALREADY=1
+          [ -f ./common/KernelSU/kernel/feature/selinux_hide.c ] && ALREADY=1
+
+          if [ "$ALREADY" = "1" ]; then
+            echo "::notice::SUSFS 已由 BakaSU sync-susfs 内置, 跳过 susfs4oki 外部补丁"
+            ls -la ./common/fs/susfs.c ./common/include/linux/susfs.h 2>/dev/null || true
+            ls -la ./common/KernelSU/kernel/feature/selinux_hide.c 2>/dev/null || true
+            exit 0
+          fi
+
+          echo "::warning::BakaSU 未内置 SUSFS, 回退到 susfs4oki 外部补丁"
+          git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-android15-6.6 \
+            || { echo "::error::susfs4oki clone 失败"; exit 1; }
+
+          PF=./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
+          [ -f "$PF" ] || { echo "::error::补丁文件不存在: $PF"; exit 1; }
+
+          cp "$PF" ./common/
           cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-          cd ./common
-          patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch
-          patch -p1 -N -F 3 < 69_hide_stuff.patch
-          case "${{ env.KERNEL_VERSION }}" in
-            6.6.56)
-              echo "[INFO] 当前构建内核版本为6.6.56，正在修复 undeclared identifier 'vma' 编译错误"
-              cd ./fs/proc
-              sed -i 's/vma = find_vma(mm, start_vaddr);/struct vm_area_struct *vma = find_vma(mm, start_vaddr);/' task_mmu.c
-              ;;
-          esac
 
+          cd ./common
+          wget -q https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/main/other_patch/69_hide_stuff.patch \
+            -O ./69_hide_stuff.patch || { echo "::error::69_hide_stuff.patch 下载失败"; exit 1; }
+
+          # ★ 补丁失败立即中止 (不再 || true)
+          patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch \
+            || { echo "::error::50_add_susfs 补丁失败 (常见: fs/proc/task_mmu.c Hunk #6)。若 BakaSU 已内置 SUSFS 则不应走到这里"; exit 1; }
+          patch -p1 -N -F 3 < 69_hide_stuff.patch \
+            || { echo "::error::69_hide_stuff 补丁失败"; exit 1; }
+
+          # ★ 落地断言
+          if [ ! -f fs/susfs.c ] && [ ! -f include/linux/susfs.h ]; then
+            echo "::error::SUSFS 补丁未落地, 拒绝继续"
+            exit 1
+          fi
+          echo "[OK] SUSFS 外部补丁已验证落地"
       - name: 🔧 Apply Droidspaces SYSVIPC kABI fix (应用 Droidspaces SYSVIPC kABI 修复)
         if: ${{ env.ENABLE_DROIDSPACES == 'true' }}
         working-directory: kernel_workspace/common
