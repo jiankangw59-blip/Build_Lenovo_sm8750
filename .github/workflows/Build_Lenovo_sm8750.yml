@@ -838,7 +838,7 @@ jobs:
 
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image 2>&1 | tee build.log
 
-          BUILT_KSU_VERSION="$(grep -oE '(bakasu|ReSukiSU|KernelSU) version code: [0-9]+' build.log | awk '{print $NF}' | tail -n 1 || true)"
+          BUILT_KSU_VERSION="$(grep -oE 'version code: [0-9]+' build.log | awk '{print $NF}' | tail -n 1 || true)"
           if [ -z "$BUILT_KSU_VERSION" ]; then
             echo "::error::构建日志中未找到 bakasu version code"
             exit 1
