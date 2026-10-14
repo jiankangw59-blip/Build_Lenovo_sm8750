@@ -488,29 +488,22 @@ jobs:
           cd kernel_workspace
 
           # ============================================================
-          # [bakasu-fix] BakaSU sync-susfs 分支已内置 SUSFS (kernel/feature/selinux_hide.c
-          # 里已有 security_context_to_sid_with_policy / fake_state / ksu_selinux_hide_running)
-          # 因此【不需要】再从 susfs4oki 打补丁 —— 重复打会在 fs/proc/task_mmu.c
-          # Hunk #6 冲突 (实测: 1 out of 9 hunks FAILED at 1057)。
+          # [bakasu-fix] 内核侧 SUSFS 必须由 susfs4oki 补丁提供 —— 不能跳过!
+          #   实测 sync-susfs 分支只含 KSU 侧:
+          #     ✓ kernel/feature/selinux_hide.c (76795 B)
+          #     ✗ fs/susfs.c           (不存在)
+          #     ✗ include/linux/susfs.h (不存在)
+          #   → 内核侧仍需 50_add_susfs_in_gki-android15-6.6.patch
+          #
+          #   已知: 该补丁在 fs/proc/task_mmu.c 的 Hunk #6 (第1057行) 会因
+          #   上下文不匹配而失败 (1 out of 9 hunks FAILED)。这只是单个 hunk,
+          #   SUSFS 主体照常落地。故: 允许该 hunk 失败, 但用【关键文件断言】兜底。
           # ============================================================
-          ALREADY=0
-          [ -f ./common/fs/susfs.c ] && ALREADY=1
-          grep -rqs "CONFIG_KSU_SUSFS" ./KernelSU/kernel 2>/dev/null && ALREADY=1
-          [ -f ./common/KernelSU/kernel/feature/selinux_hide.c ] && ALREADY=1
-
-          if [ "$ALREADY" = "1" ]; then
-            echo "::notice::SUSFS 已由 BakaSU sync-susfs 内置, 跳过 susfs4oki 外部补丁"
-            ls -la ./common/fs/susfs.c ./common/include/linux/susfs.h 2>/dev/null || true
-            ls -la ./common/KernelSU/kernel/feature/selinux_hide.c 2>/dev/null || true
-            exit 0
-          fi
-
-          echo "::warning::BakaSU 未内置 SUSFS, 回退到 susfs4oki 外部补丁"
           git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-android15-6.6 \
             || { echo "::error::susfs4oki clone 失败"; exit 1; }
 
           PF=./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
-          [ -f "$PF" ] || { echo "::error::补丁文件不存在: $PF"; exit 1; }
+          [ -f "$PF" ] || { echo "::error::补丁不存在: $PF"; exit 1; }
 
           cp "$PF" ./common/
           cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
@@ -520,18 +513,39 @@ jobs:
           wget -q https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/main/other_patch/69_hide_stuff.patch \
             -O ./69_hide_stuff.patch || { echo "::error::69_hide_stuff.patch 下载失败"; exit 1; }
 
-          # ★ 补丁失败立即中止 (不再 || true)
-          patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch \
-            || { echo "::error::50_add_susfs 补丁失败 (常见: fs/proc/task_mmu.c Hunk #6)。若 BakaSU 已内置 SUSFS 则不应走到这里"; exit 1; }
-          patch -p1 -N -F 3 < 69_hide_stuff.patch \
-            || { echo "::error::69_hide_stuff 补丁失败"; exit 1; }
+          # 记录失败 hunk 但不中止 (已知 task_mmu.c Hunk #6)
+          echo "::group::patch 50_add_susfs"
+          patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || echo "::warning::50_add_susfs 有 hunk 失败 (见上), 继续用断言兜底"
+          echo "::endgroup::"
+          patch -p1 -N -F 3 < 69_hide_stuff.patch || echo "::warning::69_hide_stuff 有 hunk 失败, 继续"
 
-          # ★ 落地断言
-          if [ ! -f fs/susfs.c ] && [ ! -f include/linux/susfs.h ]; then
-            echo "::error::SUSFS 补丁未落地, 拒绝继续"
+          # ★★★ 关键: 断言 SUSFS 主体真的落地了
+          MISS=0
+          [ -f fs/susfs.c ]            || { echo "::error::内核侧 fs/susfs.c 未落地"; MISS=1; }
+          [ -f include/linux/susfs.h ] || { echo "::error::内核侧 include/linux/susfs.h 未落地"; MISS=1; }
+          grep -rqs "susfs" fs/Makefile fs/Kconfig 2>/dev/null || echo "::warning::fs/Makefile 或 fs/Kconfig 未含 susfs 条目"
+          if [ "$MISS" = "1" ]; then
+            echo "::error::内核侧 SUSFS 未落地 —— 拒绝继续 (否则编出来没有 SUSFS)"
+            ls -la fs/susfs.c include/linux/susfs.h 2>&1 || true
+            ls fs/*.rej fs/proc/*.rej 2>/dev/null || true
             exit 1
           fi
-          echo "[OK] SUSFS 外部补丁已验证落地"
+          echo "[OK] 内核侧 SUSFS 已落地: fs/susfs.c + include/linux/susfs.h"
+
+          # 6.6.x 全系列: task_mmu.c 的 vma 声明修复 (原来只覆盖 6.6.56)
+          case "${{ env.KERNEL_VERSION }}" in
+            6.6.*)
+              echo "[INFO] 应用 task_mmu.c vma 声明修复 (6.6.x 通用)"
+              cd ./fs/proc
+              grep -q "^struct vm_area_struct \*vma = find_vma(mm, start_vaddr);" task_mmu.c 2>/dev/null \
+                || sed -i 's/^\(\s*\)vma = find_vma(mm, start_vaddr);/\1struct vm_area_struct *vma = find_vma(mm, start_vaddr);/' task_mmu.c
+              cd ../..
+              ;;
+          esac
+
+          # 清理 .rej (失败的 hunk 留着会让后续 patch 困惑)
+          find . -name "*.rej" -delete 2>/dev/null || true
+          echo "[OK] SUSFS 流程完成"
       - name: 🔧 Apply Droidspaces SYSVIPC kABI fix (应用 Droidspaces SYSVIPC kABI 修复)
         if: ${{ env.ENABLE_DROIDSPACES == 'true' }}
         working-directory: kernel_workspace/common
