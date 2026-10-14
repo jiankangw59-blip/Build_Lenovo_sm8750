@@ -546,6 +546,19 @@ jobs:
           # 清理 .rej (失败的 hunk 留着会让后续 patch 困惑)
           find . -name "*.rej" -delete 2>/dev/null || true
           echo "[OK] SUSFS 流程完成"
+      - name: 🔧 Fix missing SUSFS sus_map hunk (补上 smaps_rollup 缺失的 hunk)
+        if: ${{ env.ENABLE_SUSFS == 'true' }}
+        run: |
+          cd kernel_workspace/common
+          # 50_add_susfs 补丁在 fs/proc/task_mmu.c 的 Hunk #6 会因上下文不匹配失败:
+          #   把被 sus_map 隐藏的区域从 /proc/pid/smaps_rollup 汇总统计里剔除。
+          # 该 hunk 缺失不影响 SUSFS 主体, 但 smaps_rollup 的数字会对不上。
+          # 这里精确补上 (定位不到会明确报错, 不静默跳过)。
+          python3 "$GITHUB_WORKSPACE/scripts/fix_susfs_hunk.py" .
+          echo "--- 校验 ---"
+          grep -c "SUSFS_IS_INODE_SUS_MAP" fs/proc/task_mmu.c
+          grep -n "SUSFS_IS_INODE_SUS_MAP" fs/proc/task_mmu.c | head -3
+
       - name: 🔧 Apply Droidspaces SYSVIPC kABI fix (应用 Droidspaces SYSVIPC kABI 修复)
         if: ${{ env.ENABLE_DROIDSPACES == 'true' }}
         working-directory: kernel_workspace/common
