@@ -45,7 +45,7 @@ on:
         type: boolean
 
       enable_droidspaces:
-        description: "添加 Droidspaces"
+        description: "添加 Droidspaces（345 槽位，包含 NTSync）"
         required: true
         default: false
         type: boolean
@@ -55,7 +55,7 @@ on:
         required: false
         default: true
         type: boolean
-      
+
       enable_susfs:
         description: "启用SUSFS"
         required: true
@@ -73,7 +73,7 @@ on:
 jobs:
   build:
     name: Build_${{ github.event.inputs.kernel_version }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       KERNEL_VERSION: ${{ github.event.inputs.kernel_version }}
@@ -230,7 +230,7 @@ jobs:
       - name: 🔎 Find public ccache in releases (查找公共缓存)
         id: public-ccache
         if: ${{ steps.ccache-restore.outputs.cache-matched-key == '' }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           PUBLIC_CACHE_REPO: ${{ vars.PUBLIC_CACHE_REPO }}
           PUBLIC_CACHE_TAG: ${{ vars.PUBLIC_CACHE_TAG }}
@@ -449,12 +449,12 @@ jobs:
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/lockdown/lockdown,baseband_guard/ } }' ./common/security/Kconfig
 
       
-      - name: ⚙️ Set ReSukiSU (设置ReSukiSU)
+      - name: ⚙️ Set BakaSU (设置BakaSU)
         run: |
           set -euo pipefail
           cd kernel_workspace
-          echo "正在配置ReSukiSU..."
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/refs/heads/main/kernel/setup.sh" | bash
+          echo "正在配置BakaSU..."
+          curl -fLSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash -s main
           cd ./KernelSU
 
           if [ -f .git/shallow ]; then
@@ -464,20 +464,20 @@ jobs:
           KSU_COMMIT_COUNT="$(git rev-list --count HEAD)"
           KSU_VERSION_LINE="$(grep -E '^KSU_VERSION := \$\(shell expr [0-9]+ \+ \$\(KSU_LOCAL_VERSION\) \+ [0-9]+\)$' kernel/Kbuild || true)"
           if [ -z "$KSU_VERSION_LINE" ]; then
-            echo "::error::无法识别 ReSukiSU kernel/Kbuild 中的版本公式"
+            echo "::error::无法识别 BakaSU kernel/Kbuild 中的版本公式"
             exit 1
           fi
           read -r KSU_BASE KSU_OFFSET <<< "$(sed -E 's/^KSU_VERSION := \$\(shell expr ([0-9]+) \+ \$\(KSU_LOCAL_VERSION\) \+ ([0-9]+)\)$/\1 \2/' <<< "$KSU_VERSION_LINE")"
           KSU_VERSION=$((KSU_BASE + KSU_COMMIT_COUNT + KSU_OFFSET))
 
           if [ "$KSU_VERSION" -lt 35000 ]; then
-            echo "::error::ReSukiSU 版本异常: $KSU_VERSION"
+            echo "::error::BakaSU 版本异常: $KSU_VERSION"
             exit 1
           fi
 
-          echo "ReSukiSU commit: $(git rev-parse --short=8 HEAD)"
-          echo "ReSukiSU commit count: $KSU_COMMIT_COUNT"
-          echo "ReSukiSU expected version code: $KSU_VERSION"
+          echo "BakaSU commit: $(git rev-parse --short=8 HEAD)"
+          echo "BakaSU commit count: $KSU_COMMIT_COUNT"
+          echo "BakaSU expected version code: $KSU_VERSION"
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           echo "KSU_COMMIT_SHA=$(git rev-parse --short=8 HEAD)" >> $GITHUB_ENV
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
@@ -502,20 +502,32 @@ jobs:
               ;;
           esac
 
-      - name: 🔧 Apply Droidspaces SYSVIPC kABI fix (应用 Droidspaces SYSVIPC kABI 修复)
+      - name: 🔧 Clone Droidspaces Patches (克隆 Droidspaces 补丁仓库)
+        if: ${{ env.ENABLE_DROIDSPACES == 'true' }}
+        run: |
+          git clone --depth 1 https://github.com/ravindu644/Droidspaces-OSS.git /tmp/Droidspaces-OSS
+          echo "DROIDSPACES_PATCHES=/tmp/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI" >> $GITHUB_ENV
+
+      - name: 🔧 Apply Droidspaces SYSVIPC kABI fix (集成 Droidspaces 支持)
         if: ${{ env.ENABLE_DROIDSPACES == 'true' }}
         working-directory: kernel_workspace/common
         run: |
-          echo "==> 开始应用 Droidspaces SYSVIPC kABI 修复补丁..."
-          KABI_PATCH="${GITHUB_WORKSPACE}/patch/GKI-6.6-sysvipc_kabi_3_4_5.patch"
-          if [ ! -f "$KABI_PATCH" ]; then
-            echo "::error::未找到 Droidspaces SYSVIPC kABI 补丁: $KABI_PATCH"
+          # Preserve the existing boolean input's 345 kABI slot layout.
+          SLOT_NAME="3_4_5"
+          echo "应用 Droidspaces SYSVIPC kABI 修复补丁 (槽位: 345 / $SLOT_NAME)..."
+
+          PATCH_FILE="$DROIDSPACES_PATCHES/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_${SLOT_NAME}.patch"
+
+          if [ ! -f "$PATCH_FILE" ]; then
+            echo "::error::未找到 Droidspaces SYSVIPC kABI 补丁: $PATCH_FILE"
             exit 1
           fi
-          if ! patch -p1 --forward < "$KABI_PATCH"; then
+
+          if ! patch -p1 --forward < "$PATCH_FILE"; then
             echo "::warning::SYSVIPC kABI 补丁应用失败，可能已应用或上下文不匹配"
           fi
-          echo "==> Droidspaces SYSVIPC kABI 修复完成"
+
+          echo "Droidspaces SYSVIPC kABI 修复完成"
 
       - name: 🔧 Apply ntsync Patch (应用 ntsync 补丁)
         if: ${{ env.ENABLE_NTSYNC == 'true' }}
@@ -541,12 +553,9 @@ jobs:
             fi
           }
 
-          for PATCH_NAME in "ntsync_base.patch" "ntsync_compat_6.6.patch"; do
-            PATCH_PATH="${GITHUB_WORKSPACE}/patch/${PATCH_NAME}"
-            if [ ! -f "$PATCH_PATH" ]; then
-              echo "::error::未找到 ntsync 补丁: $PATCH_PATH"
-              exit 1
-            fi
+          for PATCH_NAME in "ntsync_base.patch" "ntsync_compat_android15-6.6.patch"; do
+            PATCH_PATH="${RUNNER_TEMP}/${PATCH_NAME}"
+            curl -fLSs "https://raw.githubusercontent.com/Goldzxcbug/Droidspaces_Kernel_patch/refs/heads/main/NTsync/${PATCH_NAME}" -o "$PATCH_PATH"
             echo "  应用: $PATCH_NAME"
             dos2unix "$PATCH_PATH"
             apply_patch_strict "$PATCH_PATH"
@@ -598,10 +607,14 @@ jobs:
               fi
             }
 
+            config_defined() {
+              local name="${1#CONFIG_}"
+              grep -RqsE --include='Kconfig*' "^[[:space:]]*(menuconfig|config)[[:space:]]+${name}$" .
+            }
+
             enable_config_if_defined() {
               local cfg="$1"
-              local name="${cfg#CONFIG_}"
-              if grep -RqsE --include='Kconfig*' "^[[:space:]]*(menuconfig|config)[[:space:]]+${name}$" .; then
+              if config_defined "$cfg"; then
                 enable_config "$cfg"
               else
                 echo "  当前内核未定义: $cfg，跳过"
@@ -628,7 +641,7 @@ jobs:
             enable_config CONFIG_PID_NS
             enable_config CONFIG_DEVTMPFS
 
-            # ---- 网络相关配置 (Docker/NAT 模式, 按 Kconfig 实际存在启用) ----
+            # ---- 网络相关配置 (Docker/NAT 模式) ----
             enable_config_if_defined CONFIG_NETFILTER_XT_MATCH_ADDRTYPE
             enable_config_if_defined CONFIG_NETFILTER_XT_TARGET_LOG
             enable_config_if_defined CONFIG_NETFILTER_XT_MATCH_RECENT
@@ -638,6 +651,8 @@ jobs:
             enable_config_if_defined CONFIG_NETFILTER_XT_SET
             enable_config_if_defined CONFIG_NETFILTER_XT_TARGET_REJECT
             enable_config_if_defined CONFIG_IP_NF_TARGET_REJECT
+
+            # ---- 关闭安卓严格网络控制（GKI 6.6 专用，容器内普通用户联网必需） ----
             disable_config CONFIG_ANDROID_PARANOID_NETWORK
 
             echo "==> Droidspaces 内核配置完成"
@@ -681,12 +696,12 @@ jobs:
           else
             echo "未启用SUSFS 跳过SUSFS配置"
           fi
-          
+
           echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
 
           echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
+
           #Remove check_defconfig
           sudo sed -i 's/check_defconfig//' ./common/build.config.gki
 
@@ -788,16 +803,16 @@ jobs:
 
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image 2>&1 | tee build.log
 
-          BUILT_KSU_VERSION="$(grep -oE 'ReSukiSU version code: [0-9]+' build.log | awk '{print $NF}' | tail -n 1 || true)"
+          BUILT_KSU_VERSION="$(grep -oE '(BakaSU|ReSukiSU) version code: [0-9]+' build.log | awk '{print $NF}' | tail -n 1 || true)"
           if [ -z "$BUILT_KSU_VERSION" ]; then
-            echo "::error::构建日志中未找到 ReSukiSU version code"
+            echo "::error::构建日志中未找到 BakaSU/ReSukiSU version code"
             exit 1
           fi
           if [ "$BUILT_KSU_VERSION" != "${KSUVER}" ]; then
-            echo "::error::ReSukiSU 版本不一致: 产物名=$KSUVER, 内核实际=$BUILT_KSU_VERSION"
+            echo "::error::BakaSU 版本不一致: 产物名=$KSUVER, 内核实际=$BUILT_KSU_VERSION"
             exit 1
           fi
-          echo "ReSukiSU 版本校验通过: $BUILT_KSU_VERSION"
+          echo "BakaSU 版本校验通过: $BUILT_KSU_VERSION"
 
           if [ "${{ env.ENABLE_NTSYNC }}" = "true" ]; then
             test -s out/drivers/misc/ntsync.o
@@ -829,7 +844,7 @@ jobs:
 
       - name: 🧹 Clean old ccache (清理旧缓存)
         if: env.BUILD_TIME > 480
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           PREFIX: ccache-${{ env.KERNEL_VERSION }}${{ env.CACHE_VARIANT }}-
           CURRENT_KEY: ccache-${{ env.KERNEL_VERSION }}${{ env.CACHE_VARIANT }}-${{ github.run_id }}
@@ -941,18 +956,18 @@ jobs:
         if: ${{ env.ENABLE_SIGNED == 'true' }}
         uses: actions/upload-artifact@v5
         with:
-         name: Boot_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_ReSukiSU_AOSP_Signed
+         name: Boot_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_BakaSU_AOSP_Signed
          path: kernel_workspace/boot_avb_tool/AOSP-Testkey-BootSigner-main/boot.img
 
   upload_rekernel:
     name: Upload Re-Kernel Module
     if: ${{ github.event.inputs.enable_ReKernel == 'true' }}
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: 🔎 Find Re-Kernel module zip (查找Re-Kernel最新模块并下载)
         id: download-rekernel
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           KERNEL_MAJOR: "6.6"
         with:
