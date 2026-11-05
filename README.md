@@ -46,7 +46,7 @@
 
 | 工作流 | 说明 | 适用场景 |
 |--------|------|----------|
-| [build.yml](.github/workflows/build.yml) | 完整内核编译（含 KSU/SUSFS 等） | 集成KSU获取ROOT |
+| [Build_Lenovo_sm8750](.github/workflows/Build_Lenovo_sm8750.yml) | 完整内核编译（含 KSU/SUSFS 等） | 集成KSU获取ROOT |
 | [clean-caches.yml](.github/workflows/clean-caches.yml) | 清理 ccache 缓存 | 缓存异常或需要重新编译时 |
 | [clear_workflows.yml](.github/workflows/clear_workflows.yml) | 清理工作流运行记录 | 保证Action界面整洁
 
@@ -62,6 +62,16 @@
 - **KSU Type**: 选择 KernelSU 类型 (ReSukiSU / SukiSU-Ultra)
 - **Enable SUSFS**: 是否启用 SUSFS 支持
 - **Custom Flags**: 添加额外的编译标志
+
+#### 选择 ZRAM 补丁
+
+运行 `Build_Lenovo_sm8750` 时，可在 `zram_patch` 下拉框中选择：
+
+- `LZ4`：LZ4 1.10.0 与 ZSTD 1.5.7 补丁，默认值，保持原工作流行为。
+- `LZ4KD`：编译内置 ZRAM、LZ4K/LZ4KD/LZ4K Oplus 支持，并将内核 ZRAM 默认压缩器设为 LZ4KD；与上述 LZ4/ZSTD 升级补丁互斥。
+- `DISABLE`：不应用这两组额外补丁，使用所选内核源码原有的压缩实现。
+
+运行摘要会记录本次选择。LZ4KD 使用[固定版本的一体补丁](https://github.com/luyancib-org/kernel_patches/blob/1434ad8799fe267aeae7d91fb667473d80c8f73d/other/lz4kd.patch)，校验 SHA256，并修正拒绝重复加载内置模块时的 `-EPERM` 返回值。Android 或其他模块仍可能在运行时指定不同的 ZRAM 压缩器。
 
 #### 使用公共缓存
 

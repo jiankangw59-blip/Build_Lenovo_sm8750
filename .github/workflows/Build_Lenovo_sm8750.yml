@@ -15,6 +15,16 @@ on:
           - '6.6.102'
           - '6.6.118'
         default: '6.6.89'
+
+      zram_patch:
+        description: "ZRAM 补丁：LZ4=1.10.0 + ZSTD=1.5.7；LZ4KD；DISABLE=不打补丁"
+        required: true
+        type: choice
+        options:
+          - 'LZ4'
+          - 'LZ4KD'
+          - 'DISABLE'
+        default: 'LZ4'
         
       custom_kernel_suffix:
         description: "✏️ 自定义内核名称 (留空默认官核名称)"
@@ -77,6 +87,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       KERNEL_VERSION: ${{ github.event.inputs.kernel_version }}
+      ZRAM_PATCH: ${{ github.event.inputs.zram_patch || 'LZ4' }}
       CUSTOM_KERNEL_SUFFIX: ${{ github.event.inputs.custom_kernel_suffix }}
       CUSTOM_KERNEL_TIME: ${{ github.event.inputs.custom_kernel_time }}
       ENABLE_REKERNEL: ${{ github.event.inputs.enable_ReKernel }}
@@ -93,6 +104,17 @@ jobs:
           fetch-depth: 0
       - name: ⚙️ Set Kernel version config(设置对应内核版本配置文件)
         run: |
+          case "$ZRAM_PATCH" in
+            LZ4|LZ4KD|DISABLE)
+              echo "ZRAM patch selection: $ZRAM_PATCH"
+              ;;
+            *)
+              echo "::error::Unsupported ZRAM patch selection: $ZRAM_PATCH"
+              exit 1
+              ;;
+          esac
+          printf '### ZRAM patches\n\nSelected patch: `%s`\n' "$ZRAM_PATCH" >> "$GITHUB_STEP_SUMMARY"
+
           echo "KERNEL_TIME=${{ env.CUSTOM_KERNEL_TIME }}" >> $GITHUB_ENV
           case "${{ env.KERNEL_VERSION }}" in
             "6.6.56")
@@ -428,6 +450,7 @@ jobs:
           echo "✓ ADIOS I/O 调度器支持配置完成"
           
       - name: ⚙️ apply lz4 lz4 1.10.0 & zstd 1.5.7 Patch (应用lz4 1.10.0 & zstd 1.5.7补丁)
+        if: ${{ env.ZRAM_PATCH == 'LZ4' }}
         run: |
           echo "正在添加lz4 1.10.0 & zstd 1.5.7补丁…"
           cd kernel_workspace
@@ -438,6 +461,38 @@ jobs:
           cd ./common
           git apply -p1 < 001-lz4.patch || true
           patch -p1 < 002-zstd.patch || true
+
+      - name: 🔧 Apply LZ4KD ZRAM patches (添加 LZ4KD 压缩支持)
+        if: ${{ env.ZRAM_PATCH == 'LZ4KD' }}
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          # Same all-in-one patch used by op_ace6_kbuild's --zram LZ4KD.
+          PATCH_FILE="${RUNNER_TEMP}/lz4kd.patch"
+          curl --fail --location --retry 3 \
+            "https://raw.githubusercontent.com/luyancib-org/kernel_patches/1434ad8799fe267aeae7d91fb667473d80c8f73d/other/lz4kd.patch" \
+            --output "$PATCH_FILE"
+          printf '%s  %s\n' \
+            '427dc709ed7f5923aa6346909c9ede5b9215a6cafa1c52d8475ccd7531ba2bde' \
+            "$PATCH_FILE" | sha256sum --check --status
+          patch --dry-run --batch --forward --fuzz=0 -p1 < "$PATCH_FILE"
+          patch --batch --forward --fuzz=0 -p1 < "$PATCH_FILE"
+
+          # Keep -EPERM when the upstream patch rejects a duplicate built-in module.
+          ERRNO_FIX="${GITHUB_WORKSPACE}/patch/lz4kd-module-blacklist-errno.patch"
+          patch --dry-run --batch --forward --fuzz=0 -p1 < "$ERRNO_FIX"
+          patch --batch --forward --fuzz=0 -p1 < "$ERRNO_FIX"
+
+          DEFCONFIG="arch/arm64/configs/gki_defconfig"
+          for compressor in LZO LZORLE LZ4 LZ4HC LZ4K LZ4K_OPLUS DEFLATE 842 ZSTD; do
+            scripts/config --file "$DEFCONFIG" --disable "ZRAM_DEF_COMP_${compressor}"
+          done
+          scripts/config --file "$DEFCONFIG" \
+            --enable ZRAM --enable ZSMALLOC \
+            --enable CRYPTO_LZ4K --enable CRYPTO_LZ4KD \
+            --enable CRYPTO_LZ4K_OPLUS --enable CRYPTO_DEFLATE \
+            --enable ZRAM_DEF_COMP_LZ4KD
+          echo "LZ4KD patch and built-in ZRAM configuration applied."
           
       - name: 🛠 Set Baseband-guard (配置BBG基带守护)
         if: ${{ env.ENABLE_BBG == 'true' }}
@@ -792,6 +847,16 @@ jobs:
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
+
+          if [ "$ZRAM_PATCH" = 'LZ4KD' ]; then
+            for symbol in ZRAM ZSMALLOC CRYPTO_LZ4K CRYPTO_LZ4KD CRYPTO_LZ4K_OPLUS CRYPTO_DEFLATE ZRAM_DEF_COMP_LZ4KD; do
+              if ! grep -qx "CONFIG_${symbol}=y" out/.config; then
+                echo "::error::LZ4KD configuration did not resolve to CONFIG_${symbol}=y"
+                exit 1
+              fi
+            done
+            grep -qx 'CONFIG_ZRAM_DEF_COMP="lz4kd"' out/.config
+          fi
 
           if [ "${{ env.ENABLE_NTSYNC }}" = "true" ]; then
             if ! grep -qx 'CONFIG_NTSYNC=y' out/.config; then

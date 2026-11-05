@@ -1,0 +1,11 @@
+diff --git a/kernel/module/main.c b/kernel/module/main.c
+--- a/kernel/module/main.c
++++ b/kernel/module/main.c
+@@ -2930,6 +2930,7 @@ static int load_module(struct load_info *info, const char __user *uargs,
+     if (blacklisted(info->name)) {
+ 		pr_err("Module %s is blacklisted\n", info->name);
++		err = -EPERM;
+ 		goto free_copy;
+ 	}
+ 
+ 	/* Figure out module layout, and allocate all the memory. */
