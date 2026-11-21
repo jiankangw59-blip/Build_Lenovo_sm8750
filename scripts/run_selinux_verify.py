@@ -72,13 +72,24 @@ def main():
             raise RuntimeError(f"AVC delta hit rate is {rate:.2%}, requires >95%")
 
     def probes(label):
-        for name, suffix in (("root", ""), ("app-zygote", f" {args.app_uid} u:r:app_zygote:s0")):
+        for name, suffix in (("root", ""), ("app-zygote", f" {args.app_uid} u:r:app_zygote:s0"),
+                             ("secondary-user", f" {100000 + args.app_uid} u:r:app_zygote:s0"),
+                             ("isolated-uid-carrier", " 99000 u:r:app_zygote:s0")):
             output = root(remote + suffix + "; probe_rc=$?; echo PROBE_EXIT=$probe_rc")
             save(label + "-" + name + ".txt", output)
             passed = "[FAIL]" not in output and "PROBE_EXIT=0" in output
-            results["checks"][label + "_" + name] = {"passed": passed}
+            status = re.search(r"status mmap\(off=0\): ver=(\d+) seq=(\d+) enf=(\d+) pload=(\d+) deny=(\d+)", output)
+            check = {"passed": passed}
+            if status:
+                check.update({"status_sequence": int(status[2]), "policyload": int(status[4]),
+                              "deny_unknown": int(status[5])})
+            results["checks"][label + "_" + name] = check
             if not passed:
                 raise RuntimeError(f"{label} {name} probe failed")
+        real_deny = results["checks"][label + "_root"]["deny_unknown"]
+        for name in ("app-zygote", "secondary-user", "isolated-uid-carrier"):
+            if results["checks"][label + "_" + name]["deny_unknown"] != real_deny:
+                raise RuntimeError("Hidden status deny_unknown differs from the real policy")
 
     try:
         identity = root("getprop ro.product.model; getprop ro.boot.slot_suffix; uname -a; cat /proc/sys/kernel/random/boot_id")
@@ -103,6 +114,11 @@ def main():
         mutation = root("/data/adb/ksu/bin/ksud sepolicy patch 'allow untrusted_app untrusted_app process getattr'")
         save("sepolicy-patch.txt", mutation)
         probes("post-policy")
+        initial = results["checks"]["baseline_root"]
+        updated = results["checks"]["post-policy_root"]
+        if (updated["policyload"] <= initial["policyload"] or
+                updated["status_sequence"] <= initial["status_sequence"]):
+            raise RuntimeError("Real policy generation or status sequence did not advance after the policy update")
         cache_check("post-policy")
         recent = []
         for line in root("dmesg").splitlines():

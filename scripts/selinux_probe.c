@@ -17,7 +17,7 @@ struct selinux_status_t {
     uint32_t deny_unknown;
 };
 
-static int test_status_and_abi(uint32_t *out_policyload) {
+static int test_status_and_abi(uint32_t *out_policyload, uint32_t *out_sequence) {
     long pg = sysconf(_SC_PAGESIZE);
     int fd = open("/sys/fs/selinux/status", O_RDONLY);
     if (fd < 0) {
@@ -117,10 +117,11 @@ static int test_status_and_abi(uint32_t *out_policyload) {
     munmap(base, pg);
     close(fd);
     *out_policyload = st_mmap.policyload;
+    *out_sequence = st_mmap.sequence;
     return failed ? -2 : 0;
 }
 
-static int test_access_probe(uint32_t status_pload) {
+static int test_access_probe(uint32_t status_pload, uint32_t status_sequence) {
     int fd = open("/sys/fs/selinux/access", O_RDWR);
     if (fd < 0) {
         printf("[WARN] open /sys/fs/selinux/access failed: %s (check SELinux context)\n", strerror(errno));
@@ -153,18 +154,22 @@ static int test_access_probe(uint32_t status_pload) {
         return -1;
     }
 
-    if (seqno != status_pload) {
+    int native_initial = status_sequence == 0 && status_pload == 0 && seqno == 1;
+    if (seqno != status_pload && !native_initial) {
         printf("[FAIL] SEQNO SPLIT DETECTED! status.policyload=%u != access.seqno=%u\n",
                status_pload, seqno);
         return -1;
     }
 
-    if (getuid() >= 10000 && seqno != 1) {
-        printf("[FAIL] app seqno matches status (%u), expected 1\n", seqno);
+    if (getuid() % 100000 >= 10000 && !native_initial) {
+        printf("[FAIL] expected native 6.6 hidden status (sequence=0, policyload=0), access.seqno=1\n");
         return -1;
     }
 
-    printf("[PASS] status.policyload == access.seqno == %u\n", seqno);
+    if (native_initial)
+        printf("[PASS] native 6.6 status sentinel (sequence=0, policyload=0), access.seqno=1\n");
+    else
+        printf("[PASS] real status.policyload == access.seqno == %u\n", seqno);
     return 0;
 }
 
@@ -172,7 +177,7 @@ int main(int argc, char **argv) {
     if (argc == 3) {
         char *end = NULL;
         unsigned long uid = strtoul(argv[1], &end, 10);
-        if (!end || *end || uid < 10000 || uid > 19999 ||
+        if (!end || *end || uid > UINT32_MAX || uid % 100000 < 10000 ||
             setgroups(0, NULL) || setgid(uid) || setuid(uid)) {
             fprintf(stderr, "[FAIL] invalid app UID or privilege drop: %s\n", strerror(errno));
             return 2;
@@ -202,11 +207,11 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    uint32_t pload = 0;
-    int st_rc = test_status_and_abi(&pload);
+    uint32_t pload = 0, sequence = 0;
+    int st_rc = test_status_and_abi(&pload, &sequence);
     int acc_rc = 0;
     if (st_rc != -1) {
-        acc_rc = test_access_probe(pload);
+        acc_rc = test_access_probe(pload, sequence);
     }
     return (st_rc != 0 || acc_rc < 0) ? 1 : 0;
 }

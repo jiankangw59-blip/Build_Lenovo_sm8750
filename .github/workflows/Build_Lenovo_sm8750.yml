@@ -895,7 +895,8 @@ jobs:
             make -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
               CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \
               KCFLAGS+=-O2 KCFLAGS+=-Wno-error \
-              security/selinux/selinuxfs.i drivers/kernelsu/selinux/rules.i \
+              security/selinux/selinuxfs.i security/selinux/status.i security/selinux/ss/services.i \
+              drivers/kernelsu/selinux/rules.i \
               drivers/kernelsu/feature/selinux_hide.i
             python3 "$WORKDIR/.github/scripts/selinux_seqno.py" verify \
               --kernel . --report ../preflash --objdump "$CLANG_DIR/llvm-objdump"

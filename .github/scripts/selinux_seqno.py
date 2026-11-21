@@ -42,7 +42,8 @@ def audit_hot_path(kernel):
     require("policy->latest_granting" in body, "avd_init lost the real policy generation")
     require(re.search(r"avd->seqno\s*=\s*0\s*;", body), "avd_init lost its early boot generation")
     require(not re.search(r"avd->seqno\s*=\s*1\s*;", body), "Global avd_init hardcodes generation 1")
-    return hashlib.sha256(source.encode()).hexdigest()
+    hot_path = body + function(source, "security_compute_av")
+    return hashlib.sha256(hot_path.encode()).hexdigest()
 
 
 def apply(kernel, bakasu, report):
@@ -53,6 +54,54 @@ def apply(kernel, bakasu, report):
     wrapper = function(fs, "handle_sel_write_access")
     require("current_uid().val >= 10000" in wrapper and "ksu_selinux_hide_running" in wrapper,
             "SUSFS access dispatch predicate changed")
+    predicate = """
+/* Keep status and access on the same view, including secondary users. */
+static noinline bool susfs_hide_user_queries(void)
+{
+\tuid_t appid = current_uid().val % 100000;
+
+\tif (appid < 10000 || !READ_ONCE(ksu_selinux_hide_running))
+\t\treturn false;
+\tif (!READ_ONCE(fake_status)) {
+\t\tif (!selinux_kernel_status_page())
+\t\t\treturn false;
+\t\tinitialize_fake_status();
+\t}
+\treturn READ_ONCE(fake_status) != NULL;
+}
+"""
+    declaration = "extern void initialize_fake_status(void);"
+    require(fs.count(declaration) == 1, "SUSFS fake status declaration changed")
+    fs = fs.replace(declaration, declaration + "\n" + predicate, 1)
+    fs = replace_function(fs, "handle_sel_write_access", """static ssize_t handle_sel_write_access(struct file *file, char *buf, size_t size)
+{
+\tif (susfs_hide_user_queries())
+\t\treturn susfs_sel_write_access(file, buf, size);
+\treturn sel_write_access(file, buf, size);
+}""")
+    fs = replace_function(fs, "sel_open_handle_status", """static int sel_open_handle_status(struct inode *inode, struct file *filp)
+{
+\tstruct page *status = selinux_kernel_status_page();
+
+#ifdef CONFIG_KSU_SUSFS
+\tif (susfs_hide_user_queries()) {
+\t\tfilp->private_data = READ_ONCE(fake_status);
+\t\treturn 0;
+\t}
+#endif
+\tif (!status)
+\t\treturn -ENOMEM;
+\tfilp->private_data = status;
+\treturn 0;
+}""")
+    mmap = function(fs, "sel_mmap_handle_status")
+    require(all(term in mmap for term in ("vma->vm_pgoff", "PAGE_SIZE", "VM_WRITE", "VM_MAYWRITE")),
+            "Status mmap lost upstream ABI guards")
+    require("vm_flags_clear(vma, VM_MAYWRITE)" in mmap, "Status mmap no longer clears VM_MAYWRITE")
+    require(re.search(r"if\s*\(vma->vm_pgoff > 0 \|\| size != PAGE_SIZE\)\s*return -EIO;", mmap),
+            "Status mmap offset/size rejection changed")
+    require(re.search(r"if\s*\(vma->vm_flags & VM_WRITE\)\s*return -EPERM;", mmap),
+            "Status mmap writable rejection changed")
     body = function(fs, "susfs_sel_write_access")
     require(body.count("susfs_security_compute_av_user(ssid, tsid, tclass, &avd);") == 1,
             "Unexpected SUSFS compute_av signature")
@@ -73,57 +122,126 @@ static noinline u32 susfs_access_seqno(u32 seqno)
     rules_path = bakasu / "kernel/selinux/rules.c"
     rules = rules_path.read_text()
     cache = function(rules, "reset_avc_cache")
-    # This fork uses reset(0) and preserves latest_granting. Keep status at the
-    # same generation under SUSFS, including later ksud sepolicy patches.
+    # Port generation tracking as one unit: publication, cache and notification.
     require("avc_ss_reset(0);" in cache and "avc_ss_reset(avc, 0);" in cache,
             "BakaSU AVC generation implementation changed; inspect before applying")
     require(not re.search(r"\b\w+->latest_granting\s*(?:\+\+|=)", rules),
             "BakaSU now mutates policy generation; compatibility strategy needs review")
-    calls = re.findall(r"^([ \t]*selinux_status_update_policyload\([^\n]+;)$", cache, re.M)
-    require(len(calls) == 2, "Expected both version branches of the status update")
-    for call in calls:
-        cache = cache.replace(call, "#ifndef CONFIG_KSU_SUSFS\n" + call + "\n#endif", 1)
+    cache = cache.replace("reset_avc_cache()", "reset_avc_cache(u32 seqno)")
+    cache = cache.replace("{", "{\n    /* Allocate before notification so late readers observe this generation. */\n"
+                          "    selinux_kernel_status_page();", 1)
+    cache = cache.replace("avc_ss_reset(0)", "avc_ss_reset(seqno)")
+    cache = cache.replace("avc_ss_reset(avc, 0)", "avc_ss_reset(avc, seqno)")
+    cache = cache.replace("selnl_notify_policyload(0)", "selnl_notify_policyload(seqno)")
+    cache = cache.replace("selinux_status_update_policyload(0)", "selinux_status_update_policyload(seqno)")
+    cache = cache.replace("selinux_status_update_policyload(&selinux_state, 0)",
+                          "selinux_status_update_policyload(&selinux_state, seqno)")
     rules = replace_function(rules, "reset_avc_cache", cache)
+    for name in ("apply_kernelsu_rules", "handle_sepolicy"):
+        body = function(rules, name)
+        require("mutex_lock(&selinux_state.policy_mutex)" in body,
+                f"{name} no longer serializes policy publication")
+        publish = "    rcu_assign_pointer(selinux_state.policy, pol);"
+        require(body.count(publish) == 1 and body.count("reset_avc_cache();") == 2,
+                f"{name} policy publication layout changed")
+        body = body.replace(publish, """    u32 seqno = old_pol->latest_granting + 1;
+    pol->latest_granting = seqno;
+""" + publish, 1)
+        body = body.replace("reset_avc_cache();", "reset_avc_cache(seqno);", 1)
+        body = body.replace("reset_avc_cache();", "reset_avc_cache(0);", 1)
+        rules = replace_function(rules, name, body)
+
+    services_path = kernel / "security/selinux/ss/services.c"
+    services = services_path.read_text()
+    for name in ("selinux_policy_commit", "security_set_bools"):
+        body = function(services, name)
+        guards = re.findall(r"^#ifdef CONFIG_KSU_SUSFS\n.*?^#endif[^\n]*\n", body, re.M | re.S)
+        require(len(guards) == 2 and "susfs_is_current_ksu_domain" in guards[0]
+                and "bypass_orig:" in guards[1], f"{name} SUSFS generation bypass changed")
+        for guard in guards:
+            body = body.replace(guard, "", 1)
+        services = replace_function(services, name, body)
+    status_path = kernel / "security/selinux/status.c"
+    status = status_path.read_text()
+    for name in ("selinux_status_update_policyload", "selinux_status_update_setenforce"):
+        body = function(status, name)
+        guards = re.findall(r"^#ifdef CONFIG_KSU_SUSFS\n.*?^#endif[^\n]*\n", body, re.M | re.S)
+        require(len(guards) == 1 and "susfs_is_current_ksu_domain" in guards[0],
+                f"{name} notification bypass changed")
+        status = replace_function(status, name, body.replace(guards[0], "", 1))
 
     hide_path = bakasu / "kernel/feature/selinux_hide.c"
     hide = hide_path.read_text()
     init = function(hide, "initialize_fake_status")
     require(init.count("fake_status = new_page;") == 1, "Fake status initialization changed")
     init = init.replace("    fake_status = new_page;", """#ifdef CONFIG_KSU_SUSFS
-    /* The built-in SUSFS view represents the initial loaded policy. */
-    new_status->policyload = 1;
+    /* Pre-6.10 status uses zero as the initial policyload sentinel. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
+    new_status->version = SELINUX_KERNEL_STATUS_VERSION;
+    new_status->sequence = 0;
+    new_status->policyload = 0;
+#endif
 #endif
     fake_status = new_page;""")
     hide = replace_function(hide, "initialize_fake_status", init)
     fs_path.write_text(fs)
     rules_path.write_text(rules)
     hide_path.write_text(hide)
+    services_path.write_text(services)
+    status_path.write_text(status)
     require(audit_hot_path(kernel) == hot_path_sha, "Kernel hot path changed")
     report.mkdir(parents=True, exist_ok=True)
     (report / "selinux-source.json").write_text(json.dumps({
-        "strategy": "SUSFS generation preservation and synchronized app view",
-        "services_sha256": hot_path_sha,
+        "strategy": "Real generation tracking with a synchronized independent app view",
+        "hot_path_sha256": hot_path_sha,
+        "services_sha256": hashlib.sha256(services_path.read_bytes()).hexdigest(),
         "access_function": "susfs_sel_write_access",
         "files": {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
-                  for p in (fs_path, rules_path, hide_path)},
+                  for p in (fs_path, rules_path, hide_path, services_path, status_path)},
     }, indent=2) + "\n")
     print("SELinux source checks passed; avd_init preserves policy generation and early boot zero")
 
 
 def verify(kernel, report, objdump):
     original = json.loads((report / "selinux-source.json").read_text())
-    require(audit_hot_path(kernel) == original["services_sha256"], "A later patch changed services.c")
+    require(audit_hot_path(kernel) == original["hot_path_sha256"], "A later patch changed the kernel AVC hot path")
+    services_path = kernel / "security/selinux/ss/services.c"
+    require(hashlib.sha256(services_path.read_bytes()).hexdigest() == original["services_sha256"],
+            "A later patch changed services.c")
     config = (kernel / "out/.config").read_text()
     require("CONFIG_KSU_SUSFS=y\n" in config, "SUSFS did not resolve to built-in")
     fs = (kernel / "out/security/selinux/selinuxfs.i").read_text()
     require("susfs_access_seqno(avd.seqno)" in function(fs, "susfs_sel_write_access"),
             "Preprocessor dropped the access fix")
+    access = function(fs, "susfs_sel_write_access")
+    require(access.index("susfs_security_compute_av_user(") < access.index("susfs_access_seqno(")
+            < access.index("scnprintf("), "Access generation clamp does not cover the tclass=0 return path")
+    for name in ("sel_open_handle_status", "handle_sel_write_access"):
+        require("susfs_hide_user_queries()" in function(fs, name), f"{name} uses a different hide predicate")
     rules = (kernel / "out/drivers/kernelsu/selinux/rules.i").read_text()
-    require("selinux_status_update_policyload(" not in function(rules, "reset_avc_cache"),
-            "SUSFS still resets status.policyload to zero")
+    cache = function(rules, "reset_avc_cache")
+    for call in ("avc_ss_reset(seqno)", "selnl_notify_policyload(seqno)", "selinux_status_update_policyload(seqno)"):
+        require(call in cache, f"Real generation notification is missing: {call}")
+    for name in ("apply_kernelsu_rules", "handle_sepolicy"):
+        body = function(rules, name)
+        require("old_pol->latest_granting + 1" in body and "reset_avc_cache(seqno)" in body,
+                f"{name} does not publish and notify the same generation")
+    status = (kernel / "out/security/selinux/status.i").read_text()
+    require("selinux_kernel_status_page();" in cache,
+            "Policy notification can occur before the real status page exists")
+    for name in ("selinux_status_update_policyload", "selinux_status_update_setenforce"):
+        body = function(status, name)
+        require(body.count("status->sequence++") == 2 and "susfs_is_current_ksu_domain" not in body,
+                f"{name} lost real status sequence notifications")
+    services = (kernel / "out/security/selinux/ss/services.i").read_text()
+    for name in ("selinux_policy_commit", "security_set_bools"):
+        body = function(services, name)
+        require("bypass_orig" not in body and "oldpolicy->latest_granting + 1" in body,
+                f"{name} still bypasses generation tracking")
     hide = (kernel / "out/drivers/kernelsu/feature/selinux_hide.i").read_text()
-    require("new_status->policyload = 1;" in function(hide, "initialize_fake_status"),
-            "Preprocessor dropped fake status generation normalization")
+    require(re.search(r"new_status->sequence = 0;\s*new_status->policyload = 0;\s*fake_status = new_page;",
+                      function(hide, "initialize_fake_status")),
+            "Preprocessor dropped the native 6.6 fake status sentinel")
     obj = kernel / "out/security/selinux/selinuxfs.o"
     output = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=susfs_access_seqno", str(obj)], text=True)
     require("<susfs_access_seqno>:" in output, "Compatibility function is absent from object code")
@@ -134,7 +252,14 @@ def verify(kernel, report, objdump):
                        and re.search(r"\b(csel|csinc|b\.[a-z]+)\b", output))
     require(boolean_clamp or threshold_clamp, "Object code lacks the generation clamp")
     (report / "susfs_access_seqno.disasm").write_text(output)
-    for relative in ("security/selinux/selinuxfs.i", "drivers/kernelsu/selinux/rules.i",
+    for name in ("sel_open_handle_status", "handle_sel_write_access"):
+        calls = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=" + name, str(obj)], text=True)
+        require("susfs_hide_user_queries" in calls, f"{name} lost the shared predicate call in object code")
+        (report / (name + ".disasm")).write_text(calls)
+    access_calls = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=handle_sel_write_access,susfs_sel_write_access", str(obj)], text=True)
+    require("susfs_access_seqno" in access_calls, "Compiled access path lost the generation clamp call")
+    (report / "access-calls.disasm").write_text(access_calls)
+    for relative in ("security/selinux/selinuxfs.i", "security/selinux/status.i", "security/selinux/ss/services.i", "drivers/kernelsu/selinux/rules.i",
                      "drivers/kernelsu/feature/selinux_hide.i"):
         (report / Path(relative).name).write_bytes((kernel / "out" / relative).read_bytes())
     print(output)
