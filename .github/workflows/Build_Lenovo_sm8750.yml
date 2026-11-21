@@ -557,6 +557,18 @@ jobs:
               ;;
           esac
 
+      - name: Fix BakaSU and SUSFS SELinux generation consistency
+        if: ${{ env.ENABLE_SUSFS == 'true' }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/selinux_seqno.py apply \
+            --kernel kernel_workspace/common \
+            --bakasu kernel_workspace/KernelSU \
+            --report kernel_workspace/preflash
+          git -C kernel_workspace/KernelSU rev-parse HEAD > kernel_workspace/preflash/bakasu-commit.txt
+          git -C kernel_workspace/susfs4ksu rev-parse HEAD > kernel_workspace/preflash/susfs-commit.txt
+          git rev-parse HEAD > kernel_workspace/preflash/workflow-commit.txt
+
       - name: 🔧 Clone Droidspaces Patches (克隆 Droidspaces 补丁仓库)
         if: ${{ env.ENABLE_DROIDSPACES == 'true' }}
         run: |
@@ -879,6 +891,16 @@ jobs:
           fi
           echo "BakaSU 版本校验通过: $BUILT_KSU_VERSION"
 
+          if [ "$ENABLE_SUSFS" = 'true' ]; then
+            make -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+              CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \
+              KCFLAGS+=-O2 KCFLAGS+=-Wno-error \
+              security/selinux/selinuxfs.i drivers/kernelsu/selinux/rules.i \
+              drivers/kernelsu/feature/selinux_hide.i
+            python3 "$WORKDIR/.github/scripts/selinux_seqno.py" verify \
+              --kernel . --report ../preflash --objdump "$CLANG_DIR/llvm-objdump"
+          fi
+
           if [ "${{ env.ENABLE_NTSYNC }}" = "true" ]; then
             test -s out/drivers/misc/ntsync.o
           fi
@@ -1003,6 +1025,8 @@ jobs:
       - name: 📦 Sign boot using AOSP test key (使用AOSP测试密钥签名boot)
         if: ${{ env.ENABLE_SIGNED == 'true' }}
         run: |
+          set -euo pipefail
+          mkdir -p kernel_workspace/preflash
           cd kernel_workspace
           aria2c -s16 -x16 -k1M "https://github.com/showdo/AOSP-Testkey-BootSigner/archive/refs/heads/main.tar.gz" -o boot_avb_tool.tar.gz && \
           mkdir -p boot_avb_tool && \
@@ -1010,12 +1034,33 @@ jobs:
           rm -f boot_avb_tool.tar.gz && \
           cp ./common/out/arch/arm64/boot/Image ./boot_avb_tool/AOSP-Testkey-BootSigner-main/kernel
           cd boot_avb_tool/AOSP-Testkey-BootSigner-main && \
-          curl -L -o boot.img https://github.com/showdo/AOSP-Testkey-BootSigner/releases/download/${{ env.releases }}/boot.img
+          curl -fL -o boot.img https://github.com/showdo/AOSP-Testkey-BootSigner/releases/download/${{ env.releases }}/boot.img
+          cp boot.img ../../boot-template.img
           chmod +x ./tools/magiskboot
           ./tools/magiskboot repack boot.img
           rm -f ./boot.img kernel
           mv ./new-boot.img ./boot.img
           python3 rebuild_avb.py --chained-mode
+
+      - name: Verify signed boot before 9008 flashing
+        if: ${{ env.ENABLE_SIGNED == 'true' }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_boot.py \
+            --boot kernel_workspace/boot_avb_tool/AOSP-Testkey-BootSigner-main/boot.img \
+            --template kernel_workspace/boot-template.img \
+            --kernel kernel_workspace/common/out/arch/arm64/boot/Image \
+            --signer kernel_workspace/boot_avb_tool/AOSP-Testkey-BootSigner-main \
+            --report kernel_workspace/preflash
+          cp kernel_workspace/common/out/include/config/kernel.release kernel_workspace/preflash/kernel.release
+
+      - name: Upload pre-flash verification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: preflash-verification_${{ env.KERNEL_VERSION }}
+          path: kernel_workspace/preflash/
+          if-no-files-found: warn
 
       - name: 📤 Upload Signed boot (上传已签名的 boot)
         if: ${{ env.ENABLE_SIGNED == 'true' }}
