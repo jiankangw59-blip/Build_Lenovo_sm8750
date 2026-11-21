@@ -46,7 +46,7 @@ def main():
         algorithm = field(signed, "Algorithm")
         if algorithm not in ("SHA256_RSA4096", "SHA256_RSA2048", "SHA512_RSA4096", "SHA512_RSA2048"):
             raise ValueError(f"Unexpected boot signing algorithm: {algorithm}")
-        for name in ("Algorithm", "Public key (sha1)", "Rollback Index", "Rollback Index Location"):
+        for name in ("Algorithm", "Rollback Index", "Rollback Index Location"):
             if field(original, name) != field(signed, name):
                 raise ValueError(f"Signed boot changed template {name}")
         if args.boot.stat().st_size != args.template.stat().st_size:

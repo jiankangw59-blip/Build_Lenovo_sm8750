@@ -53,6 +53,10 @@ static int test_status_and_abi(uint32_t *out_policyload) {
            st_mmap.policyload, st_mmap.deny_unknown);
 
     int failed = 0;
+    if (st_mmap.version != 1 || st_mmap.enforcing != 1 || (st_mmap.sequence & 1)) {
+        printf("[FAIL] status version, enforcing state or sequence is invalid\n");
+        failed = 1;
+    }
     if (memcmp(&st_read, &st_mmap, sizeof(st_read)) != 0) {
         printf("[FAIL] read() vs mmap() mismatch!\n");
         failed = 1;
