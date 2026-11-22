@@ -565,6 +565,8 @@ jobs:
           cp kernel_workspace/common/security/selinux/selinuxfs.c kernel_workspace/preflash/selinuxfs-input.c
           cp kernel_workspace/common/security/selinux/ss/services.c kernel_workspace/preflash/services-input.c
           cp kernel_workspace/common/security/selinux/status.c kernel_workspace/preflash/status-input.c
+          cp kernel_workspace/common/security/selinux/hooks.c kernel_workspace/preflash/hooks-input.c
+          cp kernel_workspace/common/security/selinux/include/security.h kernel_workspace/preflash/security-input.h
           cp kernel_workspace/KernelSU/kernel/selinux/rules.c kernel_workspace/preflash/rules-input.c
           cp kernel_workspace/KernelSU/kernel/feature/selinux_hide.c kernel_workspace/preflash/selinux_hide-input.c
           cp kernel_workspace/common/fs/susfs.c kernel_workspace/preflash/susfs-input.c
@@ -890,6 +892,7 @@ jobs:
               CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \
               KCFLAGS+=-O2 KCFLAGS+=-Wno-error \
               security/selinux/selinuxfs.o security/selinux/status.o security/selinux/ss/services.o \
+              security/selinux/hooks.o security/selinux/hooks.i \
               drivers/kernelsu/selinux/rules.o drivers/kernelsu/feature/selinux_hide.o \
               fs/susfs.o fs/susfs.i \
               security/selinux/selinuxfs.i security/selinux/status.i security/selinux/ss/services.i \
