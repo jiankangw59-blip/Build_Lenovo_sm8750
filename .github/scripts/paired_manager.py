@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -93,7 +94,7 @@ def prepare(args):
         "package": package,
         "build_tag": build_tag,
         "uapi_header_sha256": sha(source / "uapi/ksu.h"),
-        "signing": "unsigned; a persistent owner key is required before installation",
+        "signing": "Applied after packaging; see manager-verification.json",
     }
     assets = source / "manager/app/src/main/assets"
     assets.mkdir(parents=True, exist_ok=True)
@@ -132,25 +133,79 @@ def package(args):
     print(json.dumps(manifest, indent=2))
 
 
+def sign(args):
+    report = args.report.resolve()
+    manifest = json.loads((report / "manager-verification.json").read_text())
+    apks = list(report.glob("*-unsigned.apk"))
+    if len(apks) != 1:
+        raise ValueError("Expected exactly one unsigned manager APK")
+    unsigned = apks[0]
+    if sha(unsigned) != manifest["apk_sha256"]:
+        raise ValueError("Unsigned APK changed after the payload gate")
+    expected = args.expected_cert_sha256.lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("A pinned owner certificate SHA256 is required")
+    if not os.environ.get(args.password_env):
+        raise ValueError("The signing password environment variable is empty")
+    signed = report / unsigned.name.replace("-unsigned.apk", ".apk")
+    subprocess.run([str(args.apksigner), "sign", "--ks", str(args.keystore),
+                    "--ks-key-alias", args.alias,
+                    "--ks-pass", "env:" + args.password_env,
+                    "--key-pass", "env:" + args.password_env,
+                    "--v2-signing-enabled", "true", "--v3-signing-enabled", "true",
+                    "--v4-signing-enabled", "false", "--out", str(signed), str(unsigned)],
+                   check=True, capture_output=True)
+    result = subprocess.run([str(args.apksigner), "verify", "--verbose", "--print-certs", str(signed)],
+                            check=True, capture_output=True, text=True)
+    verification = result.stdout + result.stderr
+    (report / "apk-signature-verification.txt").write_text(verification, encoding="utf-8")
+    certificate = re.search(r"Signer #1 certificate SHA-256 digest: ([0-9a-f]+)", verification)
+    if not certificate or certificate[1] != expected:
+        raise ValueError("Signed APK does not use the pinned owner certificate")
+    with zipfile.ZipFile(signed) as archive:
+        if hashlib.sha256(archive.read("lib/arm64-v8a/libksud.so")).hexdigest() != manifest["ksud_sha256"]:
+            raise ValueError("Signing changed the paired ksud payload")
+        provenance = json.loads(archive.read("assets/paired-build.json"))
+        if (provenance["boot_sha256"] != manifest["boot_sha256"]
+                or provenance["source_hashes"] != manifest["source_hashes"]):
+            raise ValueError("Signing changed the source/boot pairing metadata")
+    manifest.update(signing="owner-signed", certificate_sha256=expected,
+                    unsigned_apk_sha256=manifest["apk_sha256"], apk_sha256=sha(signed),
+                    apk_filename=signed.name)
+    (report / "manager-verification.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    (report / "SHA256SUMS").write_text(f"{sha(signed)}  {signed.name}\n", encoding="utf-8")
+    unsigned.unlink()
+    print(f"Owner-signed APK verified: {signed.name}; certificate SHA256={expected}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "package"))
+    parser.add_argument("mode", choices=("prepare", "package", "sign"))
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--kernel-run", type=int)
     parser.add_argument("--package", default="com.resukisu.resukisu")
     parser.add_argument("--zipalign", type=Path)
+    parser.add_argument("--apksigner", type=Path)
+    parser.add_argument("--keystore", type=Path)
+    parser.add_argument("--alias")
+    parser.add_argument("--password-env", default="OWNER_STORE_PASSWORD")
+    parser.add_argument("--expected-cert-sha256", default="")
     args = parser.parse_args()
     try:
         if args.mode == "prepare":
             if args.evidence is None or args.kernel_run is None:
                 raise ValueError("prepare requires --evidence and --kernel-run")
             prepare(args)
-        else:
+        elif args.mode == "package":
             if args.zipalign is None:
                 raise ValueError("package requires --zipalign")
             package(args)
+        else:
+            if args.apksigner is None or args.keystore is None or not args.alias:
+                raise ValueError("sign requires --apksigner, --keystore and --alias")
+            sign(args)
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Paired manager gate failed: {error}\n")
 

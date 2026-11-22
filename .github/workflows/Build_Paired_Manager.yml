@@ -2,6 +2,13 @@ name: Build paired BakaSU manager
 
 on:
   workflow_call:
+    secrets:
+      BAKASU_PAIRED_KEYSTORE:
+        required: false
+      BAKASU_PAIRED_KEYSTORE_PASSWORD:
+        required: false
+      BAKASU_PAIRED_KEY_ALIAS:
+        required: false
     inputs:
       kernel_run:
         required: true
@@ -129,6 +136,31 @@ jobs:
         run: |
           python3 .github/scripts/paired_manager.py package --source bakasu \
             --report paired-manager --zipalign "$ANDROID_HOME/build-tools/36.1.0/zipalign"
+      - name: Sign and verify the owner APK
+        env:
+          OWNER_KEYSTORE: ${{ secrets.BAKASU_PAIRED_KEYSTORE }}
+          OWNER_STORE_PASSWORD: ${{ secrets.BAKASU_PAIRED_KEYSTORE_PASSWORD }}
+          OWNER_KEY_ALIAS: ${{ secrets.BAKASU_PAIRED_KEY_ALIAS }}
+          OWNER_CERT_SHA256: ${{ vars.BAKASU_MANAGER_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$OWNER_KEYSTORE" ]; then
+            if [ -n "$OWNER_STORE_PASSWORD$OWNER_KEY_ALIAS$OWNER_CERT_SHA256" ]; then
+              echo '::error::Owner signing configuration is incomplete.'
+              exit 1
+            fi
+            echo 'Owner signing is not configured; keeping the explicitly unsigned artifact.'
+            exit 0
+          fi
+          test -n "$OWNER_STORE_PASSWORD" && test -n "$OWNER_KEY_ALIAS" && test -n "$OWNER_CERT_SHA256"
+          umask 077
+          owner_keystore_path=$(mktemp "$RUNNER_TEMP/bakasu-owner.XXXXXX.p12")
+          trap 'rm -f "$owner_keystore_path"' EXIT
+          printf '%s' "$OWNER_KEYSTORE" | base64 --decode > "$owner_keystore_path"
+          python3 .github/scripts/paired_manager.py sign --source bakasu \
+            --report paired-manager --apksigner "$ANDROID_HOME/build-tools/36.1.0/apksigner" \
+            --keystore "$owner_keystore_path" --alias "$OWNER_KEY_ALIAS" \
+            --password-env OWNER_STORE_PASSWORD --expected-cert-sha256 "$OWNER_CERT_SHA256"
       - name: Upload paired manager and provenance
         if: always()
         uses: actions/upload-artifact@v5

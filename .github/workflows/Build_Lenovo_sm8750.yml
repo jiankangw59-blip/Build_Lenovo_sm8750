@@ -1084,6 +1084,10 @@ jobs:
     needs: build
     if: ${{ github.event.inputs.enable_susfs == 'true' && github.event.inputs.enable_signed == 'true' }}
     uses: ./.github/workflows/Build_Paired_Manager.yml
+    secrets:
+      BAKASU_PAIRED_KEYSTORE: ${{ secrets.BAKASU_PAIRED_KEYSTORE }}
+      BAKASU_PAIRED_KEYSTORE_PASSWORD: ${{ secrets.BAKASU_PAIRED_KEYSTORE_PASSWORD }}
+      BAKASU_PAIRED_KEY_ALIAS: ${{ secrets.BAKASU_PAIRED_KEY_ALIAS }}
     permissions:
       contents: read
       actions: read
