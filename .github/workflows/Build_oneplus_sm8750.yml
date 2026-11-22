@@ -698,15 +698,37 @@ jobs:
       - name: ⚙️ Set BakaSU (设置BakaSU)
         id: ksu_step
         run: |
+          set -euo pipefail
           cd kernel_workspace
           echo "正在配置BakaSU..."
-          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash -s main
-          cd ./KernelSU 
-          KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
+          curl -fLSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash -s main
+          cd ./KernelSU
+
+          if [ -f .git/shallow ]; then
+            git fetch --unshallow
+          fi
+
+          KSU_COMMIT_COUNT="$(git rev-list --count HEAD)"
+          KSU_VERSION_LINE="$(grep -E '^KSU_VERSION := \$\(shell expr [0-9]+ \+ \$\(KSU_LOCAL_VERSION\) \+ [0-9]+\)$' kernel/Kbuild || true)"
+          if [ -z "$KSU_VERSION_LINE" ]; then
+            echo "::error::无法识别 BakaSU kernel/Kbuild 中的版本公式"
+            exit 1
+          fi
+          read -r KSU_BASE KSU_OFFSET <<< "$(sed -E 's/^KSU_VERSION := \$\(shell expr ([0-9]+) \+ \$\(KSU_LOCAL_VERSION\) \+ ([0-9]+)\)$/\1 \2/' <<< "$KSU_VERSION_LINE")"
+          KSU_VERSION=$((KSU_BASE + KSU_COMMIT_COUNT + KSU_OFFSET))
+
+          if [ "$KSU_VERSION" -lt 35000 ]; then
+            echo "::error::BakaSU 版本异常: $KSU_VERSION"
+            exit 1
+          fi
+
+          echo "BakaSU commit: $(git rev-parse --short=8 HEAD)"
+          echo "BakaSU commit count: $KSU_COMMIT_COUNT"
+          echo "BakaSU expected version code: $KSU_VERSION"
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          echo "KSU_COMMIT_SHA=$(git rev-parse --short=8 HEAD)" >> $GITHUB_ENV
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-          
-            
+
       - name: 🔧 Set up SUSFS (配置 SUSFS)
         if: ${{ env.ENABLE_SUSFS == 'true' }}
         run: |
@@ -720,6 +742,25 @@ jobs:
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           patch -p1 -N -F 3 < 69_hide_stuff.patch || true
           echo "[OK] SUSFS 补丁处理流程全部完成"
+
+      - name: Fix BakaSU and SUSFS SELinux generation consistency
+        if: ${{ env.ENABLE_SUSFS == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p kernel_workspace/preflash
+          cp kernel_workspace/common/security/selinux/selinuxfs.c kernel_workspace/preflash/selinuxfs-input.c
+          cp kernel_workspace/common/security/selinux/ss/services.c kernel_workspace/preflash/services-input.c
+          cp kernel_workspace/common/security/selinux/status.c kernel_workspace/preflash/status-input.c
+          cp kernel_workspace/KernelSU/kernel/selinux/rules.c kernel_workspace/preflash/rules-input.c
+          cp kernel_workspace/KernelSU/kernel/feature/selinux_hide.c kernel_workspace/preflash/selinux_hide-input.c
+          cp kernel_workspace/common/fs/susfs.c kernel_workspace/preflash/susfs-input.c
+          git -C kernel_workspace/KernelSU rev-parse HEAD > kernel_workspace/preflash/bakasu-commit.txt
+          git -C kernel_workspace/susfs4ksu rev-parse HEAD > kernel_workspace/preflash/susfs-commit.txt
+          git rev-parse HEAD > kernel_workspace/preflash/workflow-commit.txt
+          python3 .github/scripts/selinux_seqno.py apply \
+            --kernel kernel_workspace/common \
+            --bakasu kernel_workspace/KernelSU \
+            --report kernel_workspace/preflash
 
       - name: 🔧 Set gki_defconfig (设置编译配置) 
         run: |
@@ -772,6 +813,7 @@ jobs:
 
       - name: 🔨 Build Kernel (构建内核)
         run: |
+          set -euo pipefail
           WORKDIR="$(pwd)"
           export PATH="/usr/lib/ccache:$PATH"
           export PATH="$WORKDIR/kernel_workspace/clang18/bin:$PATH"
@@ -835,7 +877,32 @@ jobs:
             done
             grep -qx 'CONFIG_ZRAM_DEF_COMP="lz4kd"' out/.config
           fi
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
+          if [ "$ENABLE_SUSFS" = 'true' ]; then
+            make -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+              CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \
+              KCFLAGS+=-O2 KCFLAGS+=-Wno-error \
+              security/selinux/selinuxfs.o security/selinux/status.o security/selinux/ss/services.o \
+              drivers/kernelsu/selinux/rules.o drivers/kernelsu/feature/selinux_hide.o \
+              fs/susfs.o fs/susfs.i \
+              security/selinux/selinuxfs.i security/selinux/status.i security/selinux/ss/services.i \
+              drivers/kernelsu/selinux/rules.i drivers/kernelsu/feature/selinux_hide.i
+            python3 "$WORKDIR/.github/scripts/selinux_seqno.py" verify \
+              --kernel . --report ../preflash --objdump "$CLANG_DIR/llvm-objdump"
+          fi
+
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image 2>&1 | tee build.log
+
+          BUILT_KSU_VERSION="$(grep -oE '(BakaSU|ReSukiSU) version code: [0-9]+' build.log | awk '{print $NF}' | tail -n 1 || true)"
+          if [ -z "$BUILT_KSU_VERSION" ]; then
+            echo "::error::构建日志中未找到 BakaSU/ReSukiSU version code"
+            exit 1
+          fi
+          if [ "$BUILT_KSU_VERSION" != "${KSUVER}" ]; then
+            echo "::error::BakaSU 版本不一致: 产物名=$KSUVER, 内核实际=$BUILT_KSU_VERSION"
+            exit 1
+          fi
+          echo "BakaSU 版本校验通过: $BUILT_KSU_VERSION"
+
           LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
           echo "ccache 状态："
           ccache -s
@@ -924,6 +991,24 @@ jobs:
             exit 1
           fi
           
+      - name: Record AK3 and compiled payload provenance
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/ak3_provenance.py \
+            --ak3 AnyKernel3 --kernel kernel_workspace/common/out/arch/arm64/boot/Image \
+            --report kernel_workspace/preflash
+          cp kernel_workspace/common/out/include/config/kernel.release kernel_workspace/preflash/kernel.release
+          cp kernel_workspace/common/out/.config kernel_workspace/preflash/kernel.config
+          cp kernel_workspace/common/out/arch/arm64/boot/Image kernel_workspace/preflash/Image
+
+      - name: Upload pre-flash verification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: preflash-verification_${{ env.KERNEL_VERSION }}
+          path: kernel_workspace/preflash/
+          if-no-files-found: warn
+
       - name: 📤 Upload AnyKernel3 (上传 Anykernel3)
         uses: actions/upload-artifact@v6
         with:
