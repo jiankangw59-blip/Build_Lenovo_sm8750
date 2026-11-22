@@ -322,6 +322,11 @@ jobs:
             sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
           done
           
+      - name: Snapshot unpacked native credential functions
+        run: |
+          python3 .github/scripts/audit_selinux_attr.py snapshot \
+            --kernel kernel_workspace/common --report kernel_workspace/preflash
+
       - name: 🛠 Set ccache DIR(配置 ccache 目录)
         run: |
           echo "CCACHE_DIR=$HOME/.ccache_${{ env.DEVICES_NAME }}" >> $GITHUB_ENV

@@ -75,6 +75,19 @@ int test_empty_current_does_not_allocate_credentials(void) {
     CHECK(selinux_setprocattr("current",empty,0)==-EINVAL);
     CHECK(checks==1 && parses==0 && prepares==0);return 0;
 }
+int test_single_newline_and_nul_current_never_allocate_credentials(void) {
+    char newline[2]={'\n',0},nul[1]={0};reset();
+    CHECK(selinux_setprocattr("current",newline,1)==-EINVAL);
+    CHECK(checks==1 && parses==1 && prepares==0);
+    reset();CHECK(selinux_setprocattr("current",nul,1)==-EINVAL);
+    CHECK(checks==1 && parses==0 && prepares==0);return 0;
+}
+int test_other_attributes_retain_empty_clear(void) {
+    const char *names[]={"exec","fscreate","keycreate","sockcreate"};
+    for(unsigned i=0;i<4;i++){char empty[1]={0};reset();
+      CHECK(selinux_setprocattr(names[i],empty,0)==0);
+      CHECK(checks==1 && parses==0 && prepares==1 && commits==1 && aborts==0);}return 0;
+}
 int test_other_attributes_retain_newline_clear(void) {
     const char *names[]={"exec","fscreate","keycreate","sockcreate"};
     for(unsigned i=0;i<4;i++){char newline[2]={'\n',0};reset();
