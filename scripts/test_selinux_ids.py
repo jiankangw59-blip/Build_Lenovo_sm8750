@@ -29,6 +29,14 @@ def main():
     generated = generated.replace("/* ACTUAL_NATIVE_AND_GUARDED_PARSERS */",
                                   adapter.function(source, "string_to_context_struct") + "\n" +
                                   adapter.function(source, "string_to_context_struct_user_ids"))
+    kernel = args.services.resolve().parents[3]
+    rules = (kernel / "drivers/kernelsu/selinux/rules.c").read_text(encoding="utf-8")
+    generated = generated.replace("/* ACTUAL_BATCH_CLASSIFIER */",
+                                  "#define KSU_SEPOLICY_CMD_NORMAL_PERM 1\n"
+                                  "#define KSU_SEPOLICY_CMD_XPERM 2\n"
+                                  "#define KSU_SEPOLICY_CMD_TYPE 4\n"
+                                  "#define KSU_SEPOLICY_CMD_TYPE_ATTR 5\n" +
+                                  adapter.function(rules, "sepol_cmd_preserves_user_ids"))
     args.report.mkdir(parents=True, exist_ok=True)
     (args.report / "host-fixture.c").write_text(generated, encoding="utf-8")
     obj = args.report / "host-fixture.o"
@@ -57,6 +65,10 @@ if (!results.length || results.some(r => r.failure_line !== 0)) process.exit(1);
         print(result["name"], "PASS" if not result["failure_line"] else result["failure_line"])
     if execution.returncode or not results or any(result["failure_line"] for result in results):
         raise RuntimeError("SELinux ID contract fixture failed; see results.json")
+    subprocess.run([sys.executable, str(repo / "scripts/test_selinux_retry.py"),
+                    "--clang", str(args.clang), "--lld", str(args.lld),
+                    "--services", str(args.services), "--report", str(args.report / "retry")], check=True)
+
 
 
 if __name__ == "__main__":

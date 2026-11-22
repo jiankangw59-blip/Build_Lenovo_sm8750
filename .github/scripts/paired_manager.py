@@ -75,7 +75,23 @@ def prepare(args):
         raise ValueError("Missing source workflow commit")
     assets_fix = load_module(Path(__file__).with_name("ksud_assets.py"), "ksud_assets_fix")
     client_sources = assets_fix.apply(source)
-    build_tag = "selinux-" + pair[:7] + "-links1"
+    home_relative = "manager/app/src/main/java/org/bakasu/bakasu/ui/screen/main/HomePage.kt"
+    home = source / home_relative
+    text = home.read_text(encoding="utf-8")
+    marker = "                if (!uiState.systemStatus.isOfficialSignature) {"
+    if text.count(marker) != 1:
+        raise ValueError("Unofficial manager notice changed")
+    start = text.index(marker)
+    opening = text.index("{", start)
+    depth, end = 1, opening + 1
+    while depth:
+        depth += (text[end] == "{") - (text[end] == "}")
+        end += 1
+    if "R.string.unofficial_version_notice" not in text[start:end]:
+        raise ValueError("Expected notice is absent from the selected UI block")
+    home.write_text(text[:start] + text[end:].lstrip("\n"), encoding="utf-8", newline="\n")
+    client_sources[home_relative] = home
+    build_tag = "selinux-" + pair[:7] + "-links1-ui1"
     gradle = source / "manager/build.gradle.kts"
     text = gradle.read_text(encoding="utf-8")
     old = 'extra["managerVersionName"] = getGitDescribe()'
@@ -99,7 +115,7 @@ def prepare(args):
         "package": package,
         "build_tag": build_tag,
         "uapi_header_sha256": sha(source / "uapi/ksu.h"),
-        "client_fixes": ["idempotent-assets-links-v1"],
+        "client_fixes": ["idempotent-assets-links-v1", "omit-home-unofficial-notice-v1"],
         "client_source_hashes": {relative: sha(path) for relative, path in client_sources.items()},
         "client_workflow_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True).strip(),

@@ -148,9 +148,11 @@ static noinline int security_parse_user_context(struct selinux_policy *live,
 #endif
 """ + marker, 1)
     # A policy replacement can cause ESTALE after the parser consumed its copy.
-    require(core.count("retry:\n") == 1, "Context conversion retry changed")
-    core = core.replace("retry:\n", "retry:\n\tmemcpy(scontext2, scontext, scontext_len);\n"
-                        "\tscontext2[scontext_len] = '\\0';\n", 1)
+    stale = "\t\tcontext_destroy(&context);\n\t\tgoto retry;"
+    require(core.count(stale) == 1, "Context conversion retry cleanup changed")
+    core = core.replace(stale, "\t\tcontext_destroy(&context);\n"
+                        "\t\tmemcpy(scontext2, scontext, scontext_len);\n"
+                        "\t\tscontext2[scontext_len] = '\\0';\n\t\tgoto retry;", 1)
     services = replace_function(services, "security_context_to_sid_core", core)
     for name in ("security_context_to_sid", "security_context_to_sid_default",
                  "security_context_to_sid_force"):
@@ -312,6 +314,10 @@ def verify(kernel, report, objdump, function, object_code, function_code, requir
         require(", false);" in function(source, name), f"Internal conversion enters projection: {name}")
     require(", true);" in function(source, "security_context_to_sid_user"),
             "The user API does not explicitly select validation")
+    core_source = function(source, "security_context_to_sid_core")
+    require(core_source.count("memcpy(scontext2, scontext, scontext_len)") == 1
+            and core_source.index("memcpy(scontext2") > core_source.index("if (rc == -ESTALE)"),
+            "Input restoration escaped the stale SID retry branch")
     core = function(services, "security_context_to_sid_core")
     require("user_query ? security_user_query_policy()" in core and "security_parse_user_context(policy," in core,
             "The compiled core lost explicit user-query validation")

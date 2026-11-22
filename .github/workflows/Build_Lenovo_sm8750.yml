@@ -509,7 +509,11 @@ jobs:
           set -euo pipefail
           cd kernel_workspace
           echo "正在配置BakaSU..."
-          curl -fLSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash -s main
+          # Retain the tablet's accepted baseline while measuring the two optimizations.
+          BAKASU_REF=7b65bde0710b5e7c6f755545cb15a4abd417f3a8
+          curl -fLSs --retry 3 "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_REF}/kernel/setup.sh" -o bakasu-setup.sh
+          bash bakasu-setup.sh "$BAKASU_REF"
+          test "$(git -C KernelSU rev-parse HEAD)" = "$BAKASU_REF"
           cd ./KernelSU
 
           if [ -f .git/shallow ]; then

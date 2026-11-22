@@ -158,6 +158,41 @@ static noinline bool security_user_ids_compatible(struct selinux_policy *live,
 	return live->user_query_ids_compatible && live->user_query_ids_snapshot == snapshot;
 }
 
+/* Only audited writers that preserve the entire symbol/permission schema opt in. */
+noinline void security_prepare_user_policy_reuse(struct selinux_policy *policy,
+	struct selinux_policy *previous, bool schema_unchanged)
+{
+	struct selinux_policy *snapshot = smp_load_acquire(&backup_sepolicy);
+	unsigned int index;
+
+	lockdep_assert_held(&selinux_state.policy_mutex);
+	/* A deep or shallow clone may carry stale metadata; clear it before selection. */
+	policy->user_query_ids_compatible = false;
+	policy->user_query_ids_snapshot = snapshot;
+	if (!schema_unchanged || !snapshot || !previous || previous == policy ||
+	    rcu_dereference_protected(selinux_state.policy,
+		lockdep_is_held(&selinux_state.policy_mutex)) != previous ||
+	    !security_user_ids_compatible(previous, snapshot) ||
+	    previous->latest_granting == (u32)~0U ||
+	    policy->latest_granting != previous->latest_granting + 1) {
+		security_prepare_user_policy(policy);
+		return;
+	}
+	if (policy->policydb.mls_enabled != previous->policydb.mls_enabled)
+		goto full;
+	for (index = 0; index < ARRAY_SIZE(policy->policydb.symtab); index++) {
+		if (policy->policydb.symtab[index].nprim != previous->policydb.symtab[index].nprim ||
+		    policy->policydb.symtab[index].table.nel != previous->policydb.symtab[index].table.nel)
+			goto full;
+	}
+	policy->user_query_ids_compatible = true;
+	pr_notice("SELinux user-policy reused: generation=%u previous_generation=%u snapshot=%p\n",
+		  policy->latest_granting, previous->latest_granting, snapshot);
+	return;
+full:
+	security_prepare_user_policy(policy);
+}
+
 static bool security_user_context_valid(struct policydb *snapshot, struct context *context)
 {
 	struct type_datum *type;

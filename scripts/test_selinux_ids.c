@@ -12,6 +12,8 @@ typedef _Bool bool;
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #define cond_resched() ((void)0)
 #define lockdep_assert_held(x) ((void)(x))
+#define lockdep_is_held(x) true
+#define rcu_dereference_protected(x, condition) (x)
 #define smp_load_acquire(x) (*(x))
 #define pr_notice(...) ((void)0)
 #define EINVAL 22
@@ -66,12 +68,13 @@ struct context { u32 user, role, type, len; };
 struct sidtab { int unused; };
 struct av_decision { u32 allowed, auditallow, auditdeny, seqno, flags; };
 static struct selinux_policy *backup_sepolicy;
-static struct { int policy_mutex; } selinux_state;
-static unsigned compute_calls, map_calls, destroy_calls, mls_calls;
+static struct { int policy_mutex; struct selinux_policy *policy; } selinux_state;
+static unsigned compute_calls, map_calls, destroy_calls, mls_calls, symbol_lookups;
 static char *sym_name(struct policydb *p, unsigned int kind, unsigned int value) {
     return p->sym_val_to_name[kind][value];
 }
 static void *symtab_search(struct symtab *table, const char *key) {
+    symbol_lookups++;
     if (!table->table.size) return NULL;
     for (struct hashtab_node *n = table->table.htable[0]; n; n = n->next)
         if (!strcmp(n->key, key)) return n->datum;
@@ -102,6 +105,7 @@ static int security_project_context(struct selinux_policy *from, struct selinux_
 
 /* ACTUAL_COMPAT_HELPERS */
 /* ACTUAL_NATIVE_AND_GUARDED_PARSERS */
+/* ACTUAL_BATCH_CLASSIFIER */
 
 union datum { struct user_datum user; struct role_datum role; struct type_datum type;
     struct level_datum level; struct cat_datum cat; };
@@ -270,5 +274,70 @@ int test_fallback_class_reordering(void) {
     d = decision();
     security_compute_av_user_mapped(&b.policy, &a.policy, &context, &context, 1, &d);
     CHECK(d.allowed == 0);
+    return 0;
+}
+
+int test_reuse_avoids_symbol_rescan(void) {
+    init(&a); init(&b); backup_sepolicy = &a.policy;
+    security_prepare_user_policy(&b.policy); selinux_state.policy = &b.policy;
+    c.policy = b.policy; c.policy.latest_granting++;
+    unsigned before = symbol_lookups;
+    security_prepare_user_policy_reuse(&c.policy, &b.policy, true);
+    CHECK(symbol_lookups == before);
+    CHECK(security_user_ids_compatible(&c.policy, &a.policy));
+    return 0;
+}
+int test_dirty_alias_requires_full_proof(void) {
+    init(&a); init(&b); init(&c); backup_sepolicy = &a.policy;
+    security_prepare_user_policy(&b.policy); selinux_state.policy = &b.policy;
+    c.policy.latest_granting = b.policy.latest_granting + 1;
+    c.policy.user_query_ids_compatible = true; c.policy.user_query_ids_snapshot = &a.policy;
+    add_symbol(&c, SYM_TYPES, "new_alias", 1, true);
+    unsigned before = symbol_lookups;
+    security_prepare_user_policy_reuse(&c.policy, &b.policy, false);
+    CHECK(symbol_lookups > before && !c.policy.user_query_ids_compatible);
+    return 0;
+}
+int test_reuse_rejects_wrong_active_policy(void) {
+    init(&a); init(&b); init(&c); backup_sepolicy = &a.policy;
+    security_prepare_user_policy(&b.policy); selinux_state.policy = &a.policy;
+    c.policy.latest_granting = b.policy.latest_granting + 1;
+    add_symbol(&c, SYM_TYPES, "new_alias", 1, true);
+    security_prepare_user_policy_reuse(&c.policy, &b.policy, true);
+    CHECK(!c.policy.user_query_ids_compatible);
+    return 0;
+}
+int test_reuse_rejects_generation_and_missing_proof(void) {
+    init(&a); init(&b); init(&c); backup_sepolicy = &a.policy;
+    security_prepare_user_policy(&b.policy); selinux_state.policy = &b.policy;
+    add_symbol(&c, SYM_TYPES, "new_alias", 1, true);
+    security_prepare_user_policy_reuse(&c.policy, &b.policy, true);
+    CHECK(!c.policy.user_query_ids_compatible);
+    c.policy.latest_granting++;
+    b.policy.user_query_ids_compatible = false;
+    security_prepare_user_policy_reuse(&c.policy, &b.policy, true);
+    CHECK(!c.policy.user_query_ids_compatible);
+    return 0;
+}
+int test_reuse_rejects_changed_snapshot_and_wrap(void) {
+    init(&a); init(&b); init(&c); backup_sepolicy = &a.policy;
+    security_prepare_user_policy(&b.policy); selinux_state.policy = &b.policy;
+    c.policy.latest_granting++;
+    add_symbol(&c, SYM_TYPES, "new_alias", 1, true);
+    b.policy.user_query_ids_snapshot = &c.policy;
+    security_prepare_user_policy_reuse(&c.policy, &b.policy, true);
+    CHECK(!c.policy.user_query_ids_compatible);
+    b.policy.user_query_ids_snapshot = &a.policy;
+    b.policy.latest_granting = ~0U; c.policy.latest_granting = 0;
+    security_prepare_user_policy_reuse(&c.policy, &b.policy, true);
+    CHECK(!c.policy.user_query_ids_compatible);
+    return 0;
+}
+int test_only_audited_batch_commands_reuse(void) {
+    CHECK(sepol_cmd_preserves_user_ids(KSU_SEPOLICY_CMD_NORMAL_PERM));
+    CHECK(sepol_cmd_preserves_user_ids(KSU_SEPOLICY_CMD_XPERM));
+    CHECK(!sepol_cmd_preserves_user_ids(KSU_SEPOLICY_CMD_TYPE));
+    CHECK(!sepol_cmd_preserves_user_ids(KSU_SEPOLICY_CMD_TYPE_ATTR));
+    CHECK(!sepol_cmd_preserves_user_ids(0xffffffff));
     return 0;
 }
