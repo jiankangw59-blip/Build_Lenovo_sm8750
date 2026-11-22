@@ -186,10 +186,14 @@ def main():
                 recent.append(line)
         errors = [line for line in recent if re.search(r"seqno.*latest_notif", line, re.I)]
         save("dmesg-seqno-errors.txt", "\n".join(errors) or "No new seqno/latest_notif errors")
+        rcu_errors = [line for line in recent if re.search(
+            r"sleeping function called|scheduling while atomic|suspicious RCU usage|"
+            r"RCU.*(?:stall|sleep|warning)|BUG:.*(?:sleep|RCU)", line, re.I)]
+        save("dmesg-rcu-errors.txt", "\n".join(rcu_errors) or "No new RCU, atomic-scheduling or sleep warnings")
         logcat = root("logcat -d -t 1500")
         daemon_errors = [line for line in logcat.splitlines() if is_sync_error(line)]
         save("daemon-errors.txt", "\n".join(daemon_errors) or "No SELinux synchronization errors in recent daemon logs")
-        if errors or daemon_errors:
+        if errors or daemon_errors or rcu_errors:
             raise RuntimeError("SELinux synchronization errors were found")
         results["passed"] = True
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
