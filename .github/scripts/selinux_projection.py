@@ -329,7 +329,7 @@ def verify(kernel, report, objdump, function, object_code, function_code, requir
             and "kfree(text)" in mapper, "Snapshot symbol mapping assumes matching numeric IDs")
     projected = function(services, "security_compute_av_user_projected")
     require("avd_init(snapshot, avd)" in projected and "sidtab_search(live->sidtab" in projected
-            and "context_struct_compute_av(db," in projected,
+            and "security_compute_av_user_ids(snapshot," in projected,
             "User AV projection no longer reads live SIDs and snapshot rules")
     require("avd->seqno = 1" not in projected, "The projector hardcodes generation instead of using the snapshot")
     selector = function(services, "security_user_query_policy")

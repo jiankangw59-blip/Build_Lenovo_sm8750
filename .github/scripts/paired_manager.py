@@ -47,6 +47,7 @@ def prepare(args):
             "susfs-input.c": "fs/susfs.c",
             "hooks-input.c": "security/selinux/hooks.c",
             "security-input.h": "security/selinux/include/security.h",
+            "services-input.h": "security/selinux/ss/services.h",
         }
         for filename, relative in inputs.items():
             target = fixture / relative

@@ -564,6 +564,7 @@ jobs:
           mkdir -p kernel_workspace/preflash
           cp kernel_workspace/common/security/selinux/selinuxfs.c kernel_workspace/preflash/selinuxfs-input.c
           cp kernel_workspace/common/security/selinux/ss/services.c kernel_workspace/preflash/services-input.c
+          cp kernel_workspace/common/security/selinux/ss/services.h kernel_workspace/preflash/services-input.h
           cp kernel_workspace/common/security/selinux/status.c kernel_workspace/preflash/status-input.c
           cp kernel_workspace/common/security/selinux/hooks.c kernel_workspace/preflash/hooks-input.c
           cp kernel_workspace/common/security/selinux/include/security.h kernel_workspace/preflash/security-input.h
@@ -899,6 +900,9 @@ jobs:
               drivers/kernelsu/selinux/rules.i drivers/kernelsu/feature/selinux_hide.i
             python3 "$WORKDIR/.github/scripts/selinux_seqno.py" verify \
               --kernel . --report ../preflash --objdump "$CLANG_DIR/llvm-objdump"
+            python3 "$WORKDIR/scripts/test_selinux_ids.py" \
+              --clang "$CLANG_DIR/clang" --lld "$CLANG_DIR/ld.lld" \
+              --services security/selinux/ss/services.c --report ../preflash/ids-host-tests
           fi
 
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image 2>&1 | tee build.log

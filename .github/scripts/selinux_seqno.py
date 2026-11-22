@@ -260,17 +260,23 @@ extern bool ksu_is_manager_uid(u32 uid);
     projection = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(projection)
     projection.apply(kernel, function, replace_function, require)
+    spec = importlib.util.spec_from_file_location(
+        "selinux_ids", Path(__file__).with_name("selinux_ids.py"))
+    ids = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ids)
+    ids.apply(kernel, bakasu, function, replace_function, require)
     require(audit_hot_path(kernel) == hot_path_sha, "Kernel hot path changed")
     report.mkdir(parents=True, exist_ok=True)
     (report / "selinux-source.json").write_text(json.dumps({
-        "strategy": "Single live SID table; explicit user-input validation and user-only AV projection onto immutable boot policy",
+        "strategy": "Policy-bound ID-compatible single-pass queries; canonical name-mapping fallback; one live SID table",
         "hot_path_sha256": hot_path_sha,
         "services_sha256": hashlib.sha256(services_path.read_bytes()).hexdigest(),
         "access_function": "security_compute_av_user_projected",
         "context_function": "security_context_to_sid_user",
         "files": {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
                   for p in (fs_path, rules_path, hide_path, services_path, status_path, susfs_path,
-                            kernel / "security/selinux/hooks.c", kernel / "security/selinux/include/security.h")},
+                            kernel / "security/selinux/hooks.c", kernel / "security/selinux/include/security.h",
+                            kernel / "security/selinux/ss/services.h")},
     }, indent=2) + "\n")
     print("SELinux source checks passed; avd_init preserves policy generation and early boot zero")
 
@@ -346,6 +352,11 @@ def verify(kernel, report, objdump):
     projection = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(projection)
     projection.verify(kernel, report, objdump, function, object_code, function_code, require)
+    spec = importlib.util.spec_from_file_location(
+        "selinux_ids", Path(__file__).with_name("selinux_ids.py"))
+    ids = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ids)
+    ids.verify(kernel, report, objdump, function, function_code, object_code, require)
     hide_obj = kernel / "out/drivers/kernelsu/feature/selinux_hide.o"
     hide_object = object_code(objdump, hide_obj)
     rules_object = object_code(objdump, kernel / "out/drivers/kernelsu/selinux/rules.o")
