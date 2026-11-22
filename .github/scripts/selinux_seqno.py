@@ -47,6 +47,7 @@ def audit_hot_path(kernel):
 
 
 def apply(kernel, bakasu, report):
+    kernel, bakasu = kernel.resolve(), bakasu.resolve()
     hot_path_sha = audit_hot_path(kernel)
     fs_path = kernel / "security/selinux/selinuxfs.c"
     fs = fs_path.read_text()
@@ -62,12 +63,12 @@ static noinline bool susfs_hide_user_queries(void)
 
 \tif (appid < 10000 || !READ_ONCE(ksu_selinux_hide_running))
 \t\treturn false;
-\tif (!READ_ONCE(fake_status)) {
+\tif (!smp_load_acquire(&fake_status)) {
 \t\tif (!selinux_kernel_status_page())
 \t\t\treturn false;
 \t\tinitialize_fake_status();
 \t}
-\treturn READ_ONCE(fake_status) != NULL;
+\treturn smp_load_acquire(&fake_status) != NULL;
 }
 """
     declaration = "extern void initialize_fake_status(void);"
@@ -85,7 +86,7 @@ static noinline bool susfs_hide_user_queries(void)
 
 #ifdef CONFIG_KSU_SUSFS
 \tif (susfs_hide_user_queries()) {
-\t\tfilp->private_data = READ_ONCE(fake_status);
+\t\tfilp->private_data = smp_load_acquire(&fake_status);
 \t\treturn 0;
 \t}
 #endif
@@ -182,7 +183,7 @@ static noinline u32 susfs_access_seqno(u32 seqno)
     new_status->policyload = 0;
 #endif
 #endif
-    fake_status = new_page;""")
+    smp_store_release(&fake_status, new_page);""")
     hide = replace_function(hide, "initialize_fake_status", init)
     fs_path.write_text(fs)
     rules_path.write_text(rules)
@@ -208,6 +209,9 @@ def verify(kernel, report, objdump):
     services_path = kernel / "security/selinux/ss/services.c"
     require(hashlib.sha256(services_path.read_bytes()).hexdigest() == original["services_sha256"],
             "A later patch changed services.c")
+    for path, expected in original["files"].items():
+        require(hashlib.sha256(Path(path).read_bytes()).hexdigest() == expected,
+                f"A later patch changed {path}")
     config = (kernel / "out/.config").read_text()
     require("CONFIG_KSU_SUSFS=y\n" in config, "SUSFS did not resolve to built-in")
     fs = (kernel / "out/security/selinux/selinuxfs.i").read_text()
@@ -239,7 +243,7 @@ def verify(kernel, report, objdump):
         require("bypass_orig" not in body and "oldpolicy->latest_granting + 1" in body,
                 f"{name} still bypasses generation tracking")
     hide = (kernel / "out/drivers/kernelsu/feature/selinux_hide.i").read_text()
-    require(re.search(r"new_status->sequence = 0;\s*new_status->policyload = 0;\s*fake_status = new_page;",
+    require(re.search(r"new_status->sequence = 0;\s*new_status->policyload = 0;",
                       function(hide, "initialize_fake_status")),
             "Preprocessor dropped the native 6.6 fake status sentinel")
     obj = kernel / "out/security/selinux/selinuxfs.o"
@@ -259,6 +263,13 @@ def verify(kernel, report, objdump):
     access_calls = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=handle_sel_write_access,susfs_sel_write_access", str(obj)], text=True)
     require("susfs_access_seqno" in access_calls, "Compiled access path lost the generation clamp call")
     (report / "access-calls.disasm").write_text(access_calls)
+    predicate_code = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=susfs_hide_user_queries", str(obj)], text=True)
+    require(re.search(r"\b(ldar|ldapr)\b", predicate_code), "Fake page loads lost acquire ordering")
+    hide_obj = kernel / "out/drivers/kernelsu/feature/selinux_hide.o"
+    publish_code = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=initialize_fake_status", str(hide_obj)], text=True)
+    require(re.search(r"\bstlr\b", publish_code), "Fake page publication lost release ordering")
+    (report / "fake-status-acquire.disasm").write_text(predicate_code)
+    (report / "fake-status-publish.disasm").write_text(publish_code)
     for relative in ("security/selinux/selinuxfs.i", "security/selinux/status.i", "security/selinux/ss/services.i", "drivers/kernelsu/selinux/rules.i",
                      "drivers/kernelsu/feature/selinux_hide.i"):
         (report / Path(relative).name).write_bytes((kernel / "out" / relative).read_bytes())
