@@ -119,7 +119,12 @@ jobs:
         working-directory: bakasu/manager
         run: |
           set -euo pipefail
-          ./gradlew assembleRelease -Pcommit="$(git rev-parse HEAD)" -PKSU_PACKAGE_NAME="$KSU_PACKAGE_NAME"
+          manager_name=BakaSU
+          if [ "$KSU_PACKAGE_NAME" != com.resukisu.resukisu ]; then
+            manager_name='BakaSU 配套版'
+          fi
+          ./gradlew assembleRelease -Pcommit="$(git rev-parse HEAD)" \
+            -PKSU_PACKAGE_NAME="$KSU_PACKAGE_NAME" -PKSU_NAME="$manager_name"
       - name: Package and verify the exact compiled daemon
         run: |
           python3 .github/scripts/paired_manager.py package --source bakasu \
