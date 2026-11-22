@@ -152,7 +152,9 @@ def sign(args):
                     "--ks-key-alias", args.alias,
                     "--ks-pass", "env:" + args.password_env,
                     "--key-pass", "env:" + args.password_env,
-                    "--v2-signing-enabled", "true", "--v3-signing-enabled", "true",
+                    # BakaSU's kernel and ksud require a v2-only APK signing block.
+                    "--v1-signing-enabled", "false", "--v2-signing-enabled", "true",
+                    "--v3-signing-enabled", "false",
                     "--v4-signing-enabled", "false", "--out", str(signed), str(unsigned)],
                    check=True, capture_output=True)
     result = subprocess.run([str(args.apksigner), "verify", "--verbose", "--print-certs", str(signed)],
@@ -162,6 +164,10 @@ def sign(args):
     certificate = re.search(r"Signer #1 certificate SHA-256 digest: ([0-9a-f]+)", verification)
     if not certificate or certificate[1] != expected:
         raise ValueError("Signed APK does not use the pinned owner certificate")
+    schemes = dict(re.findall(r"Verified using (v[\d.]+) scheme[^\n]*: (true|false)", verification))
+    if schemes.get("v2") != "true" or any(
+            schemes.get(version) != "false" for version in ("v1", "v3", "v3.1", "v4")):
+        raise ValueError("BakaSU requires v2-only signing without v1/v3/v4")
     with zipfile.ZipFile(signed) as archive:
         if hashlib.sha256(archive.read("lib/arm64-v8a/libksud.so")).hexdigest() != manifest["ksud_sha256"]:
             raise ValueError("Signing changed the paired ksud payload")
