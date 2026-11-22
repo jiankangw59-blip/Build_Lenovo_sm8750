@@ -204,6 +204,10 @@ static noinline u32 susfs_access_seqno(u32 seqno)
 
 
 def verify(kernel, report, objdump):
+    for relative in ("security/selinux/selinuxfs.i", "security/selinux/status.i", "security/selinux/ss/services.i",
+                     "drivers/kernelsu/selinux/rules.i", "drivers/kernelsu/feature/selinux_hide.i",
+                     "security/selinux/selinuxfs.o", "drivers/kernelsu/feature/selinux_hide.o"):
+        (report / Path(relative).name).write_bytes((kernel / "out" / relative).read_bytes())
     original = json.loads((report / "selinux-source.json").read_text())
     require(audit_hot_path(kernel) == original["hot_path_sha256"], "A later patch changed the kernel AVC hot path")
     services_path = kernel / "security/selinux/ss/services.c"
@@ -264,15 +268,13 @@ def verify(kernel, report, objdump):
     require("susfs_access_seqno" in access_calls, "Compiled access path lost the generation clamp call")
     (report / "access-calls.disasm").write_text(access_calls)
     predicate_code = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=susfs_hide_user_queries", str(obj)], text=True)
-    require(re.search(r"\b(ldar|ldapr)\b", predicate_code), "Fake page loads lost acquire ordering")
+    (report / "fake-status-acquire.disasm").write_text(predicate_code)
     hide_obj = kernel / "out/drivers/kernelsu/feature/selinux_hide.o"
     publish_code = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=initialize_fake_status", str(hide_obj)], text=True)
-    require(re.search(r"\bstlr\b", publish_code), "Fake page publication lost release ordering")
-    (report / "fake-status-acquire.disasm").write_text(predicate_code)
     (report / "fake-status-publish.disasm").write_text(publish_code)
-    for relative in ("security/selinux/selinuxfs.i", "security/selinux/status.i", "security/selinux/ss/services.i", "drivers/kernelsu/selinux/rules.i",
-                     "drivers/kernelsu/feature/selinux_hide.i"):
-        (report / Path(relative).name).write_bytes((kernel / "out" / relative).read_bytes())
+    (report / "selinux-hide-full.disasm").write_text(subprocess.check_output([objdump, "-dr", str(hide_obj)], text=True))
+    require(re.search(r"\b(ldar|ldapr)\b", predicate_code), "Fake page loads lost acquire ordering")
+    require(re.search(r"\bstlr\b", publish_code), "Fake page publication lost release ordering")
     print(output)
     print("SELinux preprocessor and object code gates passed")
 
