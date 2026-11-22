@@ -349,6 +349,25 @@ noinline bool ksu_selinux_snapshot_ready(void)
             }
             context_destroy(&orig_context);
         }""", 1)
+    policy_lookup = """    rcu_read_lock();
+    orig_policy = rcu_dereference(selinux_state.policy);
+    orig_policydb = &orig_policy->policydb;
+    orig_sidtab = orig_policy->sidtab;
+    policydb = &policy->policydb;
+    sidtab = policy->sidtab;"""
+    require(hide.count(policy_lookup) == 1, "BakaSU query policy lookup changed")
+    hide = hide.replace(policy_lookup, """    rcu_read_lock();
+    policydb = &policy->policydb;
+    sidtab = policy->sidtab;
+    if (orig_sid_p) {
+        orig_policy = rcu_dereference(selinux_state.policy);
+        orig_policydb = &orig_policy->policydb;
+        orig_sidtab = orig_policy->sidtab;
+    } else {
+        /* Pure queries parse only the snapshot, including symbol lookups. */
+        orig_policydb = policydb;
+        orig_sidtab = sidtab;
+    }""", 1)
     drop = function(hide, "ksu_selinux_hide_drop_backup_if_unused")
     opening, closing = drop.index("{"), drop.rfind("}")
     drop = (drop[:opening + 1] + "\n#ifndef CONFIG_KSU_SUSFS\n" + drop[opening + 1:closing]
@@ -499,6 +518,8 @@ def verify(kernel, report, objdump):
     require("!tclass" in function(hide, "ksu_security_compute_av_user"),
             "The snapshot query lost the class0 branch")
     conversion = function(hide, "security_context_to_sid_with_policy")
+    require("orig_policydb = policydb;" in conversion and "orig_sidtab = sidtab;" in conversion,
+            "Pure queries can inspect live-only policy symbols")
     require(re.search(r"if \(orig_sid_p\)\s*\{(?:(?!context_destroy).)*"
                       r"sidtab_context_to_sid\(orig_sidtab", conversion, re.S),
             "Pure context queries can mutate the live SID table")
