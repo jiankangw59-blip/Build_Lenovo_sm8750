@@ -70,6 +70,44 @@ struct selinux_policy_user_ids_legacy_prefix {
                              "static noinline int string_to_context_struct_user_ids(", 1)
     require("string_to_context_struct_user_ids(" in guarded, "Native parser declaration changed")
     guarded = guarded.replace("u32 def_sid)", "u32 def_sid, struct policydb *view)", 1)
+    # Split the fixed user/role/type prefix once and resolve all three symbols.
+    # Invalid users/types take the same major stages, without entering MLS or
+    # allocating a SID. Native/internal parsing remains unchanged.
+    declaration = "\tchar *scontextp, *p, oldc;"
+    require(guarded.count(declaration) == 1, "Native parser temporaries changed")
+    guarded = guarded.replace(declaration, declaration + "\n\tchar *user_name, *role_name;", 1)
+    start = guarded.index("\t/* Extract the user. */")
+    end = guarded.index("\trc = mls_context_to_sid(", start)
+    guarded = guarded[:start] + """\t/* Split only the fixed prefix, leaving the MLS suffix for its parser. */
+\tuser_name = scontextp;
+\tp = scontextp;
+\twhile (*p && *p != ':')
+\t\tp++;
+\tif (!*p)
+\t\tgoto out;
+\t*p++ = 0;
+\trole_name = p;
+\twhile (*p && *p != ':')
+\t\tp++;
+\tif (!*p)
+\t\tgoto out;
+\t*p++ = 0;
+\tscontextp = p;
+\twhile (*p && *p != ':')
+\t\tp++;
+\toldc = *p;
+\t*p++ = 0;
+
+\tusrdatum = symtab_search(&pol->p_users, user_name);
+\trole = symtab_search(&pol->p_roles, role_name);
+\ttypdatum = symtab_search(&pol->p_types, scontextp);
+\tif (!usrdatum || !role || !typdatum || typdatum->attribute)
+\t\tgoto out;
+\tctx->user = usrdatum->value;
+\tctx->role = role->value;
+\tctx->type = typdatum->value;
+
+""" + guarded[end:]
     for field, bound in (("user", "p_users"), ("role", "p_roles"), ("type", "p_types")):
         value = {"user": "usrdatum", "role": "role", "type": "typdatum"}[field]
         marker = f"\tctx->{field} = {value}->value;"

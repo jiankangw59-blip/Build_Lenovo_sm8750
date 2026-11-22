@@ -552,6 +552,8 @@ jobs:
         run: |
           cd kernel_workspace
           git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-android15-6.6
+          git -C susfs4ksu fetch --depth=1 origin c7f303f504b36d25b9a2e753edde7cd927f47e4f
+          git -C susfs4ksu checkout --detach c7f303f504b36d25b9a2e753edde7cd927f47e4f
           wget https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/main/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
           cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./common/
           cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
@@ -587,6 +589,13 @@ jobs:
           python3 .github/scripts/selinux_seqno.py apply \
             --kernel kernel_workspace/common \
             --bakasu kernel_workspace/KernelSU \
+            --report kernel_workspace/preflash
+
+      - name: Audit native credential lifecycle boundaries
+        if: ${{ env.ENABLE_SUSFS == 'true' }}
+        run: |
+          python3 .github/scripts/audit_selinux_attr.py \
+            --kernel kernel_workspace/common --bakasu kernel_workspace/KernelSU \
             --report kernel_workspace/preflash
 
       - name: 🔧 Clone Droidspaces Patches (克隆 Droidspaces 补丁仓库)
@@ -910,6 +919,9 @@ jobs:
               drivers/kernelsu/selinux/rules.i drivers/kernelsu/feature/selinux_hide.i
             python3 "$WORKDIR/.github/scripts/selinux_seqno.py" verify \
               --kernel . --report ../preflash --objdump "$CLANG_DIR/llvm-objdump"
+            python3 "$WORKDIR/scripts/test_selinux_attr.py" \
+              --clang "$CLANG_DIR/clang" --lld "$CLANG_DIR/ld.lld" \
+              --hooks security/selinux/hooks.c --report ../preflash/attr-host-tests
             python3 "$WORKDIR/scripts/test_selinux_ids.py" \
               --clang "$CLANG_DIR/clang" --lld "$CLANG_DIR/ld.lld" \
               --services security/selinux/ss/services.c --report ../preflash/ids-host-tests
