@@ -2,6 +2,7 @@
 """Apply and verify the BakaSU/SUSFS userspace generation compatibility fix."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import subprocess
@@ -87,64 +88,6 @@ def apply(kernel, bakasu, report):
     hot_path_sha = audit_hot_path(kernel)
     fs_path = kernel / "security/selinux/selinuxfs.c"
     fs = fs_path.read_text(encoding="utf-8")
-    require("susfs_hide_user_queries" not in fs, "Compatibility fix was already applied")
-    wrapper = function(fs, "handle_sel_write_access")
-    require("current_uid().val >= 10000" in wrapper and "ksu_selinux_hide_running" in wrapper,
-            "SUSFS access dispatch predicate changed")
-    predicate = """
-/* Keep status and access on the same view, including secondary users. */
-static noinline bool susfs_hide_user_queries(void)
-{
-\tuid_t appid = current_uid().val % 100000;
-
-\tif (appid < 10000 || !READ_ONCE(ksu_selinux_hide_running) ||
-\t    !ksu_selinux_snapshot_ready())
-\t\treturn false;
-\tif (!smp_load_acquire(&fake_status)) {
-\t\tif (!selinux_kernel_status_page())
-\t\t\treturn false;
-\t\tinitialize_fake_status();
-\t}
-\treturn smp_load_acquire(&fake_status) != NULL;
-}
-"""
-    declaration = "extern void initialize_fake_status(void);"
-    require(fs.count(declaration) == 1, "SUSFS fake status declaration changed")
-    fs = fs.replace(declaration, declaration + """
-extern bool ksu_selinux_snapshot_ready(void);
-extern ssize_t my_write_access(struct file *file, char *buf, size_t size);
-extern ssize_t my_write_context(struct file *file, char *buf, size_t size);
-""" + predicate, 1)
-    fs = replace_function(fs, "handle_sel_write_access", """static ssize_t handle_sel_write_access(struct file *file, char *buf, size_t size)
-{
-\tif (susfs_hide_user_queries())
-\t\treturn susfs_sel_write_access(file, buf, size);
-\treturn sel_write_access(file, buf, size);
-}""")
-    context_wrapper = function(fs, "handle_sel_write_context")
-    require("current_uid().val >= 10000" in context_wrapper,
-            "SUSFS context dispatch predicate changed")
-    fs = replace_function(fs, "handle_sel_write_context", """static ssize_t handle_sel_write_context(struct file *file, char *buf, size_t size)
-{
-\tif (susfs_hide_user_queries())
-\t\treturn susfs_sel_write_context(file, buf, size);
-\treturn sel_write_context(file, buf, size);
-}""")
-    fs = replace_function(fs, "sel_open_handle_status", """static int sel_open_handle_status(struct inode *inode, struct file *filp)
-{
-\tstruct page *status = selinux_kernel_status_page();
-
-#ifdef CONFIG_KSU_SUSFS
-\tif (susfs_hide_user_queries()) {
-\t\tfilp->private_data = smp_load_acquire(&fake_status);
-\t\treturn 0;
-\t}
-#endif
-\tif (!status)
-\t\treturn -ENOMEM;
-\tfilp->private_data = status;
-\treturn 0;
-}""")
     mmap = function(fs, "sel_mmap_handle_status")
     require(all(term in mmap for term in ("vma->vm_pgoff", "PAGE_SIZE", "VM_WRITE", "VM_MAYWRITE")),
             "Status mmap lost upstream ABI guards")
@@ -153,23 +96,6 @@ extern ssize_t my_write_context(struct file *file, char *buf, size_t size);
             "Status mmap offset/size rejection changed")
     require(re.search(r"if\s*\(vma->vm_flags & VM_WRITE\)\s*return -EPERM;", mmap),
             "Status mmap writable rejection changed")
-    body = function(fs, "susfs_sel_write_access")
-    require(body.count("susfs_security_compute_av_user(ssid, tsid, tclass, &avd);") == 1,
-            "Unexpected SUSFS compute_av signature")
-    # The sparse SUSFS registry does not cover additions between existing
-    # public types. Use BakaSU's original policy object for the whole decision.
-    fs = replace_function(fs, "susfs_sel_write_access", """static ssize_t susfs_sel_write_access(struct file *file, char *buf, size_t size)
-{
-\treturn my_write_access(file, buf, size);
-}
-""")
-    require("susfs_security_context_to_sid" in function(fs, "susfs_sel_write_context"),
-            "Unexpected SUSFS context validator")
-    fs = replace_function(fs, "susfs_sel_write_context", """static ssize_t susfs_sel_write_context(struct file *file, char *buf, size_t size)
-{
-\treturn my_write_context(file, buf, size);
-}""")
-
     rules_path = bakasu / "kernel/selinux/rules.c"
     rules = rules_path.read_text(encoding="utf-8")
     register_types = """
@@ -232,22 +158,11 @@ static noinline void ksu_susfs_register_new_types(struct selinux_policy *old,
         if (IS_ERR(snapshot)) {
             pr_err("failed to create backup sepolicy: %ld\\n", PTR_ERR(snapshot));
         } else {
-            snapshot->sidtab = kzalloc(sizeof(*snapshot->sidtab), GFP_KERNEL);
-            if (!snapshot->sidtab) {
-                ksu_destroy_sepolicy(snapshot);
-            } else {
-                int ret = policydb_load_isids(&snapshot->policydb, snapshot->sidtab);
-
-                if (ret) {
-                    kfree(snapshot->sidtab);
-                    ksu_destroy_sepolicy(snapshot);
-                } else {
-                    /* Readers never observe a partially constructed SID table. */
-                    smp_store_release(&backup_sepolicy, snapshot);
-                    pr_notice("SELinux clean snapshot ready: generation=%u types=%u\\n",
-                              snapshot->latest_granting, snapshot->policydb.p_types.nprim);
-                }
-            }
+            /* ksu_dup_sepolicy copies the pointer; never retain the live table. */
+            snapshot->sidtab = NULL;
+            smp_store_release(&backup_sepolicy, snapshot);
+            pr_notice("SELinux clean snapshot ready: generation=%u types=%u\\n",
+                      snapshot->latest_granting, snapshot->policydb.p_types.nprim);
         }
     }
 """ + body[end:]
@@ -294,80 +209,6 @@ static noinline void ksu_susfs_register_new_types(struct selinux_policy *old,
 #endif
     smp_store_release(&fake_status, new_page);""")
     hide = replace_function(hide, "initialize_fake_status", init)
-    snapshot_ready = """#ifdef CONFIG_KSU_SUSFS
-/* The boot snapshot stays immutable and alive for the built-in SUSFS lifetime. */
-noinline bool ksu_selinux_snapshot_ready(void)
-{
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
-    return smp_load_acquire(&backup_sepolicy) != NULL;
-#else
-    return backup_policydb && backup_sidtab;
-#endif
-}
-#endif
-
-"""
-    start, _ = function_span(hide, "my_write_context")
-    hide = hide[:start] + snapshot_ready + hide[start:]
-    for name in ("my_write_context", "my_write_access"):
-        body = function(hide, name)
-        marker = "#endif\n    char *"
-        require(body.count(marker) == 1, f"{name} query entry changed")
-        body = body.replace(marker, """#endif
-#ifdef CONFIG_KSU_SUSFS
-    if (!ksu_selinux_snapshot_ready())
-        return -EAGAIN;
-#endif
-    char *""", 1)
-        hide = replace_function(hide, name, body)
-    # A pure query needs no live SID. The procattr path still supplies
-    # orig_sid_p and keeps the upstream conversion/transition semantics.
-    live_sid = """        if (!orig_rc) {
-#ifdef KSU_COMPAT_HAS_CONTEXT_ADD_HASH
-            orig_rc = context_add_hash(orig_policydb, &orig_context);
-#endif
-            if (!orig_rc) {
-                // sync to global sidtab
-                orig_rc = sidtab_context_to_sid(orig_sidtab, &orig_context, &orig_sid);
-                if (orig_sid_p)
-                    *orig_sid_p = orig_sid;
-            }
-            context_destroy(&orig_context);
-        }"""
-    require(hide.count(live_sid) == 1, "BakaSU live SID synchronization changed")
-    hide = hide.replace(live_sid, """        if (!orig_rc) {
-            /* Validation/access queries must not grow the live SID table. */
-            if (orig_sid_p) {
-#ifdef KSU_COMPAT_HAS_CONTEXT_ADD_HASH
-                orig_rc = context_add_hash(orig_policydb, &orig_context);
-#endif
-                if (!orig_rc) {
-                    orig_rc = sidtab_context_to_sid(orig_sidtab, &orig_context, &orig_sid);
-                    if (!orig_rc)
-                        *orig_sid_p = orig_sid;
-                }
-            }
-            context_destroy(&orig_context);
-        }""", 1)
-    policy_lookup = """    rcu_read_lock();
-    orig_policy = rcu_dereference(selinux_state.policy);
-    orig_policydb = &orig_policy->policydb;
-    orig_sidtab = orig_policy->sidtab;
-    policydb = &policy->policydb;
-    sidtab = policy->sidtab;"""
-    require(hide.count(policy_lookup) == 1, "BakaSU query policy lookup changed")
-    hide = hide.replace(policy_lookup, """    rcu_read_lock();
-    policydb = &policy->policydb;
-    sidtab = policy->sidtab;
-    if (orig_sid_p) {
-        orig_policy = rcu_dereference(selinux_state.policy);
-        orig_policydb = &orig_policy->policydb;
-        orig_sidtab = orig_policy->sidtab;
-    } else {
-        /* Pure queries parse only the snapshot, including symbol lookups. */
-        orig_policydb = policydb;
-        orig_sidtab = sidtab;
-    }""", 1)
     drop = function(hide, "ksu_selinux_hide_drop_backup_if_unused")
     opening, closing = drop.index("{"), drop.rfind("}")
     drop = (drop[:opening + 1] + "\n#ifndef CONFIG_KSU_SUSFS\n" + drop[opening + 1:closing]
@@ -414,16 +255,28 @@ extern bool ksu_is_manager_uid(u32 uid);
     services_path.write_text(services, encoding="utf-8", newline="\n")
     status_path.write_text(status, encoding="utf-8", newline="\n")
     susfs_path.write_text(susfs, encoding="utf-8", newline="\n")
+    spec = importlib.util.spec_from_file_location(
+        "selinux_projection", Path(__file__).with_name("selinux_projection.py"))
+    projection = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(projection)
+    projection.apply(kernel, function, replace_function, require)
+    spec = importlib.util.spec_from_file_location(
+        "selinux_ids", Path(__file__).with_name("selinux_ids.py"))
+    ids = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ids)
+    ids.apply(kernel, bakasu, function, replace_function, require)
     require(audit_hot_path(kernel) == hot_path_sha, "Kernel hot path changed")
     report.mkdir(parents=True, exist_ok=True)
     (report / "selinux-source.json").write_text(json.dumps({
-        "strategy": "Real generation tracking; hidden status/context/access use an immutable boot policy snapshot",
+        "strategy": "Policy-bound ID-compatible single-pass queries; canonical name-mapping fallback; one live SID table",
         "hot_path_sha256": hot_path_sha,
         "services_sha256": hashlib.sha256(services_path.read_bytes()).hexdigest(),
-        "access_function": "my_write_access",
-        "context_function": "my_write_context",
+        "access_function": "security_compute_av_user_projected",
+        "context_function": "security_context_to_sid_user",
         "files": {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
-                  for p in (fs_path, rules_path, hide_path, services_path, status_path, susfs_path)},
+                  for p in (fs_path, rules_path, hide_path, services_path, status_path, susfs_path,
+                            kernel / "security/selinux/hooks.c", kernel / "security/selinux/include/security.h",
+                            kernel / "security/selinux/ss/services.h")},
     }, indent=2) + "\n")
     print("SELinux source checks passed; avd_init preserves policy generation and early boot zero")
 
@@ -431,7 +284,8 @@ extern bool ksu_is_manager_uid(u32 uid);
 def verify(kernel, report, objdump):
     for relative in ("security/selinux/selinuxfs.i", "security/selinux/status.i", "security/selinux/ss/services.i",
                      "drivers/kernelsu/selinux/rules.i", "drivers/kernelsu/feature/selinux_hide.i",
-                     "fs/susfs.i", "fs/susfs.o", "drivers/kernelsu/selinux/rules.o",
+                     "fs/susfs.i", "fs/susfs.o", "security/selinux/hooks.i", "security/selinux/hooks.o",
+                     "security/selinux/ss/services.o", "drivers/kernelsu/selinux/rules.o",
                      "security/selinux/selinuxfs.o", "drivers/kernelsu/feature/selinux_hide.o"):
         (report / Path(relative).name).write_bytes((kernel / "out" / relative).read_bytes())
     original = json.loads((report / "selinux-source.json").read_text())
@@ -444,17 +298,6 @@ def verify(kernel, report, objdump):
                 f"A later patch changed {path}")
     config = (kernel / "out/.config").read_text()
     require("CONFIG_KSU_SUSFS=y\n" in config, "SUSFS did not resolve to built-in")
-    fs = (kernel / "out/security/selinux/selinuxfs.i").read_text()
-    for name, target in (("susfs_sel_write_access", "my_write_access"),
-                         ("susfs_sel_write_context", "my_write_context")):
-        body = function(fs, name)
-        require(f"return {target}(file, buf, size);" in body
-                and "susfs_security_" not in body,
-                f"{name} still queries the live module-modified policy")
-    for name in ("sel_open_handle_status", "handle_sel_write_access", "handle_sel_write_context"):
-        require("susfs_hide_user_queries()" in function(fs, name), f"{name} uses a different hide predicate")
-    require("ksu_selinux_snapshot_ready()" in function(fs, "susfs_hide_user_queries"),
-            "The shared hide predicate can select an absent policy snapshot")
     rules = (kernel / "out/drivers/kernelsu/selinux/rules.i").read_text()
     rules_source = (kernel / "drivers/kernelsu/selinux/rules.c").read_text()
     cache = function(rules, "reset_avc_cache")
@@ -477,10 +320,6 @@ def verify(kernel, report, objdump):
     boot_rules = function(rules_source, "apply_kernelsu_rules")
     require("if (!smp_load_acquire(&backup_sepolicy))" in boot_rules,
             "The clean snapshot can be replaced by a later dirty policy")
-    require(boot_rules.index("policydb_load_isids(&snapshot->policydb")
-            < boot_rules.index("smp_store_release(&backup_sepolicy, snapshot)")
-            < boot_rules.index("ksu_type(db, KERNEL_SU_DOMAIN"),
-            "Snapshot initialization/publication must precede the first KSU rule")
     susfs = (kernel / "out/fs/susfs.i").read_text()
     require("entry->type_value == type_value" in function(susfs, "susfs_is_sus_type_rcu")
             and "tmp_entry->type_value != type_value" in function(susfs, "susfs_add_sus_type"),
@@ -503,57 +342,23 @@ def verify(kernel, report, objdump):
     require(re.search(r"new_status->sequence = 0;\s*new_status->policyload = 0;",
                       function(hide, "initialize_fake_status")),
             "Preprocessor dropped the native 6.6 fake status sentinel")
-    for name in ("my_write_access", "my_write_context"):
-        query = function(hide, name)
-        require("ksu_selinux_snapshot_ready()" in query and re.search(r"return\s*-(?:11|EAGAIN);", query),
-                f"{name} lacks its snapshot readiness guard")
-        require("security_context_to_sid_with_policy(backup_sepolicy," in query,
-                f"{name} lost the original-policy context lookup")
-    access = function(hide, "my_write_access")
-    require(access.index("security_compute_av_user_with_policy(backup_sepolicy,")
-            < access.index("avd.seqno = 1;") < access.index("scnprintf("),
-            "Snapshot access must preserve class0 generation1 before formatting")
-    require("avd->seqno = 1;" in function(hide, "avd_init"),
-            "The private snapshot decision initializer lost its clean generation")
-    require("!tclass" in function(hide, "ksu_security_compute_av_user"),
-            "The snapshot query lost the class0 branch")
-    conversion = function(hide, "security_context_to_sid_with_policy")
-    require("orig_policydb = policydb;" in conversion and "orig_sidtab = sidtab;" in conversion,
-            "Pure queries can inspect live-only policy symbols")
-    require(re.search(r"if \(orig_sid_p\)\s*\{(?:(?!context_destroy).)*"
-                      r"sidtab_context_to_sid\(orig_sidtab", conversion, re.S),
-            "Pure context queries can mutate the live SID table")
     require("backup_sepolicy" not in function(hide, "ksu_selinux_hide_drop_backup_if_unused"),
             "SUSFS queries can race with snapshot disposal")
     enable = function(hide, "ksu_selinux_hide_enable")
     require("ksu_patch_text(" not in enable and "selinux_write_op" not in enable,
             "SUSFS and BakaSU are both installing SELinux write hooks")
-    obj = kernel / "out/security/selinux/selinuxfs.o"
-    fs_object = object_code(objdump, obj)
-    for name in ("sel_open_handle_status", "handle_sel_write_access", "handle_sel_write_context"):
-        calls = function_code(fs_object, name)
-        require("susfs_hide_user_queries" in calls, f"{name} lost the shared predicate call in object code")
-        (report / (name + ".disasm")).write_text(calls)
-    for name, wrapper, target in (("access", "handle_sel_write_access", "my_write_access"),
-                                  ("context", "handle_sel_write_context", "my_write_context")):
-        calls = (function_code(fs_object, wrapper)
-                 + function_code(fs_object, "susfs_sel_write_" + name, optional=True))
-        require(target in calls, f"Compiled {name} path lost the snapshot callback")
-        require("susfs_security_" not in calls,
-                f"Compiled {name} path still enters the live SUSFS policy query")
-        (report / (name + "-calls.disasm")).write_text(calls)
-    predicate_code = function_code(fs_object, "susfs_hide_user_queries")
-    (report / "fake-status-acquire.disasm").write_text(predicate_code)
+    spec = importlib.util.spec_from_file_location(
+        "selinux_projection", Path(__file__).with_name("selinux_projection.py"))
+    projection = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(projection)
+    projection.verify(kernel, report, objdump, function, object_code, function_code, require)
+    spec = importlib.util.spec_from_file_location(
+        "selinux_ids", Path(__file__).with_name("selinux_ids.py"))
+    ids = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ids)
+    ids.verify(kernel, report, objdump, function, function_code, object_code, require)
     hide_obj = kernel / "out/drivers/kernelsu/feature/selinux_hide.o"
     hide_object = object_code(objdump, hide_obj)
-    readiness = function_code(hide_object, "ksu_selinux_snapshot_ready")
-    require(re.search(r"\b(ldar|ldapr)\b", readiness), "Snapshot reads lost acquire ordering")
-    (report / "snapshot-ready.disasm").write_text(readiness)
-    for name in ("my_write_access", "my_write_context"):
-        query_code = function_code(hide_object, name)
-        require("backup_sepolicy" in query_code and "ksu_selinux_snapshot_ready" in query_code,
-                f"Compiled {name} lost its guarded snapshot lookup")
-        (report / (name + ".disasm")).write_text(query_code)
     rules_object = object_code(objdump, kernel / "out/drivers/kernelsu/selinux/rules.o")
     registration = function_code(rules_object, "ksu_susfs_register_new_types")
     require("susfs_add_sus_type" in registration, "Object code lost the type registry callback")
@@ -565,7 +370,6 @@ def verify(kernel, report, objdump):
     publish_code = function_code(hide_object, "initialize_fake_status")
     (report / "fake-status-publish.disasm").write_text(publish_code)
     (report / "selinux-hide-full.disasm").write_text(hide_object[1])
-    require(re.search(r"\b(ldar|ldapr)\b", predicate_code), "Fake page loads lost acquire ordering")
     require(re.search(r"\bstlr\b", publish_code), "Fake page publication lost release ordering")
     print("SELinux preprocessor and object code gates passed")
 

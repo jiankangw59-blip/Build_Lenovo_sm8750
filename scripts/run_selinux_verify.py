@@ -10,11 +10,19 @@ import time
 from pathlib import Path
 
 
+def is_sync_error(line):
+    candidate = re.search(r"(?:selinux_status|servicemanager.*selinux).*(?:fail|error)|avc.*seqno", line, re.I)
+    success = re.search(r"avc:\s+op=load_policy\s+lsm=selinux\s+seqno=\d+\s+res=1\s*$", line)
+    return bool(candidate and not success)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", required=True)
     parser.add_argument("--probe", type=Path, required=True,
                         help="Static aarch64 build of selinux_probe.c")
+    parser.add_argument("--sid-probe", type=Path, required=True,
+                        help="Static aarch64 build of selinux_sid_probe.c")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--app-uid", type=int, default=10000)
     parser.add_argument("--boot", type=Path, help="Require active boot partition to match this image")
@@ -23,6 +31,7 @@ def main():
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     remote = "/data/local/tmp/selinux-verify-probe"
+    sid_remote = "/data/local/tmp/selinux-single-sid-probe"
     results = {"serial": args.serial, "passed": False, "checks": {}}
 
     def adb(*command, timeout=30):
@@ -121,6 +130,21 @@ def main():
         if not passed:
             raise RuntimeError("Rejected context queries changed the live SID table or were not rejected")
 
+    def public_sid_check(label):
+        output = root(f"{sid_remote} {args.app_uid}; probe_rc=$?; echo PROBE_EXIT=$probe_rc")
+        save(label + "-sid-nine.txt", output)
+        passed = "[FAIL]" not in output and output.count("[PASS] SID group=") == 9 and "PROBE_EXIT=0" in output
+        results["checks"][label + "_public_sid_nine"] = {"passed": passed}
+        if not passed:
+            raise RuntimeError("Public labels do not share the native live SID cache across interfaces")
+        for domain in ("u:r:untrusted_app:s0:c512,c768", "u:r:app_zygote:s0:c512,c768"):
+            output = root(f"{sid_remote} {args.app_uid} --reachability {domain}; probe_rc=$?; echo PROBE_EXIT=$probe_rc")
+            save(label + "-reachability-" + domain.split(":")[2] + ".txt", output)
+            passed = "[FAIL]" not in output and output.count("[PASS]") == 5 and "PROBE_EXIT=0" in output
+            results["checks"][label + "_reachability_" + domain.split(":")[2]] = {"passed": passed}
+            if not passed:
+                raise RuntimeError("An additional user query is reachable; review its projection boundary")
+
     try:
         identity = root("getprop ro.product.model; getprop ro.boot.slot_suffix; uname -a; cat /proc/sys/kernel/random/boot_id")
         save("device.txt", identity)
@@ -138,14 +162,17 @@ def main():
         timestamps = re.findall(r"^\[\s*(\d+\.\d+)\]", previous_dmesg, re.M)
         last_time = max(map(float, timestamps), default=0)
         adb("push", str(args.probe), remote)
-        root("chmod 755 " + remote)
+        adb("push", str(args.sid_probe), sid_remote)
+        root("chmod 755 " + remote + " " + sid_remote)
         probes("baseline")
         cache_check("baseline")
         probes("pre-policy")
         sidtab_check()
+        public_sid_check("pre-policy")
         mutation = root("/data/adb/ksu/bin/ksud sepolicy patch 'allow untrusted_app untrusted_app process getattr'")
         save("sepolicy-patch.txt", mutation)
         probes("post-policy")
+        public_sid_check("post-policy")
         initial = results["checks"]["pre-policy_root"]
         updated = results["checks"]["post-policy_root"]
         if (updated["policyload"] != initial["policyload"] + 1 or
@@ -159,11 +186,14 @@ def main():
                 recent.append(line)
         errors = [line for line in recent if re.search(r"seqno.*latest_notif", line, re.I)]
         save("dmesg-seqno-errors.txt", "\n".join(errors) or "No new seqno/latest_notif errors")
+        rcu_errors = [line for line in recent if re.search(
+            r"sleeping function called|scheduling while atomic|suspicious RCU usage|"
+            r"RCU.*(?:stall|sleep|warning)|BUG:.*(?:sleep|RCU)", line, re.I)]
+        save("dmesg-rcu-errors.txt", "\n".join(rcu_errors) or "No new RCU, atomic-scheduling or sleep warnings")
         logcat = root("logcat -d -t 1500")
-        daemon_errors = [line for line in logcat.splitlines() if re.search(
-            r"(?:selinux_status|servicemanager.*selinux).*(?:fail|error)|avc.*seqno", line, re.I)]
+        daemon_errors = [line for line in logcat.splitlines() if is_sync_error(line)]
         save("daemon-errors.txt", "\n".join(daemon_errors) or "No SELinux synchronization errors in recent daemon logs")
-        if errors or daemon_errors:
+        if errors or daemon_errors or rcu_errors:
             raise RuntimeError("SELinux synchronization errors were found")
         results["passed"] = True
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
