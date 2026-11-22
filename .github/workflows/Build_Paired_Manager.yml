@@ -1,12 +1,26 @@
 name: Build paired BakaSU manager
 
 on:
+  workflow_call:
+    inputs:
+      kernel_run:
+        required: true
+        type: string
+      kernel_version:
+        required: true
+        type: string
+      manager_package:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       kernel_run:
-        description: Successful kernel run whose verified source must be reproduced
+        description: Verified kernel run; empty selects the latest signed build for this kernel
+        required: false
+      kernel_version:
+        description: Kernel version of the paired boot
         required: true
-        default: '44966972001'
+        default: '6.6.89'
       manager_package:
         description: Application ID; unsigned output requires an owner signing key
         required: true
@@ -23,15 +37,31 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       KERNEL_RUN: ${{ inputs.kernel_run }}
+      KERNEL_VERSION: ${{ inputs.kernel_version }}
       KSU_PACKAGE_NAME: ${{ inputs.manager_package }}
     steps:
       - uses: actions/checkout@v5
       - name: Reproduce the verified kernel's BakaSU source
         run: |
           set -euo pipefail
+          [[ "$KERNEL_VERSION" =~ ^6\.6\.[0-9]+$ ]]
+          if [ -z "$KERNEL_RUN" ]; then
+            for candidate in $(gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow Build_Lenovo_sm8750.yml --status success --limit 20 \
+              --json databaseId --jq '.[].databaseId'); do
+              names=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts" \
+                --jq '.artifacts[] | select(.expired == false) | .name')
+              if grep -Fxq "preflash-verification_$KERNEL_VERSION" <<< "$names" && \
+                 grep -q '^Boot_' <<< "$names"; then
+                KERNEL_RUN=$candidate
+                break
+              fi
+            done
+          fi
           [[ "$KERNEL_RUN" =~ ^[0-9]+$ ]]
+          echo "KERNEL_SOURCE_RUN=$KERNEL_RUN" >> "$GITHUB_ENV"
           gh run download "$KERNEL_RUN" --repo "$GITHUB_REPOSITORY" \
-            --name preflash-verification_6.6.89 --dir evidence
+            --name "preflash-verification_$KERNEL_VERSION" --dir evidence
           commit=$(tr -d '\r\n' < evidence/bakasu-commit.txt)
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
           git clone --filter=blob:none https://github.com/Baka-SU/BakaSU.git bakasu
@@ -98,6 +128,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: paired-manager-${{ inputs.kernel_run }}
+          name: paired-manager-${{ env.KERNEL_SOURCE_RUN || github.run_id }}
           path: paired-manager/
           if-no-files-found: error

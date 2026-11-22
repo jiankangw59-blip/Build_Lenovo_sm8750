@@ -1079,6 +1079,19 @@ jobs:
          name: Boot_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_BakaSU_AOSP_Signed
          path: kernel_workspace/boot_avb_tool/AOSP-Testkey-BootSigner-main/boot.img
 
+  paired_manager:
+    name: Build manager paired with this boot
+    needs: build
+    if: ${{ github.event.inputs.enable_susfs == 'true' && github.event.inputs.enable_signed == 'true' }}
+    uses: ./.github/workflows/Build_Paired_Manager.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      kernel_run: ${{ format('{0}', github.run_id) }}
+      kernel_version: ${{ github.event.inputs.kernel_version || '6.6.89' }}
+      manager_package: ${{ vars.BAKASU_MANAGER_PACKAGE || 'com.resukisu.resukisu' }}
+
   upload_rekernel:
     name: Upload Re-Kernel Module
     if: ${{ github.event.inputs.enable_ReKernel == 'true' }}
