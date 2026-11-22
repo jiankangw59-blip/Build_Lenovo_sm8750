@@ -59,13 +59,30 @@ def main():
         (args.report / "boot-signature-verification.txt").write_text(verification)
         with tempfile.TemporaryDirectory(prefix="verify-boot-") as directory:
             unpack = run((args.signer / "tools/magiskboot").resolve(), "unpack", args.boot.resolve(), cwd=directory)
-            embedded = Path(directory) / "kernel"
-            if not embedded.is_file() or digest(embedded) != digest(args.kernel):
-                raise ValueError("Signed boot does not contain the final compiled kernel Image")
             (args.report / "boot-unpack.txt").write_text(unpack)
+            embedded = Path(directory) / "kernel"
+            if not embedded.is_file():
+                raise ValueError("Signed boot has no kernel payload")
+            payload = embedded.read_bytes()
+            dtb = Path(directory) / "kernel_dtb"
+            dtb_bytes = dtb.read_bytes() if dtb.is_file() else b""
+            # magiskboot splits an appended DTB from the kernel during unpack.
+            # Reconstruct the exact Image, retaining every byte for comparison.
+            if hashlib.sha256(payload).hexdigest() != digest(args.kernel):
+                payload += dtb_bytes
+            payload_sha = hashlib.sha256(payload).hexdigest()
+            payload_info = {"compiled_bytes": args.kernel.stat().st_size,
+                            "unpacked_kernel_bytes": embedded.stat().st_size,
+                            "unpacked_dtb_bytes": len(dtb_bytes),
+                            "reconstructed_sha256": payload_sha,
+                            "compiled_sha256": digest(args.kernel)}
+            (args.report / "boot-kernel-comparison.json").write_text(json.dumps(payload_info, indent=2) + "\n")
+            if payload_sha != digest(args.kernel):
+                raise ValueError("Signed boot does not contain the final compiled kernel Image")
         manifest = {
             "boot_sha256": digest(args.boot),
             "kernel_sha256": digest(args.kernel),
+            "unpacked_dtb_bytes": len(dtb_bytes),
             "template_sha256": digest(args.template),
             "partition_bytes": args.boot.stat().st_size,
             "algorithm": algorithm,
