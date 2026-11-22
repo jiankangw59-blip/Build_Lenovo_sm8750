@@ -36,8 +36,40 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def object_code(objdump, path):
+    table = subprocess.check_output([objdump, "-t", str(path)], text=True)
+    symbols = {}
+    for line in table.splitlines():
+        match = re.match(r"^([0-9a-f]+)\s+.*?\bF\s+(\S+)\s+([0-9a-f]+)\s+(.+)$", line)
+        if match:
+            name = match[4].split()[-1]
+            symbols[name] = (match[2], int(match[1], 16), int(match[3], 16))
+    return symbols, subprocess.check_output([objdump, "-dr", str(path)], text=True)
+
+
+def function_code(obj, name, optional=False):
+    symbols, listing = obj
+    if optional and name not in symbols:
+        return ""
+    require(name in symbols, f"Object code has no function {name}")
+    section, start, size = symbols[name]
+    require(size > 0, f"Object function {name} has no extent")
+    lines = []
+    current_section = None
+    for line in listing.splitlines():
+        heading = re.match(r"Disassembly of section (.+):", line)
+        if heading:
+            current_section = heading[1]
+        address = re.match(r"\s*([0-9a-f]+)(?::| <)", line)
+        if current_section == section and address and start <= int(address[1], 16) < start + size:
+            lines.append(line)
+    # Use the ELF function extent: --disassemble-symbols can stop at an internal
+    # ARM64 $d/$x mapping symbol and omit the remaining instructions.
+    return "\n".join(lines) + "\n"
+
+
 def audit_hot_path(kernel):
-    source = (kernel / "security/selinux/ss/services.c").read_text()
+    source = (kernel / "security/selinux/ss/services.c").read_text(encoding="utf-8")
     body = function(source, "avd_init")
     require("policy->latest_granting" in body, "avd_init lost the real policy generation")
     require(re.search(r"avd->seqno\s*=\s*0\s*;", body), "avd_init lost its early boot generation")
@@ -50,7 +82,7 @@ def apply(kernel, bakasu, report):
     kernel, bakasu = kernel.resolve(), bakasu.resolve()
     hot_path_sha = audit_hot_path(kernel)
     fs_path = kernel / "security/selinux/selinuxfs.c"
-    fs = fs_path.read_text()
+    fs = fs_path.read_text(encoding="utf-8")
     require("susfs_access_seqno" not in fs, "Compatibility fix was already applied")
     wrapper = function(fs, "handle_sel_write_access")
     require("current_uid().val >= 10000" in wrapper and "ksu_selinux_hide_running" in wrapper,
@@ -121,7 +153,7 @@ static noinline u32 susfs_access_seqno(u32 seqno)
     fs = replace_function(fs, "susfs_sel_write_access", helper + body)
 
     rules_path = bakasu / "kernel/selinux/rules.c"
-    rules = rules_path.read_text()
+    rules = rules_path.read_text(encoding="utf-8")
     cache = function(rules, "reset_avc_cache")
     # Port generation tracking as one unit: publication, cache and notification.
     require("avc_ss_reset(0);" in cache and "avc_ss_reset(avc, 0);" in cache,
@@ -153,7 +185,7 @@ static noinline u32 susfs_access_seqno(u32 seqno)
         rules = replace_function(rules, name, body)
 
     services_path = kernel / "security/selinux/ss/services.c"
-    services = services_path.read_text()
+    services = services_path.read_text(encoding="utf-8")
     for name in ("selinux_policy_commit", "security_set_bools"):
         body = function(services, name)
         guards = re.findall(r"^#ifdef CONFIG_KSU_SUSFS\n.*?^#endif[^\n]*\n", body, re.M | re.S)
@@ -163,7 +195,7 @@ static noinline u32 susfs_access_seqno(u32 seqno)
             body = body.replace(guard, "", 1)
         services = replace_function(services, name, body)
     status_path = kernel / "security/selinux/status.c"
-    status = status_path.read_text()
+    status = status_path.read_text(encoding="utf-8")
     for name in ("selinux_status_update_policyload", "selinux_status_update_setenforce"):
         body = function(status, name)
         guards = re.findall(r"^#ifdef CONFIG_KSU_SUSFS\n.*?^#endif[^\n]*\n", body, re.M | re.S)
@@ -172,7 +204,7 @@ static noinline u32 susfs_access_seqno(u32 seqno)
         status = replace_function(status, name, body.replace(guards[0], "", 1))
 
     hide_path = bakasu / "kernel/feature/selinux_hide.c"
-    hide = hide_path.read_text()
+    hide = hide_path.read_text(encoding="utf-8")
     init = function(hide, "initialize_fake_status")
     require(init.count("fake_status = new_page;") == 1, "Fake status initialization changed")
     init = init.replace("    fake_status = new_page;", """#ifdef CONFIG_KSU_SUSFS
@@ -185,11 +217,11 @@ static noinline u32 susfs_access_seqno(u32 seqno)
 #endif
     smp_store_release(&fake_status, new_page);""")
     hide = replace_function(hide, "initialize_fake_status", init)
-    fs_path.write_text(fs)
-    rules_path.write_text(rules)
-    hide_path.write_text(hide)
-    services_path.write_text(services)
-    status_path.write_text(status)
+    fs_path.write_text(fs, encoding="utf-8", newline="\n")
+    rules_path.write_text(rules, encoding="utf-8", newline="\n")
+    hide_path.write_text(hide, encoding="utf-8", newline="\n")
+    services_path.write_text(services, encoding="utf-8", newline="\n")
+    status_path.write_text(status, encoding="utf-8", newline="\n")
     require(audit_hot_path(kernel) == hot_path_sha, "Kernel hot path changed")
     report.mkdir(parents=True, exist_ok=True)
     (report / "selinux-source.json").write_text(json.dumps({
@@ -251,7 +283,8 @@ def verify(kernel, report, objdump):
                       function(hide, "initialize_fake_status")),
             "Preprocessor dropped the native 6.6 fake status sentinel")
     obj = kernel / "out/security/selinux/selinuxfs.o"
-    output = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=susfs_access_seqno", str(obj)], text=True)
+    fs_object = object_code(objdump, obj)
+    output = function_code(fs_object, "susfs_access_seqno")
     require("<susfs_access_seqno>:" in output, "Compatibility function is absent from object code")
     # Clang can simplify min(unsigned_seqno, 1) to unsigned_seqno != 0.
     boolean_clamp = (re.search(r"\bcmp\s+w0,\s*#(?:0x)?0\b", output)
@@ -261,18 +294,20 @@ def verify(kernel, report, objdump):
     require(boolean_clamp or threshold_clamp, "Object code lacks the generation clamp")
     (report / "susfs_access_seqno.disasm").write_text(output)
     for name in ("sel_open_handle_status", "handle_sel_write_access"):
-        calls = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=" + name, str(obj)], text=True)
+        calls = function_code(fs_object, name)
         require("susfs_hide_user_queries" in calls, f"{name} lost the shared predicate call in object code")
         (report / (name + ".disasm")).write_text(calls)
-    access_calls = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=handle_sel_write_access,susfs_sel_write_access", str(obj)], text=True)
+    access_calls = (function_code(fs_object, "handle_sel_write_access")
+                    + function_code(fs_object, "susfs_sel_write_access", optional=True))
     require("susfs_access_seqno" in access_calls, "Compiled access path lost the generation clamp call")
     (report / "access-calls.disasm").write_text(access_calls)
-    predicate_code = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=susfs_hide_user_queries", str(obj)], text=True)
+    predicate_code = function_code(fs_object, "susfs_hide_user_queries")
     (report / "fake-status-acquire.disasm").write_text(predicate_code)
     hide_obj = kernel / "out/drivers/kernelsu/feature/selinux_hide.o"
-    publish_code = subprocess.check_output([objdump, "-dr", "--disassemble-symbols=initialize_fake_status", str(hide_obj)], text=True)
+    hide_object = object_code(objdump, hide_obj)
+    publish_code = function_code(hide_object, "initialize_fake_status")
     (report / "fake-status-publish.disasm").write_text(publish_code)
-    (report / "selinux-hide-full.disasm").write_text(subprocess.check_output([objdump, "-dr", str(hide_obj)], text=True))
+    (report / "selinux-hide-full.disasm").write_text(hide_object[1])
     require(re.search(r"\b(ldar|ldapr)\b", predicate_code), "Fake page loads lost acquire ordering")
     require(re.search(r"\bstlr\b", publish_code), "Fake page publication lost release ordering")
     print(output)
