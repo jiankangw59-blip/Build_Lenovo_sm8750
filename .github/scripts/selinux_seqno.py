@@ -329,6 +329,7 @@ def verify(kernel, report, objdump):
     for name in ("sel_open_handle_status", "handle_sel_write_access"):
         require("susfs_hide_user_queries()" in function(fs, name), f"{name} uses a different hide predicate")
     rules = (kernel / "out/drivers/kernelsu/selinux/rules.i").read_text()
+    rules_source = (kernel / "drivers/kernelsu/selinux/rules.c").read_text()
     cache = function(rules, "reset_avc_cache")
     for call in ("avc_ss_reset(seqno)", "selnl_notify_policyload(seqno)", "selinux_status_update_policyload(seqno)"):
         require(call in cache, f"Real generation notification is missing: {call}")
@@ -336,8 +337,11 @@ def verify(kernel, report, objdump):
         body = function(rules, name)
         require("old_pol->latest_granting + 1" in body and "reset_avc_cache(seqno)" in body,
                 f"{name} does not publish and notify the same generation")
-        require(body.index("ksu_susfs_register_new_types(old_pol, pol)")
-                < body.index("rcu_assign_pointer("), f"{name} publishes types before registration")
+        require("ksu_susfs_register_new_types(old_pol, pol)" in body,
+                f"{name} lost type registration during preprocessing")
+        raw_body = function(rules_source, name)
+        require(raw_body.index("ksu_susfs_register_new_types(old_pol, pol)")
+                < raw_body.index("rcu_assign_pointer("), f"{name} publishes types before registration")
     registry = function(rules, "ksu_susfs_register_new_types")
     require(re.search(r"old->policydb\.(?:p_types|symtab\[\s*(?:3|SYM_TYPES)\s*\])\.nprim", registry)
             and "!type->attribute" in registry
