@@ -7,7 +7,6 @@ from pathlib import Path
 import re
 
 from selinux_seqno import function, require
-from selinux_projection import unify_current_attr
 
 NATIVE_FILES = {
     "kernel/cred.c": "native-cred.c",
@@ -55,8 +54,8 @@ def audit(kernel, bakasu, report):
     actual = (kernel / "security/selinux/hooks.c").read_text(encoding="utf-8")
     before, after = function(native, "selinux_setprocattr"), function(actual, "selinux_setprocattr")
     restored = after.replace("security_context_to_sid_user(", "security_context_to_sid(")
-    if unify_current_attr(before, require) != restored:
-        raise ValueError("setprocattr changed beyond the audited current rejection flow")
+    if before != restored:
+        raise ValueError("setprocattr changed beyond the explicit user conversion wrapper")
     registrations = []
     for path in (bakasu / "kernel").rglob("*.c"):
         text = path.read_text(encoding="utf-8")
@@ -68,7 +67,7 @@ def audit(kernel, bakasu, report):
     result = {"scope": "Source comparison with the selected common archive before feature patches; not a stock-device timing measurement",
               "baseline_sha256": captured["sha256"],
               "credential_functions": checks,
-              "setprocattr_only_delta": "Explicit user conversion; parse current newline strings; reject empty current SID before credentials",
+              "setprocattr_only_delta": "security_context_to_sid -> security_context_to_sid_user; original current branching and credentials order retained",
               "bakasu_credential_lifecycle_registrations": registrations}
     (report / "credential-path-audit.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print("Native credential lifecycle and setprocattr source boundaries verified")

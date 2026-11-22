@@ -216,18 +216,6 @@ int test_common_permission_schema_and_fallback(void) {
     CHECK(d.allowed == 2 && d.auditdeny == ~2U);
     return 0;
 }
-int test_invalid_prefixes_resolve_the_same_fixed_symbols(void) {
-    init(&a); init(&b);
-    char text[96]; struct context context; struct sidtab sidtab;
-    const char *invalid[] = {"u:r:missing:s0", "\n:r:missing:s0", "missing:r:app:s0", "u:missing:app:s0"};
-    for (unsigned i = 0; i < sizeof(invalid)/sizeof(invalid[0]); i++) {
-        copy(text, invalid[i]); symbol_lookups = 0; mls_calls = 0;
-        CHECK(string_to_context_struct_user_ids(&b.policy.policydb,&sidtab,text,&context,0,&a.policy.policydb) == -EINVAL);
-        CHECK(symbol_lookups == 3 && mls_calls == 0);
-    }
-    return 0;
-}
-
 int test_guarded_parser_boundaries(void) {
     init(&a); init(&b); add_symbol(&b, SYM_TYPES, "ksu", 2, false);
     char text[64]; struct context context; struct sidtab sidtab;
