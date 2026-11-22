@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           ndk=$(sed -n 's/^ndk = "\([^"]*\)"/\1/p' bakasu/manager/gradle/libs.versions.toml)
           test -n "$ndk"
-          sdkmanager "platforms;android-37" "build-tools;36.1.0" "ndk;$ndk" "cmake;3.22.1"
+          sdkmanager "platforms;android-37.0" "build-tools;36.1.0" "ndk;$ndk" "cmake;3.22.1"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ndk" >> "$GITHUB_ENV"
       - name: Preserve the matching upstream installer payloads
         run: |
