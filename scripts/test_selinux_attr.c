@@ -57,42 +57,38 @@ static void reset(void) {checks=parses=prepares=commits=aborts=0;permission_erro
 
 /* ACTUAL_SELINUX_SETPROCATTR */
 
-int test_invalid_current_uses_parser_without_credentials(void) {
-    char a[80],b[80];copy(a,"u:r:missing:s0");copy(b,"\n:r:missing:s0");
-    reset();CHECK(selinux_setprocattr("current",a,length(a))==-EINVAL);
-    CHECK(checks==1 && parses==1 && prepares==0 && commits==0 && aborts==0);
-    reset();CHECK(selinux_setprocattr("current",b,length(b))==-EINVAL);
+int test_native_invalid_type_returns_before_credentials(void) {
+    char text[80];copy(text,"u:r:missing:s0");reset();
+    CHECK(selinux_setprocattr("current",text,length(text))==-EINVAL);
     CHECK(checks==1 && parses==1 && prepares==0 && commits==0 && aborts==0);return 0;
 }
-int test_permission_check_precedes_both_invalid_parses(void) {
+int test_native_newline_current_prepares_and_aborts(void) {
+    char text[80];copy(text,"\n:r:missing:s0");reset();
+    CHECK(selinux_setprocattr("current",text,length(text))==-EINVAL);
+    CHECK(checks==1 && parses==0 && prepares==1 && commits==0 && aborts==1);return 0;
+}
+int test_permission_check_precedes_native_current_fork(void) {
     char text[80];const char *values[]={"u:r:missing:s0","\n:r:missing:s0"};
     for(unsigned i=0;i<2;i++){reset();permission_error=-EACCES;copy(text,values[i]);
       CHECK(selinux_setprocattr("current",text,length(text))==-EACCES);
       CHECK(checks==1 && parses==0 && prepares==0);}return 0;
 }
-int test_empty_current_does_not_allocate_credentials(void) {
-    char empty[1]={0};reset();oom=true;
-    CHECK(selinux_setprocattr("current",empty,0)==-EINVAL);
-    CHECK(checks==1 && parses==0 && prepares==0);return 0;
+int test_native_empty_single_newline_and_nul_current(void) {
+    const char *values[]={"","\n",""};const size_t lengths[]={0,1,1};
+    for(unsigned i=0;i<3;i++){char text[2];copy(text,values[i]);reset();
+      CHECK(selinux_setprocattr("current",text,lengths[i])==-EINVAL);
+      CHECK(checks==1 && parses==0 && prepares==1 && aborts==1 && commits==0);}return 0;
 }
-int test_single_newline_and_nul_current_never_allocate_credentials(void) {
-    char newline[2]={'\n',0},nul[1]={0};reset();
-    CHECK(selinux_setprocattr("current",newline,1)==-EINVAL);
-    CHECK(checks==1 && parses==1 && prepares==0);
-    reset();CHECK(selinux_setprocattr("current",nul,1)==-EINVAL);
-    CHECK(checks==1 && parses==0 && prepares==0);return 0;
+int test_native_invalid_current_retains_credential_oom_priority(void) {
+    char text[2]={'\n',0};reset();oom=true;
+    CHECK(selinux_setprocattr("current",text,1)==-ENOMEM);
+    CHECK(checks==1 && parses==0 && prepares==1 && aborts==0);return 0;
 }
-int test_other_attributes_retain_empty_clear(void) {
+int test_other_attributes_retain_newline_and_empty_clear(void) {
     const char *names[]={"exec","fscreate","keycreate","sockcreate"};
-    for(unsigned i=0;i<4;i++){char empty[1]={0};reset();
-      CHECK(selinux_setprocattr(names[i],empty,0)==0);
-      CHECK(checks==1 && parses==0 && prepares==1 && commits==1 && aborts==0);}return 0;
-}
-int test_other_attributes_retain_newline_clear(void) {
-    const char *names[]={"exec","fscreate","keycreate","sockcreate"};
-    for(unsigned i=0;i<4;i++){char newline[2]={'\n',0};reset();
-      CHECK(selinux_setprocattr(names[i],newline,1)==1);
-      CHECK(checks==1 && parses==0 && prepares==1 && commits==1 && aborts==0);}return 0;
+    for(unsigned i=0;i<4;i++){for(unsigned j=0;j<2;j++){char text[2]={'\n',0};if(!j)text[0]=0;reset();
+      CHECK(selinux_setprocattr(names[i],text,j)==(int)j);
+      CHECK(checks==1 && parses==0 && prepares==1 && commits==1 && aborts==0);}}return 0;
 }
 int test_valid_current_retains_transition_and_commit(void) {
     char text[80];copy(text,"u:r:app:s0");reset();

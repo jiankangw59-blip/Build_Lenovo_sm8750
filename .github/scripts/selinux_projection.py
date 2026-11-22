@@ -3,24 +3,6 @@ import hashlib
 import re
 
 
-def unify_current_attr(body, require):
-    """Parse nonempty current labels before credentials; retain clear semantics elsewhere."""
-    marker = "\tchar *str = value;"
-    require(body.count(marker) == 1, "Procattr value declaration changed")
-    body = body.replace(marker, marker + '\n\tbool current_attr = !strcmp(name, "current");', 1)
-    require(body.count('else if (!strcmp(name, "current"))') == 2,
-            "Procattr current dispatch changed")
-    body = body.replace('else if (!strcmp(name, "current"))', 'else if (current_attr)')
-    marker = "\tif (size && str[0] && str[0] != '\\n') {"
-    require(body.count(marker) == 1, "Procattr newline/clear dispatch changed")
-    body = body.replace(marker, "\tif (size && str[0] && (current_attr || str[0] != '\\n')) {", 1)
-    marker = "\tnew = prepare_creds();"
-    require(body.count(marker) == 1, "Procattr credential preparation changed")
-    body = body.replace(marker, "\t/* current cannot be cleared; reject before allocating credentials. */\n"
-                        "\tif (current_attr && !sid)\n\t\treturn -EINVAL;\n\n" + marker, 1)
-    return body
-
-
 def apply(kernel, function, replace_function, require):
     services_path = kernel / "security/selinux/ss/services.c"
     header_path = kernel / "security/selinux/include/security.h"
@@ -283,10 +265,8 @@ int security_context_str_to_sid_user(const char *scontext, u32 *sid, gfp_t gfp);
                    r"#else\n\1#endif[^\n]*", r"\1", hooks)
     body = function(hooks, "selinux_setprocattr")
     require(body.count("security_context_to_sid(value, size,") == 1, "Native procattr parser changed")
-    # Keep permissions first and live transitions; malformed current strings use
-    # the parser instead of allocating and then aborting credentials.
+    # Keep the upstream checks/AVC ordering and actual live-policy transition.
     body = body.replace("security_context_to_sid(value, size,", "security_context_to_sid_user(value, size,", 1)
-    body = unify_current_attr(body, require)
     hooks = replace_function(hooks, "selinux_setprocattr", body)
     require("handle_selinux_" not in hooks and "susfs_selinux_" not in hooks,
             "SUSFS still replaces a native LSM entry")
@@ -319,7 +299,7 @@ def verify(kernel, report, objdump, function, object_code, function_code, requir
         require("avc_has_perm(" in body, f"{name} lost its native permission check")
     require("security_context_to_sid_user(value, size," in function(hooks, "selinux_setprocattr"),
             "Procattr does not share user-input validation")
-    # Other native bodies remain exact. current has the audited rejection-flow delta.
+    # Apart from selecting the user API, native transaction/LSM bodies are exact.
     for path, input_name, names in (
         (fs_source, "selinuxfs-input.c", entries),
         (hooks_source, "hooks-input.c", ("selinux_setprocattr", "selinux_inode_setxattr",
@@ -329,10 +309,7 @@ def verify(kernel, report, objdump, function, object_code, function_code, requir
         for name in names:
             normalized = function(path, name).replace("security_context_to_sid_user(", "security_context_to_sid(")
             normalized = normalized.replace("security_context_str_to_sid_user(", "security_context_str_to_sid(")
-            expected = function(original, name)
-            if name == "selinux_setprocattr":
-                expected = unify_current_attr(expected, require)
-            require(normalized == expected, f"Unexpected execution/order changed: {name}")
+            require(normalized == function(original, name), f"Native execution/order changed: {name}")
     for name in ("security_context_to_sid", "security_context_to_sid_default", "security_context_to_sid_force"):
         require(", false);" in function(source, name), f"Internal conversion enters projection: {name}")
     require(", true);" in function(source, "security_context_to_sid_user"),
