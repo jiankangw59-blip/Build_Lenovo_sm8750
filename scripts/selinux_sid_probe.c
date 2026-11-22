@@ -14,6 +14,7 @@
 static const char *carrier = "u:r:app_zygote:s0:c512,c768";
 static unsigned file_class, process_class;
 static char low[32][256], high[32][256];
+static const char *transaction_phase;
 
 static int entries(void) {
     char buf[512] = {0};
@@ -36,11 +37,17 @@ static unsigned class_index(const char *name) {
 static int transaction(const char *node, const char *input) {
     char path[128], reply[4096];
     snprintf(path, sizeof(path), "/sys/fs/selinux/%s", node);
+    transaction_phase = "open";
     int fd = open(path, O_RDWR | O_CLOEXEC);
     if (fd < 0) return errno;
+    transaction_phase = "write";
     ssize_t n = write(fd, input, strlen(input)+1);
     int error = n < 0 ? errno : 0;
-    if (!error && read(fd, reply, sizeof(reply)) <= 0) error = errno ? errno : EIO;
+    if (!error) {
+        transaction_phase = "read"; errno = 0;
+        if (read(fd, reply, sizeof(reply)) <= 0) error = errno ? errno : EIO;
+        else transaction_phase = "complete";
+    }
     close(fd);
     return error;
 }
@@ -137,9 +144,11 @@ static int reachability(void) {
         else if (i == 4) snprintf(query, sizeof(query), "%s %s %u %s", carrier, carrier, process_class, carrier);
         else snprintf(query, sizeof(query), "%s %s %u", carrier, carrier, process_class);
         int error = transaction(nodes[i], query);
-        printf("%s domain=%s node=%s errno=%d (%s)\n", error == EACCES ? "[PASS]" : "[FAIL]",
-               carrier, nodes[i], error, error ? strerror(error) : "reachable");
-        failed |= error != EACCES;
+        /* An open denial also prevents reaching SS; retain the exact syscall. */
+        int passed = error == EACCES && (!strcmp(transaction_phase, "write") || !strcmp(transaction_phase, "open"));
+        printf("%s domain=%s node=%s phase=%s errno=%d (%s)\n", passed ? "[PASS]" : "[FAIL]",
+               carrier, nodes[i], transaction_phase, error, error ? strerror(error) : "reachable");
+        failed |= !passed;
     }
     return failed;
 }
