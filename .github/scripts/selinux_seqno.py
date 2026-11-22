@@ -11,7 +11,8 @@ from pathlib import Path
 def function_span(source, name):
     # Require a declaration prefix, so an earlier if (function(...)) is not
     # mistaken for the definition when scanning a source file.
-    match = re.search(r"^[ \t]*(?:[A-Za-z_]\w*[ \t]+)+\**[ \t]*"
+    attribute = r"__attribute__\s*\(\([^\n;{}]*?\)\)"
+    match = re.search(r"^[ \t]*(?:" + attribute + r"[ \t]*|[A-Za-z_]\w*[ \t]+)+\**[ \t]*"
                       + re.escape(name) + r"\([^;{}]*\)\s*\{", source, re.M)
     if not match:
         raise ValueError(f"Missing function definition: {name}")
