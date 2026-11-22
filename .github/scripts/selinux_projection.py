@@ -233,6 +233,7 @@ int security_context_str_to_sid_user(const char *scontext, u32 *sid, gfp_t gfp);
 	return 0;
 }""")
     for declaration in (
+        "static ssize_t handle_sel_write_access(struct file *file, char *buf, size_t size);",
         "extern bool ksu_selinux_snapshot_ready(void);",
         "extern ssize_t my_write_access(struct file *file, char *buf, size_t size);",
         "extern ssize_t my_write_context(struct file *file, char *buf, size_t size);",
@@ -286,8 +287,8 @@ def verify(kernel, report, objdump, function, object_code, function_code, requir
     fs_source = (kernel / "security/selinux/selinuxfs.c").read_text()
     hooks_source = (kernel / "security/selinux/hooks.c").read_text()
     source = (kernel / "security/selinux/ss/services.c").read_text()
-    require("handle_sel_write_access" not in fs and "my_write_access" not in fs
-            and "handle_sel_write_context" not in fs and "my_write_context" not in fs,
+    require("[SEL_ACCESS] = sel_write_access," in fs and "my_write_access" not in fs
+            and "[SEL_CONTEXT] = sel_write_context," in fs and "my_write_context" not in fs,
             "A VFS snapshot replacement is still installed")
     require("handle_selinux_setprocattr" not in hooks and "susfs_selinux_" not in hooks,
             "A second LSM state machine is still installed")

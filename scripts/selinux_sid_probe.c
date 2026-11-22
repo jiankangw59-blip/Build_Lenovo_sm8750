@@ -53,6 +53,29 @@ static int set_current(const char *context) {
     return error;
 }
 
+static int enter_carrier(unsigned uid) {
+    char context[256] = {0}, status[4096] = {0};
+    if (setgroups(0, NULL) || setgid(uid) || setuid(uid)) return errno;
+    int error = set_current(carrier);
+    if (error) return error;
+    int fd = open("/proc/self/attr/current", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return errno;
+    ssize_t n = read(fd, context, sizeof(context)-1); close(fd);
+    context[strcspn(context, "\n")] = 0;
+    if (n <= 0 || strcmp(context, carrier) || getuid() != uid || geteuid() != uid) return EPROTO;
+    fd = open("/proc/self/status", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return errno;
+    n = read(fd, status, sizeof(status)-1); close(fd);
+    const char *keys[] = {"CapPrm:", "CapEff:", "CapAmb:"};
+    for (unsigned i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
+        const char *at = n > 0 ? strstr(status, keys[i]) : NULL;
+        if (!at || strtoull(at+strlen(keys[i]), NULL, 16)) return EPERM;
+    }
+    printf("[INFO] carrier uid=%u euid=%u context=%s capabilities=0\n", getuid(), geteuid(), context);
+    fflush(stdout);
+    return 0;
+}
+
 static uint32_t random_step(uint32_t *seed) {
     *seed ^= *seed << 13; *seed ^= *seed >> 17; *seed ^= *seed << 5;
     return *seed;
@@ -129,7 +152,7 @@ int main(int argc, char **argv) {
     file_class = class_index("file"); process_class = class_index("process");
     if (!file_class || !process_class || uid < 10000) return 2;
     if (reach) {
-        if (setgroups(0, NULL) || setgid(uid) || setuid(uid) || set_current(carrier)) return 3;
+        if (enter_carrier(uid)) return 3;
         return reachability();
     }
     /* Warm fixed labels before measuring any SID growth. */
@@ -142,7 +165,8 @@ int main(int argc, char **argv) {
     if (child < 0) return 5;
     if (!child) {
         close(start[1]); close(done[0]);
-        if (setgroups(0, NULL) || setgid(uid) || setuid(uid) || set_current(carrier)) _exit(3);
+        int preparation = enter_carrier(uid);
+        if (write(done[1], &preparation, sizeof(preparation)) != sizeof(preparation) || preparation) _exit(3);
         for (unsigned i = 0; i < 9; i++) {
             char command; int error;
             if (read(start[0], &command, 1) != 1) _exit(6);
@@ -154,6 +178,11 @@ int main(int argc, char **argv) {
     close(start[0]); close(done[1]);
     const int expected[] = {0, 0, 32, 0, 32, 0, 0, 0, 0};
     int failed = 0;
+    int preparation = EIO;
+    if (read(done[0], &preparation, sizeof(preparation)) != sizeof(preparation) || preparation) {
+        fprintf(stderr, "[FAIL] carrier preparation errno=%d\n", preparation);
+        close(start[1]); close(done[0]); waitpid(child, NULL, 0); return 3;
+    }
     for (unsigned i = 0; i < 9; i++) {
         int before = entries(), after, error = EIO; char command = 'G';
         if (write(start[1], &command, 1) != 1 || read(done[0], &error, sizeof(error)) != sizeof(error)) { failed = 1; break; }
