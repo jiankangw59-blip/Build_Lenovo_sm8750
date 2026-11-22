@@ -28,8 +28,8 @@ noinline struct selinux_policy *security_user_query_policy(void)
 	return smp_load_acquire(&backup_sepolicy);
 }
 
-static int security_project_context(struct selinux_policy *live,
-				    struct selinux_policy *snapshot,
+static int security_project_context(struct selinux_policy *source_policy,
+				    struct selinux_policy *target_policy,
 				    struct context *source,
 				    struct context *projected);
 
@@ -90,8 +90,8 @@ out_source:
     helpers = """
 #ifdef CONFIG_KSU_SUSFS
 /* Symbol values may change on reload. Translate by name, never by numeric ID. */
-static int security_project_context(struct selinux_policy *live,
-				    struct selinux_policy *snapshot,
+static int security_project_context(struct selinux_policy *source_policy,
+				    struct selinux_policy *target_policy,
 				    struct context *source,
 				    struct context *projected)
 {
@@ -99,37 +99,34 @@ static int security_project_context(struct selinux_policy *live,
 	u32 len;
 	int rc;
 
-	rc = context_struct_to_string(&live->policydb, source, &text, &len);
+	rc = context_struct_to_string(&source_policy->policydb, source, &text, &len);
 	if (rc)
 		return rc;
 	/* def_sid is NULL, so the parser cannot dereference a snapshot SID table. */
-	rc = string_to_context_struct(&snapshot->policydb, NULL, text,
+	rc = string_to_context_struct(&target_policy->policydb, NULL, text,
 				      projected, SECSID_NULL);
 	kfree(text);
 	return rc;
 }
 
-static noinline int security_validate_user_context(const char *text, u32 len,
-						   gfp_t gfp)
+/* Parse the raw string once; map its canonical form into the live namespace. */
+static noinline int security_parse_user_context(struct selinux_policy *live,
+	struct selinux_policy *snapshot, char *text, struct context *context)
 {
-	struct selinux_policy *snapshot = security_user_query_policy();
-	struct context context;
-	char *copy;
+	struct context clean;
 	int rc;
 
-	if (!snapshot)
-		return 0;
-	/* The parser inserts NULs. Never consume the native parser's buffer. */
-	copy = kmemdup_nul(text, len, gfp);
-	if (!copy)
-		return -ENOMEM;
-	rcu_read_lock();
-	rc = string_to_context_struct(&snapshot->policydb, NULL, copy,
-				      &context, SECSID_NULL);
-	if (!rc)
-		context_destroy(&context);
-	rcu_read_unlock();
-	kfree(copy);
+	/* text is the core's private writable copy; the caller's input is intact. */
+	rc = string_to_context_struct(&snapshot->policydb, NULL, text,
+				      &clean, SECSID_NULL);
+	if (rc)
+		return rc;
+	/* Duplicate MLS categories are collapsed before the live parser sees them.
+	 * This retains native live validation without rescanning a long raw string.
+	 * The mapper uses names and GFP_ATOMIC allocations under the caller's RCU.
+	 */
+	rc = security_project_context(snapshot, live, &clean, context);
+	context_destroy(&clean);
 	return rc;
 }
 #endif
@@ -139,18 +136,17 @@ static noinline int security_validate_user_context(const char *text, u32 len,
     services = services.replace(core, helpers + core, 1)
     core = function(services, "security_context_to_sid_core")
     core = core.replace("int force)", "int force, bool user_query)", 1)
-    marker = "\t*sid = SECSID_NULL;"
-    require(core.count(marker) == 1, "Context parser initialization changed")
-    core = core.replace(marker, marker + """
-#ifdef CONFIG_KSU_SUSFS
-	/* Only explicitly audited user entry points request prevalidation. */
-	if (user_query) {
-		rc = security_validate_user_context(scontext, scontext_len, gfp_flags);
-		if (rc)
-			goto out;
-	}
+    core = core.replace("\tstruct selinux_policy *policy;", "\tstruct selinux_policy *policy;\n"
+                        "#ifdef CONFIG_KSU_SUSFS\n\tstruct selinux_policy *snapshot;\n#endif", 1)
+    marker = "\trc = string_to_context_struct(policydb, sidtab, scontext2,"
+    require(core.count(marker) == 1, "Native context parser call changed")
+    core = core.replace(marker, """#ifdef CONFIG_KSU_SUSFS
+	snapshot = user_query ? security_user_query_policy() : NULL;
+	if (snapshot)
+		rc = security_parse_user_context(policy, snapshot, scontext2, &context);
+	else
 #endif
-""", 1)
+""" + marker, 1)
     # A policy replacement can cause ESTALE after the parser consumed its copy.
     require(core.count("retry:\n") == 1, "Context conversion retry changed")
     core = core.replace("retry:\n", "retry:\n\tmemcpy(scontext2, scontext, scontext_len);\n"
@@ -317,16 +313,19 @@ def verify(kernel, report, objdump, function, object_code, function_code, requir
     require(", true);" in function(source, "security_context_to_sid_user"),
             "The user API does not explicitly select validation")
     core = function(services, "security_context_to_sid_core")
-    require("if (user_query)" in core and "security_validate_user_context(scontext," in core,
+    require("user_query ? security_user_query_policy()" in core and "security_parse_user_context(policy," in core,
             "The compiled core lost explicit user-query validation")
-    require(core.index("security_validate_user_context(") < core.index("sidtab_context_to_sid("),
+    require(core.index("security_parse_user_context(") < core.index("sidtab_context_to_sid("),
             "Rejected labels can enter the live SID table")
-    validator = function(services, "security_validate_user_context")
-    require("kmemdup_nul(text, len, gfp)" in validator and "sidtab_context_to_sid" not in validator,
-            "Prevalidation consumes the original buffer or registers a snapshot SID")
+    validator = function(services, "security_parse_user_context")
+    require(validator.count("string_to_context_struct(") == 1
+            and "security_project_context(snapshot, live, &clean, context)" in validator
+            and "context_destroy(&clean)" in validator
+            and "sidtab_context_to_sid" not in validator and "kmemdup" not in validator,
+            "User parsing rescans the raw string or registers a private SID")
     mapper = function(services, "security_project_context")
-    require("context_struct_to_string(&live->policydb" in mapper
-            and "string_to_context_struct(&snapshot->policydb" in mapper
+    require("context_struct_to_string(&source_policy->policydb" in mapper
+            and "string_to_context_struct(&target_policy->policydb" in mapper
             and "kfree(text)" in mapper, "Snapshot symbol mapping assumes matching numeric IDs")
     projected = function(services, "security_compute_av_user_projected")
     require("avd_init(snapshot, avd)" in projected and "sidtab_search(live->sidtab" in projected
@@ -339,7 +338,7 @@ def verify(kernel, report, objdump, function, object_code, function_code, requir
     require(not re.search(r"alloc|mutex_|avc_has_perm|initialize_fake", selector),
             "The shared selector can sleep, allocate or alter AVC counters")
     require("security_user_query_policy()" in function(services, "security_compute_av_user")
-            and "security_user_query_policy()" in validator
+            and "security_user_query_policy()" in core
             and "security_user_query_policy()" in function(fs, "sel_open_handle_status"),
             "Status, context and access select different views")
     rules = (kernel / "drivers/kernelsu/selinux/rules.c").read_text()
@@ -361,13 +360,13 @@ def verify(kernel, report, objdump, function, object_code, function_code, requir
     procattr = function_code(hooks_obj, "selinux_setprocattr")
     require("security_context_to_sid_user" in procattr, "Compiled procattr bypasses the user API")
     (report / "selinux_setprocattr.disasm").write_text(procattr)
-    for name in ("security_user_query_policy", "security_validate_user_context",
+    for name in ("security_user_query_policy", "security_parse_user_context",
                  "security_compute_av_user", "security_compute_av_user_projected",
                  "security_context_to_sid_user"):
         (report / (name + ".disasm")).write_text(function_code(ss_obj, name))
     require("security_compute_av_user_projected" in function_code(ss_obj, "security_compute_av_user"),
             "Compiled user AV entry does not call the projector")
-    require("security_validate_user_context" in ss_obj[1], "Compiled context validation is unreachable")
+    require("security_parse_user_context" in ss_obj[1], "Compiled context validation is unreachable")
     require(re.search(r"\b(ldar|ldapr)\b", function_code(ss_obj, "security_user_query_policy")),
             "Snapshot selector lost acquire ordering")
     status = function_code(fs_obj, "sel_open_handle_status")

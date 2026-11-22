@@ -3,7 +3,7 @@
 `selinux_seqno.py` 在 SUSFS 补丁之后应用兼容修改；`selinux_projection.py` 负责用户查询边界。BakaSU、SUSFS 源码及修改后的八个文件均由 CI 记录哈希，配套管理器使用同一份输入重放补丁并核对哈希。
 
 - 只在首次 KSU 规则修改前保留不可变的策略数据库快照；快照的 `sidtab = NULL`，不创建第二套 SID 缓存。
-- `security_context_to_sid_user()` 显式请求快照校验。校验使用独立字符串副本，成功后由原版解析器登记到实时 SID 表。普通、default、force 转换入口不请求投影。
+- `security_context_to_sid_user()` 显式请求快照校验。原版解析器只扫描一次私有副本中的原始输入，再将规范化后的上下文按名称转译到实时策略，经过原版实时解析器校验后登记到实时 SID 表。重复 MLS 类别先被折叠，避免合法长输入被完整扫描两次而非法长输入仅扫描一次。普通、default、force 转换入口不请求投影。
 - selinuxfs 的七个交易节点使用该输入包装；`selinux_setprocattr()` 仅替换普通解析调用。原版权限检查、空串处理、强制解析分支及实际域切换保持原样。挂载、xattr、网络标签入口继续使用原版接口。
 - `security_compute_av_user()` 的隐藏分支从实时 SID 取上下文，按名称转换到快照符号，再使用原版决策计算函数。临时分配沿用不可睡眠路径；失败时保留初始化的拒绝决策。实际内核 `security_compute_av()` 和 `avd_init()` 保持不变。
 - status、上下文校验及用户决策共用无分配、无 AVC 查询的选择器。6.6 的隐藏状态页保持 `sequence=0, policyload=0`；真实策略的发布、AVC 和状态通知同步使用真实代数 N。
