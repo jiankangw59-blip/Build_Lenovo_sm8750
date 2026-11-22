@@ -173,6 +173,42 @@ static int test_access_probe(uint32_t status_pload, uint32_t status_sequence) {
     return 0;
 }
 
+static int test_context_oracle(void) {
+    const char *contexts[] = {
+        "u:r:untrusted_app:s0", "u:r:app_zygote:s0",
+        "u:r:ksu:s0", "u:object_r:ksu_file:s0",
+        "u:r:magisk:s0", "u:object_r:magisk_file:s0",
+        "u:r:luna_context_oracle_sentinel:s0",
+        "u:object_r:luna_context_oracle_sentinel_file:s0"
+    };
+    int hidden = getuid() % 100000 >= 10000;
+    int failed = 0;
+    for (unsigned int i = 0; i < sizeof(contexts) / sizeof(contexts[0]); i++) {
+        int fd = open("/sys/fs/selinux/context", O_RDWR);
+        if (fd < 0) {
+            printf("[FAIL] context oracle open: %s\n", strerror(errno));
+            return -1;
+        }
+        errno = 0;
+        ssize_t written = write(fd, contexts[i], strlen(contexts[i]) + 1);
+        int error = errno;
+        int valid = i < 2 || (!hidden && i < 4);
+        int optional = !hidden && (i == 4 || i == 5);
+        int passed = valid ? written >= 0 : (written < 0 && error == EINVAL);
+        if (optional) passed = written >= 0 || (written < 0 && error == EINVAL);
+        if (passed && written >= 0) {
+            char canonical[256] = {0};
+            ssize_t n = read(fd, canonical, sizeof(canonical) - 1);
+            passed = n > 0 && strcmp(canonical, contexts[i]) == 0;
+        }
+        close(fd);
+        printf("[%s] context oracle %s: write=%zd errno=%d\n",
+               passed ? "PASS" : "FAIL", contexts[i], written, error);
+        if (!passed) failed = 1;
+    }
+    return failed ? -1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc == 3) {
         char *end = NULL;
@@ -213,5 +249,6 @@ int main(int argc, char **argv) {
     if (st_rc != -1) {
         acc_rc = test_access_probe(pload, sequence);
     }
-    return (st_rc != 0 || acc_rc < 0) ? 1 : 0;
+    int oracle_rc = test_context_oracle();
+    return (st_rc != 0 || acc_rc < 0 || oracle_rc < 0) ? 1 : 0;
 }

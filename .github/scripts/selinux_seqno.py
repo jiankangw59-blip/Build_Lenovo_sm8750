@@ -9,7 +9,10 @@ from pathlib import Path
 
 
 def function_span(source, name):
-    match = re.search(r"^[^\n;{}]*\b" + re.escape(name) + r"\([^;{}]*\)\s*\{", source, re.M)
+    # Require a declaration prefix, so an earlier if (function(...)) is not
+    # mistaken for the definition when scanning a source file.
+    match = re.search(r"^[ \t]*(?:[A-Za-z_]\w*[ \t]+)+\**[ \t]*"
+                      + re.escape(name) + r"\([^;{}]*\)\s*\{", source, re.M)
     if not match:
         raise ValueError(f"Missing function definition: {name}")
     opening = source.index("{", match.start())
@@ -154,6 +157,33 @@ static noinline u32 susfs_access_seqno(u32 seqno)
 
     rules_path = bakasu / "kernel/selinux/rules.c"
     rules = rules_path.read_text(encoding="utf-8")
+    register_types = """
+#ifdef CONFIG_KSU_SUSFS
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+extern int susfs_add_sus_type(const char *secctx, u32 type_value);
+
+/* Register only the new concrete types in the policy about to be published. */
+static noinline void ksu_susfs_register_new_types(struct selinux_policy *old,
+                                               struct selinux_policy *new)
+{
+    u32 index;
+
+    for (index = old->policydb.p_types.nprim;
+         index < new->policydb.p_types.nprim; index++) {
+        struct type_datum *type = new->policydb.type_val_to_struct[index];
+        const char *name = new->policydb.sym_val_to_name[SYM_TYPES][index];
+
+        if (type && name && !type->attribute)
+            susfs_add_sus_type(name, type->value);
+    }
+}
+#endif
+#endif
+
+"""
+    require("ksu_susfs_register_new_types" not in rules, "Type registration was already patched")
+    start, _ = function_span(rules, "reset_avc_cache")
+    rules = rules[:start] + register_types + rules[start:]
     cache = function(rules, "reset_avc_cache")
     # Port generation tracking as one unit: publication, cache and notification.
     require("avc_ss_reset(0);" in cache and "avc_ss_reset(avc, 0);" in cache,
@@ -179,6 +209,9 @@ static noinline u32 susfs_access_seqno(u32 seqno)
                 f"{name} policy publication layout changed")
         body = body.replace(publish, """    u32 seqno = old_pol->latest_granting + 1;
     pol->latest_granting = seqno;
+#ifdef CONFIG_KSU_SUSFS
+    ksu_susfs_register_new_types(old_pol, pol);
+#endif
 """ + publish, 1)
         body = body.replace("reset_avc_cache();", "reset_avc_cache(seqno);", 1)
         body = body.replace("reset_avc_cache();", "reset_avc_cache(0);", 1)
@@ -217,11 +250,47 @@ static noinline u32 susfs_access_seqno(u32 seqno)
 #endif
     smp_store_release(&fake_status, new_page);""")
     hide = replace_function(hide, "initialize_fake_status", init)
+    susfs_path = kernel / "fs/susfs.c"
+    susfs = susfs_path.read_text(encoding="utf-8")
+    declaration = "extern bool susfs_is_current_ksu_domain(void);"
+    require(susfs.count(declaration) == 1, "SUSFS identity declarations changed")
+    susfs = susfs.replace(declaration, declaration + """
+#ifndef CONFIG_KSU_DISABLE_MANAGER
+extern bool ksu_is_manager_uid(u32 uid);
+#endif
+""", 1)
+    entry = "struct st_susfs_sus_type_hlist {\n\tstruct hlist_node                       node;\n};"
+    require(susfs.count(entry) == 1, "SUSFS type registry layout changed")
+    susfs = susfs.replace(entry, entry.replace("\n};", "\n\tu32 type_value;\n};"), 1)
+    body = function(susfs, "susfs_add_sus_type")
+    marker = "hash_for_each_possible_safe(SUS_TYPE_HLIST, tmp_entry, tmp_hlist_node, node, type_value) {"
+    require(body.count(marker) == 1, "SUSFS type insertion loop changed")
+    body = body.replace(marker, marker + "\n\t\tif (tmp_entry->type_value != type_value)\n\t\t\tcontinue;", 1)
+    marker = "\thash_add_rcu(SUS_TYPE_HLIST, &new_entry->node, type_value);"
+    require(body.count(marker) == 1, "SUSFS type publication changed")
+    body = body.replace(marker, "\tnew_entry->type_value = type_value;\n" + marker, 1)
+    susfs = replace_function(susfs, "susfs_add_sus_type", body)
+    body = function(susfs, "susfs_is_sus_type_rcu")
+    require(body.count("\t\treturn true;") == 1, "SUSFS type lookup changed")
+    body = body.replace("\t\treturn true;", "\t\tif (entry->type_value == type_value)\n\t\t\treturn true;", 1)
+    susfs = replace_function(susfs, "susfs_is_sus_type_rcu", body)
+    body = function(susfs, "susfs_is_uid_allowed_for_sus_path")
+    marker = "\tif (uid >= 90000)"
+    require(body.count(marker) == 1, "SUSFS path UID filter changed")
+    body = body.replace(marker, """#ifndef CONFIG_KSU_DISABLE_MANAGER
+    /* A manager must retain access to its own private app data. */
+    if (ksu_is_manager_uid(uid))
+        return true;
+#endif
+
+""" + marker, 1)
+    susfs = replace_function(susfs, "susfs_is_uid_allowed_for_sus_path", body)
     fs_path.write_text(fs, encoding="utf-8", newline="\n")
     rules_path.write_text(rules, encoding="utf-8", newline="\n")
     hide_path.write_text(hide, encoding="utf-8", newline="\n")
     services_path.write_text(services, encoding="utf-8", newline="\n")
     status_path.write_text(status, encoding="utf-8", newline="\n")
+    susfs_path.write_text(susfs, encoding="utf-8", newline="\n")
     require(audit_hot_path(kernel) == hot_path_sha, "Kernel hot path changed")
     report.mkdir(parents=True, exist_ok=True)
     (report / "selinux-source.json").write_text(json.dumps({
@@ -230,7 +299,7 @@ static noinline u32 susfs_access_seqno(u32 seqno)
         "services_sha256": hashlib.sha256(services_path.read_bytes()).hexdigest(),
         "access_function": "susfs_sel_write_access",
         "files": {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
-                  for p in (fs_path, rules_path, hide_path, services_path, status_path)},
+                  for p in (fs_path, rules_path, hide_path, services_path, status_path, susfs_path)},
     }, indent=2) + "\n")
     print("SELinux source checks passed; avd_init preserves policy generation and early boot zero")
 
@@ -238,6 +307,7 @@ static noinline u32 susfs_access_seqno(u32 seqno)
 def verify(kernel, report, objdump):
     for relative in ("security/selinux/selinuxfs.i", "security/selinux/status.i", "security/selinux/ss/services.i",
                      "drivers/kernelsu/selinux/rules.i", "drivers/kernelsu/feature/selinux_hide.i",
+                     "fs/susfs.i", "fs/susfs.o", "drivers/kernelsu/selinux/rules.o",
                      "security/selinux/selinuxfs.o", "drivers/kernelsu/feature/selinux_hide.o"):
         (report / Path(relative).name).write_bytes((kernel / "out" / relative).read_bytes())
     original = json.loads((report / "selinux-source.json").read_text())
@@ -266,6 +336,19 @@ def verify(kernel, report, objdump):
         body = function(rules, name)
         require("old_pol->latest_granting + 1" in body and "reset_avc_cache(seqno)" in body,
                 f"{name} does not publish and notify the same generation")
+        require(body.index("ksu_susfs_register_new_types(old_pol, pol)")
+                < body.index("rcu_assign_pointer("), f"{name} publishes types before registration")
+    registry = function(rules, "ksu_susfs_register_new_types")
+    require(re.search(r"old->policydb\.(?:p_types|symtab\[\s*(?:3|SYM_TYPES)\s*\])\.nprim", registry)
+            and "!type->attribute" in registry
+            and "susfs_add_sus_type(name, type->value)" in registry,
+            "SUSFS new-type registration did not survive preprocessing")
+    susfs = (kernel / "out/fs/susfs.i").read_text()
+    require("entry->type_value == type_value" in function(susfs, "susfs_is_sus_type_rcu")
+            and "tmp_entry->type_value != type_value" in function(susfs, "susfs_add_sus_type"),
+            "SUSFS hash bucket collisions can hide unrelated policy types")
+    require("ksu_is_manager_uid(uid)" in function(susfs, "susfs_is_uid_allowed_for_sus_path"),
+            "SUSFS lost the manager private-data exception")
     status = (kernel / "out/security/selinux/status.i").read_text()
     require("selinux_kernel_status_page();" in cache,
             "Policy notification can occur before the real status page exists")
@@ -305,6 +388,14 @@ def verify(kernel, report, objdump):
     (report / "fake-status-acquire.disasm").write_text(predicate_code)
     hide_obj = kernel / "out/drivers/kernelsu/feature/selinux_hide.o"
     hide_object = object_code(objdump, hide_obj)
+    rules_object = object_code(objdump, kernel / "out/drivers/kernelsu/selinux/rules.o")
+    registration = function_code(rules_object, "ksu_susfs_register_new_types")
+    require("susfs_add_sus_type" in registration, "Object code lost the type registry callback")
+    (report / "new-types-registration.disasm").write_text(registration)
+    susfs_object = object_code(objdump, kernel / "out/fs/susfs.o")
+    manager_exception = function_code(susfs_object, "susfs_is_uid_allowed_for_sus_path")
+    require("ksu_is_manager_uid" in manager_exception, "Object code lost the manager data exception")
+    (report / "manager-data-exception.disasm").write_text(manager_exception)
     publish_code = function_code(hide_object, "initialize_fake_status")
     (report / "fake-status-publish.disasm").write_text(publish_code)
     (report / "selinux-hide-full.disasm").write_text(hide_object[1])
