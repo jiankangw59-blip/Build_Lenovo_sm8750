@@ -178,6 +178,10 @@ static int test_context_oracle(void) {
         "u:r:untrusted_app:s0", "u:r:app_zygote:s0",
         "u:r:ksu:s0", "u:object_r:ksu_file:s0",
         "u:r:magisk:s0", "u:object_r:magisk_file:s0",
+        "u:object_r:lsposed_file:s0", "u:r:droidspacesd:s0",
+        "u:r:msd_app:s0", "u:r:msd_daemon:s0",
+        "u:object_r:xposed_data:s0", "u:r:adbroot:s0",
+        "u:object_r:xposed_file:s0",
         "u:r:luna_context_oracle_sentinel:s0",
         "u:object_r:luna_context_oracle_sentinel_file:s0"
     };
@@ -193,7 +197,7 @@ static int test_context_oracle(void) {
         ssize_t written = write(fd, contexts[i], strlen(contexts[i]) + 1);
         int error = errno;
         int valid = i < 2 || (!hidden && i < 4);
-        int optional = !hidden && (i == 4 || i == 5);
+        int optional = !hidden && i >= 4 && i < sizeof(contexts) / sizeof(contexts[0]) - 2;
         int passed = valid ? written >= 0 : (written < 0 && error == EINVAL);
         if (optional) passed = written >= 0 || (written < 0 && error == EINVAL);
         if (passed && written >= 0) {
@@ -209,7 +213,99 @@ static int test_context_oracle(void) {
     return failed ? -1 : 0;
 }
 
+static int read_policy_number(const char *class_name, const char *permission, unsigned *out) {
+    char path[256];
+    if (permission)
+        snprintf(path, sizeof(path), "/sys/fs/selinux/class/%s/perms/%s", class_name, permission);
+    else
+        snprintf(path, sizeof(path), "/sys/fs/selinux/class/%s/index", class_name);
+    FILE *file = fopen(path, "r");
+    int ok = file && fscanf(file, "%u", out) == 1;
+    if (file) fclose(file);
+    if (!ok) printf("[FAIL] policy metadata: %s\n", path);
+    return ok ? 0 : -1;
+}
+
+static int test_policy_rule(const char *label, const char *source, const char *target,
+                            const char *class_name, const char *permission, int expected) {
+    unsigned cls = 0, perm = 0, last_allowed = 0, last_seqno = 0;
+    if (read_policy_number(class_name, NULL, &cls) ||
+        read_policy_number(class_name, permission, &perm) || perm < 1 || perm > 32) return -1;
+    unsigned mask = UINT32_C(1) << (perm - 1);
+    for (int attempt = 0; attempt < 2; attempt++) {
+        char request[256], response[256] = {0};
+        int length = snprintf(request, sizeof(request), "%s %s %u", source, target, cls);
+        int fd = open("/sys/fs/selinux/access", O_RDWR);
+        if (fd < 0 || write(fd, request, (size_t)length) != length) {
+            printf("[FAIL] policy rule %s query errno=%d\n", label, errno);
+            if (fd >= 0) close(fd);
+            return -1;
+        }
+        ssize_t n = read(fd, response, sizeof(response) - 1);
+        close(fd);
+        unsigned allowed, decided, auditallow, auditdeny, seqno, flags;
+        if (n <= 0 || sscanf(response, "%x %x %x %x %u %x", &allowed, &decided,
+                             &auditallow, &auditdeny, &seqno, &flags) != 6) {
+            printf("[FAIL] policy rule %s malformed response\n", label);
+            return -1;
+        }
+        if ((expected >= 0 && ((allowed & mask) != 0) != expected) ||
+            (getuid() % 100000 >= 10000 && seqno != 1) ||
+            (attempt && (allowed != last_allowed || seqno != last_seqno))) {
+            printf("[FAIL] policy rule %s allowed=%u mask=%08x seqno=%u expected=%d raw=%s\n",
+                   label, (allowed & mask) != 0, mask, seqno, expected, response);
+            return -1;
+        }
+        last_allowed = allowed;
+        last_seqno = seqno;
+    }
+    printf("[PASS] policy rule %s allowed=%u mask=%08x seqno=%u expected=%d stable=1\n",
+           label, (last_allowed & mask) != 0, mask, last_seqno, expected);
+    return 0;
+}
+
+static int test_policy_rules(void) {
+    int hidden = getuid() % 100000 >= 10000;
+    int failed = 0;
+    failed |= test_policy_rule("public_self_getattr", "u:r:untrusted_app:s0", "u:r:untrusted_app:s0",
+                               "process", "getattr", 1);
+    failed |= test_policy_rule("system_server_execmem", "u:r:system_server:s0", "u:r:system_server:s0",
+                               "process", "execmem", hidden ? 0 : -1);
+    failed |= test_policy_rule("zygote_adb_dir_search", "u:r:zygote:s0", "u:object_r:adb_data_file:s0",
+                               "dir", "search", hidden ? 0 : -1);
+    return failed ? -1 : 0;
+}
+
+static int test_rejected_context_repetitions(unsigned count) {
+    if (getuid() % 100000 < 10000) return 2;
+    for (unsigned i = 0; i < count; i++) {
+        char context[96];
+        /* Distinct MLS labels reveal unintended live SID interning. */
+        snprintf(context, sizeof(context), "u:r:ksu:s0:c%u", 700 + i);
+        int fd = open("/sys/fs/selinux/context", O_RDWR);
+        if (fd < 0) return 2;
+        errno = 0;
+        ssize_t written = write(fd, context, strlen(context) + 1);
+        int error = errno;
+        close(fd);
+        if (written >= 0 || error != EINVAL) {
+            printf("[FAIL] rejected context %s write=%zd errno=%d\n", context, written, error);
+            return 1;
+        }
+    }
+    printf("[PASS] rejected_context_repetitions=%u all_EINVAL=1\n", count);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    unsigned repetitions = 0;
+    if (argc >= 3 && strcmp(argv[1], "--repeat-context") == 0) {
+        char *end = NULL;
+        repetitions = (unsigned)strtoul(argv[2], &end, 10);
+        if (!end || *end || repetitions < 1 || repetitions > 64) return 2;
+        argc -= 2;
+        argv += 2;
+    }
     if (argc == 3) {
         char *end = NULL;
         unsigned long uid = strtoul(argv[1], &end, 10);
@@ -242,6 +338,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[FAIL] process did not enter the requested context\n");
         return 2;
     }
+    if (repetitions) return test_rejected_context_repetitions(repetitions);
 
     uint32_t pload = 0, sequence = 0;
     int st_rc = test_status_and_abi(&pload, &sequence);
@@ -250,5 +347,6 @@ int main(int argc, char **argv) {
         acc_rc = test_access_probe(pload, sequence);
     }
     int oracle_rc = test_context_oracle();
-    return (st_rc != 0 || acc_rc < 0 || oracle_rc < 0) ? 1 : 0;
+    int rules_rc = test_policy_rules();
+    return (st_rc != 0 || acc_rc < 0 || oracle_rc < 0 || rules_rc < 0) ? 1 : 0;
 }

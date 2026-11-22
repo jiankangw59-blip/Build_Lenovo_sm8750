@@ -18,6 +18,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--app-uid", type=int, default=10000)
     parser.add_argument("--boot", type=Path, help="Require active boot partition to match this image")
+    parser.add_argument("--require-module-rules", action="store_true",
+                        help="Require Root execmem/adb-directory rules to stay allowed")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     remote = "/data/local/tmp/selinux-verify-probe"
@@ -86,10 +88,38 @@ def main():
             results["checks"][label + "_" + name] = check
             if not passed:
                 raise RuntimeError(f"{label} {name} probe failed")
+            for rule in ("system_server_execmem", "zygote_adb_dir_search"):
+                match = re.search(r"\[PASS\] policy rule " + rule + r" allowed=(\d) .*?seqno=(\d+)", output)
+                if not match:
+                    raise RuntimeError(f"{label} {name} lacks a policy-rule result for {rule}")
+                check[rule] = bool(int(match[1]))
+                if name == "root" and int(match[2]) != check.get("policyload"):
+                    raise RuntimeError(f"{label}: real rule {rule} does not use the real policy generation")
+                if name == "root" and args.require_module_rules and not check[rule]:
+                    raise RuntimeError(f"{label}: the real module rule {rule} was removed")
+                if name != "root" and (check[rule] or int(match[2]) != 1):
+                    raise RuntimeError(f"{label}: the hidden rule {rule} leaks real policy state")
         real_deny = results["checks"][label + "_root"]["deny_unknown"]
         for name in ("app-zygote", "secondary-user", "isolated-uid-carrier"):
             if results["checks"][label + "_" + name]["deny_unknown"] != real_deny:
                 raise RuntimeError("Hidden status deny_unknown differs from the real policy")
+
+    def sidtab_check():
+        def entries():
+            text = root("cat /sys/fs/selinux/ss/sidtab_hash_stats")
+            match = re.search(r"entries:\s*(\d+)", text)
+            if not match:
+                raise RuntimeError("Live SID table statistics are unavailable")
+            return int(match[1])
+        before = entries()
+        output = root(remote + " --repeat-context 64 99000 u:r:app_zygote:s0")
+        after = entries()
+        passed = "[PASS] rejected_context_repetitions=64 all_EINVAL=1" in output and after == before
+        result = {"before": before, "after": after, "delta": after - before, "passed": passed}
+        results["checks"]["rejected_context_live_sid_growth"] = result
+        save("rejected-context-sidtab.txt", output + "\n" + json.dumps(result, indent=2))
+        if not passed:
+            raise RuntimeError("Rejected context queries changed the live SID table or were not rejected")
 
     try:
         identity = root("getprop ro.product.model; getprop ro.boot.slot_suffix; uname -a; cat /proc/sys/kernel/random/boot_id")
@@ -112,6 +142,7 @@ def main():
         probes("baseline")
         cache_check("baseline")
         probes("pre-policy")
+        sidtab_check()
         mutation = root("/data/adb/ksu/bin/ksud sepolicy patch 'allow untrusted_app untrusted_app process getattr'")
         save("sepolicy-patch.txt", mutation)
         probes("post-policy")
