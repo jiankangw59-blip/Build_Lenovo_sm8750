@@ -33,6 +33,10 @@ def prepare(args):
     actual = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit) or actual != commit:
         raise ValueError("Manager checkout differs from the verified boot's BakaSU commit")
+    overlay = load_module(Path(__file__).with_name("bakasu_main_compat.py"), "bakasu_main_compat")
+    overlay_record = overlay.apply(source)
+    if overlay_record != json.loads((evidence / "upstream-main-overlay.json").read_text()):
+        raise ValueError("Manager source overlay differs from the verified kernel")
     package = args.package
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", package):
         raise ValueError("Invalid manager package name")
@@ -115,6 +119,7 @@ def prepare(args):
         "package": package,
         "build_tag": build_tag,
         "uapi_header_sha256": sha(source / "uapi/ksu.h"),
+        "upstream_main_overlay": overlay_record,
         "client_fixes": ["idempotent-assets-links-v1", "omit-home-unofficial-notice-v1"],
         "client_source_hashes": {relative: sha(path) for relative, path in client_sources.items()},
         "client_workflow_commit": subprocess.check_output(

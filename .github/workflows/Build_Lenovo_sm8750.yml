@@ -509,8 +509,8 @@ jobs:
           set -euo pipefail
           cd kernel_workspace
           echo "正在配置BakaSU..."
-          # Retain the tablet's accepted baseline while measuring the two optimizations.
-          BAKASU_REF=7b65bde0710b5e7c6f755545cb15a4abd417f3a8
+          # Import official main while retaining the accepted SELinux implementation.
+          BAKASU_REF=2734e0bc155759955880f5fb99be640fc5b92156
           curl -fLSs --retry 3 "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_REF}/kernel/setup.sh" -o bakasu-setup.sh
           bash bakasu-setup.sh "$BAKASU_REF"
           test "$(git -C KernelSU rev-parse HEAD)" = "$BAKASU_REF"
@@ -540,6 +540,12 @@ jobs:
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           echo "KSU_COMMIT_SHA=$(git rev-parse --short=8 HEAD)" >> $GITHUB_ENV
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Retain the custom SELinux integration on official main
+        if: ${{ env.ENABLE_SUSFS == 'true' }}
+        run: |
+          python3 .github/scripts/bakasu_main_compat.py \
+            --source kernel_workspace/KernelSU --report kernel_workspace/preflash
 
       - name: 🔧 Set up SUSFS (配置 SUSFS)
         if: ${{ env.ENABLE_SUSFS == 'true' }}
