@@ -1,0 +1,100 @@
+name: Build paired BakaSU manager
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_run:
+        description: Successful kernel run whose verified source must be reproduced
+        required: true
+        default: '44966972001'
+      manager_package:
+        description: Application ID; unsigned output requires an owner signing key
+        required: true
+        default: com.resukisu.resukisu
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  manager:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      KERNEL_RUN: ${{ inputs.kernel_run }}
+      KSU_PACKAGE_NAME: ${{ inputs.manager_package }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Reproduce the verified kernel's BakaSU source
+        run: |
+          set -euo pipefail
+          [[ "$KERNEL_RUN" =~ ^[0-9]+$ ]]
+          gh run download "$KERNEL_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name preflash-verification_6.6.89 --dir evidence
+          commit=$(tr -d '\r\n' < evidence/bakasu-commit.txt)
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          git clone --filter=blob:none https://github.com/Baka-SU/BakaSU.git bakasu
+          git -C bakasu checkout --detach "$commit"
+          git -C bakasu submodule update --init --recursive
+          python3 .github/scripts/paired_manager.py prepare --source bakasu \
+            --evidence evidence --kernel-run "$KERNEL_RUN" \
+            --package "$KSU_PACKAGE_NAME" --report paired-manager
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install the source-pinned Android toolchain
+        run: |
+          set -euo pipefail
+          ndk=$(sed -n 's/^ndk = "\([^"]*\)"/\1/p' bakasu/manager/gradle/libs.versions.toml)
+          test -n "$ndk"
+          sdkmanager "platforms;android-37" "build-tools;36.1.0" "ndk;$ndk" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ndk" >> "$GITHUB_ENV"
+      - name: Preserve the matching upstream installer payloads
+        run: |
+          set -euo pipefail
+          commit=$(tr -d '\r\n' < evidence/bakasu-commit.txt)
+          run=$(gh run list --repo Baka-SU/BakaSU --workflow build-manager.yml \
+            --commit "$commit" --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          test -n "$run" && test "$run" != null
+          gh run download "$run" --repo Baka-SU/BakaSU --pattern 'aarch64-*-lkm' \
+            --pattern ksuinit-aarch64 --dir upstream-payloads
+          find upstream-payloads -name '*_kernelsu.ko' -exec cp {} bakasu/userspace/ksud/bin/aarch64/ \;
+          cp upstream-payloads/ksuinit-aarch64/ksuinit bakasu/userspace/ksud/bin/aarch64/
+          printf '%s\n' "$run" > paired-manager/installer-payload-source-run.txt
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-linux-android
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bakasu/userspace/ksud
+      - name: Build the paired ksud
+        run: |
+          set -euo pipefail
+          cargo install cargo-ndk --locked
+          clang --target=aarch64-linux-gnu -c -nostdlib \
+            -o bakasu/userspace/ksud/.lkm_image_bootstrap.o \
+            bakasu/userspace/ksud/src/lkm_image_bootstrap.S
+          cd bakasu/userspace/ksud
+          cargo ndk b -P 26 -t aarch64-linux-android -r --locked \
+            -Z build-std-features=optimize_for_size -Z trim-paths
+      - name: Build the paired manager
+        working-directory: bakasu/manager
+        run: |
+          set -euo pipefail
+          ./gradlew assembleRelease -Pcommit="$(git rev-parse HEAD)" -PKSU_PACKAGE_NAME="$KSU_PACKAGE_NAME"
+      - name: Package and verify the exact compiled daemon
+        run: |
+          python3 .github/scripts/paired_manager.py package --source bakasu \
+            --report paired-manager --zipalign "$ANDROID_HOME/build-tools/36.1.0/zipalign"
+      - name: Upload paired manager and provenance
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: paired-manager-${{ inputs.kernel_run }}
+          path: paired-manager/
+          if-no-files-found: error
