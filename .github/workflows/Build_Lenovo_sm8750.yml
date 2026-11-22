@@ -561,13 +561,19 @@ jobs:
         if: ${{ env.ENABLE_SUSFS == 'true' }}
         run: |
           set -euo pipefail
+          mkdir -p kernel_workspace/preflash
+          cp kernel_workspace/common/security/selinux/selinuxfs.c kernel_workspace/preflash/selinuxfs-input.c
+          cp kernel_workspace/common/security/selinux/ss/services.c kernel_workspace/preflash/services-input.c
+          cp kernel_workspace/common/security/selinux/status.c kernel_workspace/preflash/status-input.c
+          cp kernel_workspace/KernelSU/kernel/selinux/rules.c kernel_workspace/preflash/rules-input.c
+          cp kernel_workspace/KernelSU/kernel/feature/selinux_hide.c kernel_workspace/preflash/selinux_hide-input.c
+          git -C kernel_workspace/KernelSU rev-parse HEAD > kernel_workspace/preflash/bakasu-commit.txt
+          git -C kernel_workspace/susfs4ksu rev-parse HEAD > kernel_workspace/preflash/susfs-commit.txt
+          git rev-parse HEAD > kernel_workspace/preflash/workflow-commit.txt
           python3 .github/scripts/selinux_seqno.py apply \
             --kernel kernel_workspace/common \
             --bakasu kernel_workspace/KernelSU \
             --report kernel_workspace/preflash
-          git -C kernel_workspace/KernelSU rev-parse HEAD > kernel_workspace/preflash/bakasu-commit.txt
-          git -C kernel_workspace/susfs4ksu rev-parse HEAD > kernel_workspace/preflash/susfs-commit.txt
-          git rev-parse HEAD > kernel_workspace/preflash/workflow-commit.txt
 
       - name: 🔧 Clone Droidspaces Patches (克隆 Droidspaces 补丁仓库)
         if: ${{ env.ENABLE_DROIDSPACES == 'true' }}

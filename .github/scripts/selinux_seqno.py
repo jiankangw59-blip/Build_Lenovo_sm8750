@@ -98,7 +98,7 @@ static noinline bool susfs_hide_user_queries(void)
     require(all(term in mmap for term in ("vma->vm_pgoff", "PAGE_SIZE", "VM_WRITE", "VM_MAYWRITE")),
             "Status mmap lost upstream ABI guards")
     require("vm_flags_clear(vma, VM_MAYWRITE)" in mmap, "Status mmap no longer clears VM_MAYWRITE")
-    require(re.search(r"if\s*\(vma->vm_pgoff > 0 \|\| size != PAGE_SIZE\)\s*return -EIO;", mmap),
+    require(re.search(r"if\s*\(vma->vm_pgoff\s*>\s*0\s*\|\|\s*size\s*!=\s*(?:__)?PAGE_SIZE\)\s*return -EIO;", mmap),
             "Status mmap offset/size rejection changed")
     require(re.search(r"if\s*\(vma->vm_flags & VM_WRITE\)\s*return -EPERM;", mmap),
             "Status mmap writable rejection changed")

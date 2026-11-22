@@ -111,14 +111,15 @@ def main():
         root("chmod 755 " + remote)
         probes("baseline")
         cache_check("baseline")
+        probes("pre-policy")
         mutation = root("/data/adb/ksu/bin/ksud sepolicy patch 'allow untrusted_app untrusted_app process getattr'")
         save("sepolicy-patch.txt", mutation)
         probes("post-policy")
-        initial = results["checks"]["baseline_root"]
+        initial = results["checks"]["pre-policy_root"]
         updated = results["checks"]["post-policy_root"]
-        if (updated["policyload"] <= initial["policyload"] or
-                updated["status_sequence"] <= initial["status_sequence"]):
-            raise RuntimeError("Real policy generation or status sequence did not advance after the policy update")
+        if (updated["policyload"] != initial["policyload"] + 1 or
+                updated["status_sequence"] != initial["status_sequence"] + 2):
+            raise RuntimeError("Expected exactly one policy generation and two status sequence increments")
         cache_check("post-policy")
         recent = []
         for line in root("dmesg").splitlines():
