@@ -112,6 +112,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bakasu/userspace/ksud
+      - name: Test the actual asset link helper
+        run: |
+          set -euo pipefail
+          rustc --edition=2024 --test bakasu/userspace/ksud/src/asset_links.rs \
+            -o "$RUNNER_TEMP/ksud-asset-link-tests"
+          "$RUNNER_TEMP/ksud-asset-link-tests" --test-threads=1 | tee paired-manager/asset-link-tests.txt
       - name: Build the paired ksud
         run: |
           set -euo pipefail

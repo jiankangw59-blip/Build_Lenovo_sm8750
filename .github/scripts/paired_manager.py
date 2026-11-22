@@ -73,7 +73,9 @@ def prepare(args):
     pair = (evidence / "workflow-commit.txt").read_text().strip()
     if not re.fullmatch(r"[0-9a-f]{40}", pair):
         raise ValueError("Missing source workflow commit")
-    build_tag = "selinux-" + pair[:7]
+    assets_fix = load_module(Path(__file__).with_name("ksud_assets.py"), "ksud_assets_fix")
+    client_sources = assets_fix.apply(source)
+    build_tag = "selinux-" + pair[:7] + "-links1"
     gradle = source / "manager/build.gradle.kts"
     text = gradle.read_text(encoding="utf-8")
     old = 'extra["managerVersionName"] = getGitDescribe()'
@@ -97,6 +99,10 @@ def prepare(args):
         "package": package,
         "build_tag": build_tag,
         "uapi_header_sha256": sha(source / "uapi/ksu.h"),
+        "client_fixes": ["idempotent-assets-links-v1"],
+        "client_source_hashes": {relative: sha(path) for relative, path in client_sources.items()},
+        "client_workflow_commit": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True).strip(),
         "signing": "Applied after packaging; see manager-verification.json",
     }
     assets = source / "manager/app/src/main/assets"
