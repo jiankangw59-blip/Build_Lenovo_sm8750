@@ -806,6 +806,22 @@ jobs:
           sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" ./common/arch/arm64/configs/gki_defconfig
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
 
+      - name: 🔧 Fix libbpf const warning for 6.6.89
+        if: ${{ env.KERNEL_VERSION == '6.6.89' }}
+        working-directory: kernel_workspace/common
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("tools/lib/bpf/libbpf.c")
+          text = path.read_text()
+          old = "next_path = strchr(s, ':');"
+          new = "next_path = (char *)strchr(s, ':');"
+          if old not in text:
+              raise SystemExit(f"expected libbpf assignment not found in {path}")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
       - name: 📥 Start build timer (构建计时开始)
         run: 
           echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
