@@ -4,6 +4,7 @@ import hashlib
 import json
 import pathlib
 import shutil
+import subprocess
 
 
 def integrate(kernel, report):
@@ -17,13 +18,13 @@ def integrate(kernel, report):
         if hashlib.sha256((upstream / name).read_bytes()).hexdigest() != digest:
             raise RuntimeError("Official ReKernel source checksum mismatch: " + name)
     shutil.copytree(upstream, target)
-    # Keep the original Makefile for provenance, and adapt only Kbuild linkage.
-    (target / "Makefile").rename(target / "Makefile.upstream")
-    (target / "Makefile").write_text(
-        "include $(srctree)/drivers/rekernel/Makefile.upstream\n"
-        "obj-m :=\n"
-        "obj-$(CONFIG_REKERNEL) += rekernel.o\n"
-        "ccflags-y += -I$(srctree)/drivers/rekernel\n", encoding="utf-8")
+    adaptation = lock["builtin_adaptation"]
+    patch = package / adaptation["file"]
+    if hashlib.sha256(patch.read_bytes()).hexdigest() != adaptation["sha256"]:
+        raise RuntimeError("ReKernel built-in adaptation checksum mismatch")
+    command = ["patch", "--batch", "--forward", "--fuzz=0", "-p1", "-i", str(patch)]
+    subprocess.run([*command, "--dry-run"], cwd=target, check=True)
+    subprocess.run(command, cwd=target, check=True)
     edits = {
         "drivers/Kconfig": '\nsource "drivers/rekernel/Kconfig"\n',
         "drivers/Makefile": '\nobj-$(CONFIG_REKERNEL) += rekernel/\n',
@@ -35,12 +36,13 @@ def integrate(kernel, report):
             raise RuntimeError("Duplicate ReKernel build registration: " + filename)
         path.write_text(original.rstrip() + "\n" + addition, encoding="utf-8")
     for name, digest in lock["files"].items():
-        actual = target / ("Makefile.upstream" if name == "Makefile" else name)
-        if hashlib.sha256(actual.read_bytes()).hexdigest() != digest:
-            raise RuntimeError("Official ReKernel file changed during integration: " + name)
+        expected = adaptation["patched_files"].get(name, digest)
+        if hashlib.sha256((target / name).read_bytes()).hexdigest() != expected:
+            raise RuntimeError("Unexpected ReKernel source change during integration: " + name)
     result = {"source": lock, "linkage": "built-in when CONFIG_REKERNEL=y",
-              "official_c_and_header_bytes_preserved": True,
-              "transport": "official Generic Netlink (legacy option disabled)",
+              "official_behavior_preserved": True,
+              "adaptation": "Pinned codex/rekernel-builtin patch: Kbuild, Kconfig, binder include, late_initcall",
+              "transport": "official Generic Netlink",
               "runtime_verified": False}
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps(result, indent=2), encoding="utf-8")

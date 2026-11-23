@@ -74,11 +74,6 @@
       "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/668d22021ba08b7b49827824f25c64e8ac576d86"
     },
     {
-      "file": "patches/5e6af8ae493bc55806b270433966cd2ffc68af87.patch",
-      "sha256": "59eb6b76b42d4ad4a2154095cbcf37f61c8a92791a372be8d1432d86b6e2fd2c",
-      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/5e6af8ae493bc55806b270433966cd2ffc68af87"
-    },
-    {
       "file": "patches/mglru-dirty-writeback-6.6.patch",
       "sha256": "db7ccfd63ce6cee1e6a4fae0f33546a36050c98278551e5c534f75c2695c2b18",
       "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/e36ef45be91813f7aca451e4264b7dcf56aabfd2",

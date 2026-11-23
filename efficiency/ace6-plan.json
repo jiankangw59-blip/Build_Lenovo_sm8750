@@ -13,8 +13,9 @@
     "path": "LKM-Source",
     "commit": "ac08296174d7fb2801c0eee1084f067a34f8a0fe",
     "required_linkage": "built-in",
-    "preserve_official_c_and_header_bytes": true,
-    "integration_changes_only": ["Kbuild linkage", "Kconfig selection"],
+    "preserve_official_functionality_and_protocol": true,
+    "integration_changes_only": ["Kbuild linkage", "Kconfig selection", "binder relative include path", "module_init to late_initcall"],
+    "builtin_reference": {"repository": "jiankangw59-blip/Build_Oneplus_Realme_Action", "branch": "codex/rekernel-builtin", "commit": "0e47686327464c7612f34b5feee5119793635ae7", "source_path": "patch/rekernel-builtin.patch"},
     "required_transport": "Generic Netlink; verified from the phone's installed and loaded ReKernel ELF",
     "replace_existing_ksu_loader_only_after_runtime_verification": true
   },

@@ -1018,7 +1018,9 @@ jobs:
             make -k -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
               CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \
               KCFLAGS+=-O2 KCFLAGS+=-Wno-error \
-              drivers/rekernel/rekernel.o mm/vmscan.o mm/page_alloc.o mm/memory.o \
+              drivers/rekernel/rekernel_main.o drivers/rekernel/rekernel_netlink.o \
+              drivers/rekernel/rekernel_binder.o drivers/rekernel/rekernel_signal.o \
+              drivers/rekernel/rekernel_netfilter.o mm/vmscan.o mm/page_alloc.o mm/memory.o \
               drivers/cpuidle/governors/teo.o drivers/cpuidle/governors/menu.o \
               drivers/cpuidle/cpuidle.o drivers/block/zram/zram_drv.o \
               crypto/lz4kd.o net/ipv4/tcp_bbr.o \
@@ -1038,6 +1040,8 @@ jobs:
             cp "$SYMVERS" ../preflash/efficiency/Module.symvers
             "$CLANG_DIR/llvm-nm" out/vmlinux > ../preflash/efficiency/kernel-symbols.txt
             grep -E ' (start_rekernel|rekernel_netlink_start)(\.|$)' ../preflash/efficiency/kernel-symbols.txt
+            grep -E '[[:space:]]__initcall__.*_start_rekernel7$' out/System.map \
+              | tee ../preflash/efficiency/rekernel-initcall.txt
             gzip -c -1 out/vmlinux > ../preflash/efficiency/vmlinux.gz
           fi
 
