@@ -885,8 +885,8 @@ jobs:
           sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" ./common/arch/arm64/configs/gki_defconfig
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
 
-      - name: 🔧 Fix libbpf const warning for 6.6.89
-        if: ${{ env.KERNEL_VERSION == '6.6.89' }}
+      - name: Fix host libbpf const qualifier compatibility
+        if: ${{ env.KERNEL_VERSION == '6.6.89' || env.EFFICIENCY_PROFILE != 'off' }}
         working-directory: kernel_workspace/common
         run: |
           python3 - <<'PY'
@@ -1012,6 +1012,17 @@ jobs:
             python3 "$WORKDIR/scripts/test_selinux_attr.py" \
               --clang "$CLANG_DIR/clang" --lld "$CLANG_DIR/ld.lld" \
               --hooks security/selinux/hooks.c --report ../preflash/attr-host-tests
+          fi
+
+          if [ "$EFFICIENCY_PROFILE" != off ]; then
+            make -k -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+              CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \
+              KCFLAGS+=-O2 KCFLAGS+=-Wno-error \
+              drivers/rekernel/rekernel.o mm/vmscan.o mm/page_alloc.o mm/memory.o \
+              drivers/cpuidle/governors/teo.o drivers/cpuidle/governors/menu.o \
+              drivers/cpuidle/cpuidle.o drivers/block/zram/zram_drv.o \
+              crypto/lz4kd.o net/ipv4/tcp_bbr.o \
+              2>&1 | tee ../preflash/efficiency/compile-preflight.log
           fi
 
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image 2>&1 | tee build.log
