@@ -964,6 +964,11 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
 
+          if [ "$EFFICIENCY_PROFILE" != off ]; then
+            cp arch/arm64/configs/gki_defconfig ../preflash/efficiency/requested-defconfig
+            cp out/.config ../preflash/efficiency/resolved.config
+          fi
+
           if [ '${{ inputs.enable_fuse_bpf_revalidate }}' = 'true' ]; then
             if ! grep -qx 'CONFIG_FUSE_BPF=y' out/.config; then
               echo "::error::FUSE BPF revalidation patch requires CONFIG_FUSE_BPF=y"

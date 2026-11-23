@@ -29,9 +29,24 @@ def apply(kernel, report):
         path = HERE / item["file"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
             raise RuntimeError("Patch checksum mismatch: " + item["file"])
-        run(["git", "apply", "--check", "--whitespace=nowarn", str(path)], kernel)
-        run(["git", "apply", "--whitespace=nowarn", str(path)], kernel)
-        applied.append(item)
+        touched = set(re.findall(r"^\+\+\+ b/(.+)$", path.read_text(encoding="utf-8"), re.M))
+        if not touched:
+            raise RuntimeError("Patch has no bounded destination paths: " + item["file"])
+        targets = [(kernel / name).resolve() for name in touched]
+        if not all(target.is_relative_to(kernel) for target in targets):
+            raise RuntimeError("Patch destination escapes the kernel tree")
+        before = {str(target.relative_to(kernel)): hashlib.sha256(target.read_bytes()).hexdigest()
+                  if target.exists() else None for target in targets}
+        # Apply relative to this source tree and verify actual byte changes,
+        # independently of Git repository discovery in nested CI directories.
+        command = ["patch", "--batch", "--forward", "--fuzz=0", "-p1", "-i", str(path)]
+        run([*command, "--dry-run"], kernel)
+        run(command, kernel)
+        after = {str(target.relative_to(kernel)): hashlib.sha256(target.read_bytes()).hexdigest()
+                 for target in targets}
+        if not any(before[name] != digest for name, digest in after.items()):
+            raise RuntimeError("Patch returned success without changing source: " + item["file"])
+        applied.append({**item, "before": before, "after": after})
     integrate(kernel, report / "rekernel-integration.json")
     result = {"version": version, "source": manifest["base_commit"], "applied": applied,
               "build_verified": False, "runtime_verified": False}
@@ -72,6 +87,8 @@ def verify(kernel, report):
                  "CONFIG_HZ_1000=y", "CONFIG_REKERNEL=m", "CONFIG_REKERNEL_LEGACY_NETLINK=y"]
     selected = [line for line in forbidden if line in actual]
     selected += [line for line in actual if re.match(r"CONFIG_.*(?:LZ4KDS|SDDC).*=[ym]$", line)]
+    if not re.search(r"^#define\s+BBR_VERSION\s+3\b", (kernel / "net/ipv4/tcp_bbr.c").read_text(encoding="utf-8"), re.M):
+        missing.append("BBRv3 implementation source")
     module_source = (kernel / "kernel/module/main.c").read_text(encoding="utf-8")
     if "custom_module_blacklist" in module_source:
         selected.append("custom_module_blacklist in module loader")
