@@ -1,0 +1,25 @@
+{
+  "upstream_commit": "13d291aef3d1d9607ad3fa5ff30dc23b2888a3da",
+  "source_file": "drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c",
+  "source_sha256": "7f0b3dc9c0cc9a0ce54d3aa5dbc05aac2bb464f7778969281112981055a9af2d",
+  "patch_sha256": "dea7c0e140926560adbe5fa6a30942c0f3b919c14690de613b49fdaf704e2554",
+  "patched_sha256": "e51140d12d447b21dc61101f819ad764a60d84ca949c8956a9a55f8095f6aa05",
+  "new_state_cases": 2,
+  "expected_state_cases": 26,
+  "expected_codec_cases": 6,
+  "wire_format_changed": false,
+  "exported_kmi_changed": false,
+  "sddc_zms_native_enabled": false,
+  "kernel_compilation_verified": false,
+  "kunit_runtime_verified": false,
+  "root_cause_fixed_claimed": false,
+  "host_extracted_helper_tests_verified": true,
+  "host_proof_assertions": 5238,
+  "host_hash_branch_assertions": 6,
+  "hash_function_in_host_check_injected": true,
+  "patch_applied_with_gnu_patch_fuzz": 0,
+  "test_script_sha256": "7ea55891cae5d01dd59ac11b240e3a844d764cbf566b168ff85a8f9ecf9899d4",
+  "exact_target_files": [
+    "drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c"
+  ]
+}

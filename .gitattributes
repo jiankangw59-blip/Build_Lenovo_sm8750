@@ -1,2 +1,3 @@
 efficiency/crystal/source/** -text -whitespace
+efficiency/crystal/*.patch -text -whitespace
 efficiency/lz4kds_lab/vendor/** -text -whitespace

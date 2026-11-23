@@ -7,7 +7,9 @@ import re
 import subprocess
 
 from integrate_rekernel import integrate
-from integrate_crystal import integrate as integrate_crystal
+from integrate_crystal import (CRYSTAL_PROFILES, PROFILE_CHOICES, crystal_configuration,
+                               crystal_configuration_errors, integrate as integrate_crystal,
+                               integrity_patch_policy, stage2_profile, unexpected_sddc_options)
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -29,7 +31,7 @@ def apply(kernel, report, profile="baseline"):
     patches = list(manifest["patches"])
     if profile != "baseline":
         followups = json.loads((HERE / "stage2-series.json").read_text(encoding="utf-8"))
-        patches.append(followups["kcompressd" if profile == "crystal" else profile])
+        patches.append(followups[stage2_profile(profile)])
     for item in patches:
         path = HERE / item["file"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
@@ -53,8 +55,8 @@ def apply(kernel, report, profile="baseline"):
             raise RuntimeError("Patch returned success without changing source: " + item["file"])
         applied.append({**item, "before": before, "after": after})
     integrate(kernel, report / "rekernel-integration.json")
-    if profile == "crystal":
-        integrate_crystal(kernel, report / "crystal-integration.json")
+    if profile in CRYSTAL_PROFILES:
+        integrate_crystal(kernel, report / "crystal-integration.json", profile)
     result = {"version": version, "profile": profile, "source": manifest["base_commit"], "applied": applied,
               "build_verified": False, "runtime_verified": False}
     (report / "efficiency-patches.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -94,21 +96,16 @@ def configure(kernel, profile="baseline"):
         # A soft 5% clean-cache floor; avoid upstream's two hard 15% floors.
         for name, value in [("ANON_MIN_RATIO", 0), ("CLEAN_LOW_RATIO", 5), ("CLEAN_MIN_RATIO", 0)]:
             run(["scripts/config", "--file", str(defconfig), "--set-val", name, str(value)], kernel)
-    if profile in ("kcompressd", "crystal"):
+    if stage2_profile(profile) == "kcompressd":
         # Match the accepted native-ZRAM baseline; this is not a ZSWAP port.
         run(["scripts/config", "--file", str(defconfig), "--disable", "ZSWAP"], kernel)
-    if profile == "crystal":
-        for name in ["ZRAM", "CRYSTAL_HYBRIDSWAP_SDDC", "CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD",
-                     "CRYSTAL_HYBRIDSWAP_SDDC_ZMS_NATIVE", "CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST",
-                     "CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE", "CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP",
-                     "CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS", "CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM",
-                     "CRYSTAL_HYBRIDSWAP_ERM_AVAIL_BUFFER_DEFAULT_ON"]:
-            run(["scripts/config", "--file", str(defconfig), "--disable", name], kernel)
-        for name in ["CRYSTAL_HYBRIDSWAP", "CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK",
-                     "CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME", "CRYSTAL_HYBRIDSWAP_ZRAM_LOCK_DEF_COMP"]:
-            run(["scripts/config", "--file", str(defconfig), "--enable", name], kernel)
-        run(["scripts/config", "--file", str(defconfig), "--set-str",
-             "CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP", "lz4kd"], kernel)
+    if profile in CRYSTAL_PROFILES:
+        for name, value in crystal_configuration(profile).items():
+            if value in ("y", "n"):
+                selection = ["--enable" if value == "y" else "--disable", name]
+            else:
+                selection = ["--set-str", name, value.strip('"')]
+            run(["scripts/config", "--file", str(defconfig), *selection], kernel)
 
 
 def verify(kernel, report, profile="baseline"):
@@ -116,13 +113,11 @@ def verify(kernel, report, profile="baseline"):
     required = [line for line in (HERE / "ace6-baseline.config").read_text(encoding="utf-8").splitlines()
                 if line.startswith("CONFIG_")]
     required += ["CONFIG_ZRAM=y", "CONFIG_ZSMALLOC=y"]
-    if profile == "crystal":
+    if profile in CRYSTAL_PROFILES:
         required = [line for line in required if not line.startswith("CONFIG_ZRAM")]
-        required += ["CONFIG_CRYSTAL_HYBRIDSWAP=y", "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK=y",
-                     "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME=y",
-                     "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_LOCK_DEF_COMP=y",
-                     'CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP="lz4kd"']
     missing = [line for line in required if line not in actual]
+    if profile in CRYSTAL_PROFILES:
+        missing.extend(crystal_configuration_errors(actual, profile))
     forbidden = ["CONFIG_UKSM=y", "CONFIG_IOSCHED_BFQ=y", "CONFIG_BORE_SCHEDULER=y",
                  "CONFIG_HZ_1000=y", "CONFIG_REKERNEL=m", "CONFIG_REKERNEL_LEGACY_NETLINK=y"]
     selected = [line for line in forbidden if line in actual]
@@ -130,25 +125,30 @@ def verify(kernel, report, profile="baseline"):
         for line in ["CONFIG_ANON_MIN_RATIO=0", "CONFIG_CLEAN_LOW_RATIO=5", "CONFIG_CLEAN_MIN_RATIO=0"]:
             if line not in actual:
                 missing.append(line)
-    if profile in ("kcompressd", "crystal"):
+    if stage2_profile(profile) == "kcompressd":
         if "# CONFIG_ZSWAP is not set" not in actual:
             missing.append("Kcompressd 6.6 native route requires CONFIG_ZSWAP=n")
         page_io = (kernel / "mm/page_io.c").read_text(encoding="utf-8")
         for marker in ["set_user_nice(current, 19)", "if (cpu < 6)", "READ_ONCE(vm_kcompressd)"]:
             if marker not in page_io:
                 missing.append("Kcompressd runtime policy: " + marker)
-    if profile == "crystal":
+    if profile in CRYSTAL_PROFILES:
         if "# CONFIG_ZRAM is not set" not in actual:
             missing.append("Crystal must replace the native ZRAM provider")
         source = kernel / "drivers/crystalfrostwork/crystal_hybridswap"
         if not all((source / name).is_file() for name in ["zms.c", "zram_drv.c", "zcomp.c"]):
             missing.append("Crystal/ZMS source is missing")
+        if CRYSTAL_PROFILES[profile]["sddc"]:
+            integrity = integrity_patch_policy()
+            path = kernel / integrity["source_file"]
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != integrity["patched_sha256"]:
+                missing.append("Actual SDDC source lacks the reviewed integrity overlay")
     cmdline = next((line for line in actual if line.startswith('CONFIG_CMDLINE="')), "")
     if "workqueue.unbound_cpus=0-5" not in cmdline:
         missing.append("Native early workqueue CPU mask boot parameter")
     if "CONFIG_CMDLINE_FORCE=y" in actual:
         selected.append("Kernel command line must extend the bootloader arguments")
-    selected += [line for line in actual if re.match(r"CONFIG_.*(?:LZ4KDS|SDDC).*=[ym]$", line)]
+    selected += unexpected_sddc_options(actual, profile)
     if not re.search(r"^#define\s+BBR_VERSION\s+3\b", (kernel / "net/ipv4/tcp_bbr.c").read_text(encoding="utf-8"), re.M):
         missing.append("BBRv3 implementation source")
     module_source = (kernel / "kernel/module/main.c").read_text(encoding="utf-8")
@@ -177,7 +177,7 @@ if __name__ == "__main__":
     parser.add_argument("action", choices=["apply", "configure", "verify"])
     parser.add_argument("--kernel", type=pathlib.Path, required=True)
     parser.add_argument("--report", type=pathlib.Path)
-    parser.add_argument("--profile", choices=["baseline", "kcompressd", "le9uo", "crystal"], default="baseline")
+    parser.add_argument("--profile", choices=PROFILE_CHOICES, default="baseline")
     args = parser.parse_args()
     kernel = args.kernel.resolve()
     if args.action == "configure": configure(kernel, args.profile)

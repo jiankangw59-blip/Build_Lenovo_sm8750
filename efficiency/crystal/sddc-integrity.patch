@@ -1,0 +1,221 @@
+diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
+--- a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
++++ b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
+@@ -805,7 +805,7 @@
+ 	return 0;
+ }
+ 
+-static void crystal_sddc_check_page_hash(struct crystal_sddc *sddc,
++static int crystal_sddc_check_page_hash(struct crystal_sddc *sddc,
+ 		u32 index, u64 mutation_seq, const struct crystal_sddc_ref *ref,
+ 		enum crystal_sddc_kind kind, u32 ref_size, u32 target_size,
+ 		u32 wire_size, u32 expected_hash, const void *page_data,
+@@ -814,16 +814,16 @@
+ 	u32 actual_hash;
+ 
+ 	if (!sddc || !page_data)
+-		return;
++		return -EIO;
+ 	if (!expected_hash) {
+ 		atomic64_inc(&sddc->stats.integrity_skipped);
+-		return;
++		return 0;
+ 	}
+ 
+ 	atomic64_inc(&sddc->stats.integrity_checks);
+ 	actual_hash = crystal_sddc_page_hash(page_data);
+ 	if (actual_hash == expected_hash)
+-		return;
++		return 0;
+ 
+ 	atomic64_inc(&sddc->stats.integrity_failures);
+ 	chs_log_ratelimited(CHS_LOG_ERR,
+@@ -833,6 +833,7 @@
+ 		ref ? ref->cookie.generation : 0, ref_size, target_size,
+ 		wire_size, mutation_seq, expected_hash, actual_hash,
+ 		ref ? refcount_read(&ref->refs) : 0);
++	return -EIO;
+ }
+ 
+ static struct crystal_sddc_workspace *
+@@ -2047,6 +2048,17 @@
+ 	return committed;
+ }
+ 
++static bool crystal_sddc_delta_proof_valid(int ret, unsigned int proof_size,
++		const void *proof, const void *original, u32 original_size)
++{
++	if (ret || !proof || !original || !original_size ||
++	    original_size > PAGE_SIZE || proof_size != original_size)
++		return false;
++
++	/* A successful decoder and matching length do not prove byte identity. */
++	return !memcmp(proof, original, original_size);
++}
++
+ static bool crystal_sddc_try_delta_from_source(struct crystal_sddc *sddc,
+ 		const struct crystal_sddc_job_key *target, const void *target_data,
+ 		const struct crystal_sddc_candidate *candidate,
+@@ -2133,7 +2145,8 @@
+ 				workspace->ref_data, source->key.size,
+ 				workspace->proof, &proof_len);
+ 		zcomp_stream_put(sddc->zram->comps[target->prio]);
+-		if (proof_ret || proof_len != target->size) {
++		if (!crystal_sddc_delta_proof_valid(proof_ret, proof_len,
++				workspace->proof, target_data, target->size)) {
+ 			atomic64_inc(&sddc->stats.delta_proof_failures);
+ 			goto out;
+ 		}
+@@ -3332,7 +3345,7 @@
+ 					   &size, true);
+ 	if (!ret) {
+ 		if (size == PAGE_SIZE)
+-			crystal_sddc_check_page_hash(sddc, index, mutation_seq,
++			ret = crystal_sddc_check_page_hash(sddc, index, mutation_seq,
+ 				ref, kind, ref->size, target_size, wire_size,
+ 				page_hash, dst, "resident_read");
+ 		else
+@@ -3386,7 +3399,7 @@
+ 					 true);
+ 	if (!ret) {
+ 		if (size == PAGE_SIZE)
+-			crystal_sddc_check_page_hash(sddc, index, mutation_seq,
++			ret = crystal_sddc_check_page_hash(sddc, index, mutation_seq,
+ 				ref, kind, ref->size, target_size, wire_size,
+ 				page_hash, dst, "resident_read_locked");
+ 		else
+@@ -3874,7 +3887,7 @@
+ 			&size, true);
+ 	if (!ret) {
+ 		if (size == PAGE_SIZE)
+-			crystal_sddc_check_page_hash(sddc, index,
++			ret = crystal_sddc_check_page_hash(sddc, index,
+ 				snapshot->mutation_seq, ref, kind, ref->size,
+ 				target_size, (u32)wire_size, snapshot->page_hash,
+ 				dst, "native_wb_read");
+@@ -5032,7 +5045,125 @@
+ 	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 0);
+ }
+ 
++static void crystal_sddc_delta_proof_identity_test(struct kunit *test)
++{
++	u8 original[64];
++	u8 proof[sizeof(original)];
++	unsigned int i;
++
++	for (i = 0; i < sizeof(original); i++)
++		original[i] = (u8)(i * 17U + 3U);
++	memcpy(proof, original, sizeof(proof));
++	KUNIT_EXPECT_TRUE(test, crystal_sddc_delta_proof_valid(0,
++			sizeof(proof), proof, original, sizeof(original)));
++	/* Equal-length corruption at the head, middle and tail must be rejected. */
++	for (i = 0; i < 3; i++) {
++		unsigned int offset = i == 0 ? 0 : i == 1 ? 32 : 63;
++
++		proof[offset] ^= 1;
++		KUNIT_EXPECT_FALSE(test, crystal_sddc_delta_proof_valid(0,
++				sizeof(proof), proof, original, sizeof(original)));
++		proof[offset] ^= 1;
++	}
++	KUNIT_EXPECT_FALSE(test, crystal_sddc_delta_proof_valid(-EIO,
++			sizeof(proof), proof, original, sizeof(original)));
++	KUNIT_EXPECT_FALSE(test, crystal_sddc_delta_proof_valid(0,
++			sizeof(proof) - 1, proof, original, sizeof(original)));
++	KUNIT_EXPECT_FALSE(test, crystal_sddc_delta_proof_valid(0,
++			sizeof(proof), NULL, original, sizeof(original)));
++}
++
++static void crystal_sddc_resident_hash_error_test(struct kunit *test)
++{
++	struct crystal_sddc_test_ctx *ctx = test->priv;
++	struct crystal_sddc_slot_state *state = NULL;
++	struct crystal_sddc_ref ref = {
++		.sddc = &ctx->sddc,
++		.cookie = { .id = 41, .generation = 23 },
++		.size = PAGE_SIZE,
++		.prio = ZRAM_PRIMARY_COMP,
++	};
++	struct zs_pool *pool;
++	struct page *page = NULL;
++	unsigned long handle = 0;
++	u32 expected_hash;
++	void *data;
++	int ret;
++
++	/* The test owns every byte; it neither creates nor modifies a zram device. */
++	pool = zs_create_pool("sddc-kunit-integrity");
++	if (!pool) {
++		KUNIT_FAIL(test, "cannot create private zsmalloc pool");
++		return;
++	}
++	ctx->zram.mem_pool = pool;
++	handle = zs_malloc(pool, PAGE_SIZE, GFP_KERNEL);
++	if (!handle || IS_ERR_VALUE(handle)) {
++		KUNIT_FAIL(test, "cannot allocate private reference object");
++		handle = 0;
++		goto out;
++	}
++	page = alloc_page(GFP_KERNEL);
++	if (!page) {
++		KUNIT_FAIL(test, "cannot allocate private read destination");
++		goto out;
++	}
++	data = zs_map_object(pool, handle, ZS_MM_WO);
++	memset(data, 0xa5, PAGE_SIZE);
++	expected_hash = crystal_sddc_page_hash(data);
++	zs_unmap_object(pool, handle);
++
++	state = crystal_sddc_test_install_state(ctx, 0, CRYSTAL_SDDC_REF);
++	if (!state) {
++		KUNIT_FAIL(test, "cannot install private reference state");
++		goto out;
++	}
++	ref.handle = handle;
++	/* Keep a test owner so read pins never schedule asynchronous ref freeing. */
++	refcount_set(&ref.refs, 2);
++	state->ref = ref.cookie;
++	state->ref_obj = &ref;
++	state->ref_size = PAGE_SIZE;
++	state->target_size = PAGE_SIZE;
++	state->page_hash = expected_hash;
++	ret = crystal_sddc_read_page(&ctx->zram, page, 0);
++	KUNIT_EXPECT_EQ(test, ret, 0);
++
++	/* Corrupt only the captured expectation, preserving the data and length. */
++	state->page_hash = expected_hash ^ 1U;
++	if (!state->page_hash)
++		state->page_hash = 2U;
++	ret = crystal_sddc_read_page(&ctx->zram, page, 0);
++	KUNIT_EXPECT_EQ(test, ret, -EIO);
++	crystal_sddc_slot_lock(&ctx->zram, 0);
++	ret = crystal_sddc_read_page_locked(&ctx->zram, page, 0);
++	KUNIT_EXPECT_EQ(test, ret, -EIO);
++	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.integrity_checks),
++			(s64)3);
++	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.integrity_failures),
++			(s64)2);
++	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.decode_failures),
++			(s64)2);
++	KUNIT_EXPECT_EQ(test, refcount_read(&ref.refs), 2U);
++	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 0);
++
++out:
++	if (state) {
++		xa_erase(&ctx->sddc.slot_states, 0);
++		state->ref_obj = NULL;
++		kfree(state);
++	}
++	if (page)
++		__free_page(page);
++	if (handle)
++		zs_free(pool, handle);
++	zs_destroy_pool(pool);
++	ctx->zram.mem_pool = NULL;
++}
++
+ static struct kunit_case crystal_sddc_state_test_cases[] = {
++	KUNIT_CASE(crystal_sddc_delta_proof_identity_test),
++	KUNIT_CASE(crystal_sddc_resident_hash_error_test),
+ 	KUNIT_CASE(crystal_sddc_ref_publish_test),
+ 	KUNIT_CASE(crystal_sddc_ref_generation_test),
+ 	KUNIT_CASE(crystal_sddc_ref_reservation_pin_test),

@@ -9,6 +9,10 @@ import struct
 import subprocess
 import time
 
+from integrate_crystal import (CRYSTAL_PROFILES, PIN as CRYSTAL_PIN, PROFILE_CHOICES,
+                               crystal_configuration, crystal_configuration_errors,
+                               integrity_patch_policy, source_manifest, stage2_profile)
+
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -59,6 +63,58 @@ def compiled_notes(evidence):
                    "independent_elf_comparison": True}
 
 
+def validate_profile_evidence(evidence, patches, expected_profile):
+    if patches["version"] != "6.6.89" or patches["source"] != "c1802dd6f3343e71c166a3c67c50554c81880b6e":
+        raise RuntimeError("Only the compatible Ace 6 6.6.89 baseline is accepted")
+    profile = patches.get("profile", "baseline")
+    if profile != expected_profile:
+        raise RuntimeError("Requested profile differs from the compiled artifact")
+    files = [entry["file"] for entry in patches["applied"]]
+    stage2 = {name for name in files if name in (
+        "patches/kcompressd-6.6.89.patch", "patches/le9uo-6.6.89.patch")}
+    parent = stage2_profile(profile)
+    expected_stage2 = {f"patches/{parent}-6.6.89.patch"} if profile != "baseline" else set()
+    if stage2 != expected_stage2 or len(files) != 19 + bool(expected_stage2):
+        raise RuntimeError("Candidate does not contain exactly the requested isolated patch series")
+    here = pathlib.Path(__file__).resolve().parent
+    pinned = json.loads((here / "patch-series.json").read_text(encoding="utf-8"))["patches"]
+    if len(pinned) != 19:
+        raise RuntimeError("Unexpected accepted baseline patch count")
+    if expected_stage2:
+        pinned += [json.loads((here / "stage2-series.json").read_text(encoding="utf-8"))[parent]]
+    if [(entry["file"], entry["sha256"]) for entry in patches["applied"]] != [
+            (entry["file"], entry["sha256"]) for entry in pinned]:
+        raise RuntimeError("Candidate patch order or digest differs from the pinned series")
+    if profile in CRYSTAL_PROFILES:
+        crystal = json.loads((evidence / "efficiency/crystal-integration.json").read_text(encoding="utf-8"))
+        if crystal.get("passed") is not True or crystal.get("source_commit") != CRYSTAL_PIN:
+            raise RuntimeError("Candidate lacks the pinned Crystal integration report")
+        if crystal.get("profile", "crystal") != profile:
+            raise RuntimeError("Candidate Crystal integration profile differs")
+        imported = source_manifest(profile)["files"]
+        if crystal.get("source_sha256") != imported:
+            raise RuntimeError("Candidate Crystal source inventory or digests differ")
+        installed = crystal.get("installed_sha256", {})
+        if set(installed) != set(imported) | {
+                "drivers/Kconfig", "drivers/Makefile", "drivers/crystalfrostwork/Makefile"}:
+            raise RuntimeError("Candidate Crystal installed inventory differs")
+        if profile != "crystal" and (crystal.get("configuration") != crystal_configuration(profile) or
+                                      crystal.get("native_sddc_zms") is not False or
+                                      crystal.get("sddc_kunit_requested") is not CRYSTAL_PROFILES[profile]["kunit"]):
+            raise RuntimeError("Candidate LZ4KDS integration policy differs")
+        if CRYSTAL_PROFILES[profile]["sddc"]:
+            integrity = integrity_patch_policy()
+            if crystal.get("sddc_integrity_patch") != integrity or installed.get(
+                    integrity["source_file"]) != integrity["patched_sha256"]:
+                raise RuntimeError("Candidate lacks the reviewed SDDC integrity overlay")
+            if imported.get(integrity["source_file"]) != integrity["source_sha256"]:
+                raise RuntimeError("Candidate SDDC integrity base source differs")
+        errors = crystal_configuration_errors((evidence / "kernel.config").read_text(encoding="utf-8").splitlines(), profile)
+        if errors:
+            raise RuntimeError("Candidate Crystal configuration differs: " + "; ".join(errors))
+    return profile
+
+
 def prepare(args):
     evidence = args.evidence.resolve()
     image = evidence / "Image"
@@ -67,28 +123,7 @@ def prepare(args):
         if json.loads((evidence / "efficiency" / name).read_text(encoding="utf-8"))["passed"] is not True:
             raise RuntimeError("Candidate failed " + name)
     patches = json.loads((evidence / "efficiency/efficiency-patches.json").read_text(encoding="utf-8"))
-    if patches["version"] != "6.6.89" or patches["source"] != "c1802dd6f3343e71c166a3c67c50554c81880b6e":
-        raise RuntimeError("Only the compatible Ace 6 6.6.89 baseline is accepted")
-    profile = patches.get("profile", "baseline")
-    if profile != args.expected_profile:
-        raise RuntimeError("Requested profile differs from the compiled artifact")
-    files = [entry["file"] for entry in patches["applied"]]
-    stage2 = {name for name in files if name in (
-        "patches/kcompressd-6.6.89.patch", "patches/le9uo-6.6.89.patch")}
-    stage2_profile = "kcompressd" if profile == "crystal" else profile
-    expected_stage2 = {f"patches/{stage2_profile}-6.6.89.patch"} if profile != "baseline" else set()
-    if stage2 != expected_stage2 or len(files) != 19 + bool(expected_stage2):
-        raise RuntimeError("Candidate does not contain exactly the requested isolated patch series")
-    if profile == "crystal":
-        crystal = json.loads((evidence / "efficiency/crystal-integration.json").read_text(encoding="utf-8"))
-        if crystal.get("passed") is not True or crystal.get("source_commit") != "13d291aef3d1d9607ad3fa5ff30dc23b2888a3da":
-            raise RuntimeError("Candidate lacks the pinned Crystal integration report")
-        config = (evidence / "kernel.config").read_text(encoding="utf-8")
-        for line in ["CONFIG_CRYSTAL_HYBRIDSWAP=y", "# CONFIG_ZRAM is not set",
-                     'CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP="lz4kd"',
-                     "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_LOCK_DEF_COMP=y"]:
-            if line not in config.splitlines():
-                raise RuntimeError("Candidate Crystal configuration differs: " + line)
+    profile = validate_profile_evidence(evidence, patches, args.expected_profile)
     release = (evidence / "kernel.release").read_text(encoding="utf-8").strip()
     if not release.startswith("6.6.89-"):
         raise RuntimeError("Unexpected actual kernel release: " + release)
@@ -181,5 +216,5 @@ if __name__ == "__main__":
     parser.add_argument("--ak3", type=pathlib.Path, required=True)
     parser.add_argument("--original", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
-    parser.add_argument("--expected-profile", choices=["baseline", "kcompressd", "le9uo", "crystal"], default="baseline")
+    parser.add_argument("--expected-profile", choices=PROFILE_CHOICES, default="baseline")
     prepare(parser.parse_args())

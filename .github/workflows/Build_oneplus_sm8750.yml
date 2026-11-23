@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       efficiency_profile:
-        description: "PLQ110 audited efficiency profile (6.6.89 / pure LZ4KD / built-in official ReKernel)"
+        description: "PLQ110 6.6.89 profile (native LZ4KD / Crystal control / isolated LZ4KDS test)"
         required: false
         default: 'off'
         type: choice
@@ -16,6 +16,8 @@ on:
           - 'kcompressd'
           - 'le9uo'
           - 'crystal'
+          - 'crystal-lz4kds-test'
+          - 'crystal-lz4kds'
       enable_release:
         description: "发布到 Releases"
         required: true
@@ -141,7 +143,7 @@ jobs:
         if: ${{ env.EFFICIENCY_PROFILE != 'off' }}
         run: |
           set -euo pipefail
-          case "$EFFICIENCY_PROFILE" in baseline|kcompressd|le9uo|crystal) ;; *) exit 1 ;; esac
+          case "$EFFICIENCY_PROFILE" in baseline|kcompressd|le9uo|crystal|crystal-lz4kds-test|crystal-lz4kds) ;; *) exit 1 ;; esac
           test "$DEVICES_NAME" = oneplus_ace_6
           test "$KERNEL_VERSION" = 6.6.89
           test "$ZRAM_PATCH" = LZ4KD
@@ -989,7 +991,7 @@ jobs:
 
           if [ "$ZRAM_PATCH" = 'LZ4KD' ]; then
             LZ4KD_SYMBOLS='ZRAM ZSMALLOC CRYPTO_LZ4KD ZRAM_DEF_COMP_LZ4KD'
-            if [ "$EFFICIENCY_PROFILE" = crystal ]; then
+            if [[ "$EFFICIENCY_PROFILE" == crystal* ]]; then
               LZ4KD_SYMBOLS='ZSMALLOC CRYPTO_LZ4KD CRYSTAL_HYBRIDSWAP CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK'
             fi
             if [ "$EFFICIENCY_PROFILE" = off ]; then
@@ -1001,8 +1003,12 @@ jobs:
                 exit 1
               fi
             done
-            if [ "$EFFICIENCY_PROFILE" = crystal ]; then
-              grep -qx 'CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP="lz4kd"' out/.config
+            if [[ "$EFFICIENCY_PROFILE" == crystal* ]]; then
+              CRYSTAL_COMPRESSOR=lz4kd
+              if [ "$EFFICIENCY_PROFILE" = crystal-lz4kds ]; then
+                CRYSTAL_COMPRESSOR=lz4kds
+              fi
+              grep -qx "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP=\"${CRYSTAL_COMPRESSOR}\"" out/.config
             else
               grep -qx 'CONFIG_ZRAM_DEF_COMP="lz4kd"' out/.config
             fi
@@ -1040,11 +1046,23 @@ jobs:
 
           if [ "$EFFICIENCY_PROFILE" != off ]; then
             ZRAM_PREFLIGHT='drivers/block/zram/zram_drv.o'
-            if [ "$EFFICIENCY_PROFILE" = crystal ]; then
+            if [[ "$EFFICIENCY_PROFILE" == crystal* ]]; then
               ZRAM_PREFLIGHT=''
               for component in zcomp zms zram_drv core param zram_bridge memcg pressure stats; do
                 ZRAM_PREFLIGHT="$ZRAM_PREFLIGHT drivers/crystalfrostwork/crystal_hybridswap/${component}.o"
               done
+              if [[ "$EFFICIENCY_PROFILE" == crystal-lz4kds* ]]; then
+                for component in sddc/crystal_sddc sddc/crystal_sddc_codec \
+                  sddc/lz4kd/lz4kd_encode sddc/lz4kd/lz4kd_encode_delta sddc/lz4kd/lz4kd_decode; do
+                  ZRAM_PREFLIGHT="$ZRAM_PREFLIGHT drivers/crystalfrostwork/crystal_hybridswap/${component}.o"
+                done
+                if grep -qx 'CONFIG_KERNEL_MODE_NEON=y' out/.config; then
+                  ZRAM_PREFLIGHT="$ZRAM_PREFLIGHT drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_neon.o"
+                fi
+                if [ "$EFFICIENCY_PROFILE" = crystal-lz4kds-test ]; then
+                  ZRAM_PREFLIGHT="$ZRAM_PREFLIGHT drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc_codec_test.o"
+                fi
+              fi
             fi
             make -k -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
               CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \
