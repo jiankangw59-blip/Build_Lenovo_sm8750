@@ -13,6 +13,8 @@ on:
         options:
           - 'off'
           - 'baseline'
+          - 'kcompressd'
+          - 'le9uo'
       enable_release:
         description: "发布到 Releases"
         required: true
@@ -138,7 +140,7 @@ jobs:
         if: ${{ env.EFFICIENCY_PROFILE != 'off' }}
         run: |
           set -euo pipefail
-          test "$EFFICIENCY_PROFILE" = baseline
+          case "$EFFICIENCY_PROFILE" in baseline|kcompressd|le9uo) ;; *) exit 1 ;; esac
           test "$DEVICES_NAME" = oneplus_ace_6
           test "$KERNEL_VERSION" = 6.6.89
           test "$ZRAM_PATCH" = LZ4KD
@@ -147,6 +149,7 @@ jobs:
           test "$ENABLE_SCX" = false
           test "$ENABLE_DROIDSPACES" = false
           test '${{ inputs.enable_fuse_bpf_revalidate }}' = true
+          python3 -m unittest discover -s efficiency -p test_memory_layout.py
       - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
         run: |
           case "$ZRAM_PATCH" in
@@ -874,8 +877,10 @@ jobs:
           set -euo pipefail
           test "$KERNEL_SOURCE_REF" = c1802dd6f3343e71c166a3c67c50554c81880b6e
           python3 efficiency/apply_profile.py apply \
-            --kernel kernel_workspace/common --report kernel_workspace/preflash/efficiency
-          python3 efficiency/apply_profile.py configure --kernel kernel_workspace/common
+            --kernel kernel_workspace/common --report kernel_workspace/preflash/efficiency \
+            --profile "$EFFICIENCY_PROFILE"
+          python3 efficiency/apply_profile.py configure --kernel kernel_workspace/common \
+            --profile "$EFFICIENCY_PROFILE"
 
       - name: 🔧 Set Kernel name (设置内核名称)
         run: |
@@ -978,7 +983,7 @@ jobs:
 
           if [ "$EFFICIENCY_PROFILE" != off ]; then
             python3 "$WORKDIR/efficiency/apply_profile.py" verify --kernel . \
-              --report ../preflash/efficiency/config-verification.json
+              --report ../preflash/efficiency/config-verification.json --profile "$EFFICIENCY_PROFILE"
           fi
 
           if [ "$ZRAM_PATCH" = 'LZ4KD' ]; then
@@ -1032,6 +1037,7 @@ jobs:
               drivers/rekernel/rekernel_main.o drivers/rekernel/rekernel_netlink.o \
               drivers/rekernel/rekernel_binder.o drivers/rekernel/rekernel_signal.o \
               drivers/rekernel/rekernel_netfilter.o mm/vmscan.o mm/page_alloc.o mm/memory.o \
+              mm/page_io.o mm/mm_init.o kernel/sysctl.o \
               drivers/cpuidle/governors/teo.o drivers/cpuidle/governors/menu.o \
               drivers/cpuidle/cpuidle.o drivers/block/zram/zram_drv.o \
               crypto/lz4kd.o net/ipv4/tcp_bbr.o fs/f2fs/gc.o \

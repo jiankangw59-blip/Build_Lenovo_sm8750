@@ -1,0 +1,14 @@
+{
+  "kcompressd": {
+    "file": "patches/kcompressd-6.6.89.patch",
+    "sha256": "6172ad69f3341beb561c7d999c7f00f5e71b71ac734780aad3fea588874ee95c",
+    "upstream_commit": "45351b52974ca39b6da957e1d62a6b881be190e7",
+    "adaptation": "nice=19, CPU0-5, READ_ONCE sysctl snapshot, paired native zswap writeback accounting"
+  },
+  "le9uo": {
+    "file": "patches/le9uo-6.6.89.patch",
+    "sha256": "d79e65909fca38502ca726a6a5e884c62dd2cf771296327b9be9aefe484c0822",
+    "upstream_commit": "768e5977bc4f8f8ebcb501ac3fb822d548896686",
+    "adaptation": "Retain all OEM scan_control fields and use only byte45 padding; defaults anon/clean-low/clean-min=0/5/0"
+  }
+}

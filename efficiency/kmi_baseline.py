@@ -165,7 +165,11 @@ def verify(args):
             checked += 1
             if symbol not in exports or int(exports[symbol], 16) != int(crc, 16):
                 failures.append({"module": name, "symbol": symbol, "expected": crc, "actual": exports.get(symbol)})
-    actual = Btf(args.vmlinux.read_bytes()).layouts(baseline["structures"])
+    btf = Btf(args.vmlinux.read_bytes())
+    actual = btf.layouts(baseline["structures"])
+    from memory_layout import verify_memory_layouts
+    memory_failures, memory_actual = verify_memory_layouts(btf)
+    failures.extend(memory_failures)
     for name, expected in baseline["structures"].items():
         compatible = actual[name] == expected
         if name in ("tcp_sock", "inet_connection_sock"):
@@ -195,7 +199,8 @@ def verify(args):
     if checked == 0: failures.append({"reason": "No baseline loaded OEM imports were checked"})
     report = {"checked_imports": checked, "failures": failures, "passed": not failures,
               "actual_structures": actual,
-              "scope": "GKI CRCs referenced by baseline loaded OEM modules and four explicit BTF structure layouts; runtime module loading remains required."}
+              "memory_structures": memory_actual,
+              "scope": "GKI CRCs referenced by baseline loaded OEM modules and six explicit BTF structure layouts; runtime module loading remains required."}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps({"checked_imports": checked, "passed": not failures,

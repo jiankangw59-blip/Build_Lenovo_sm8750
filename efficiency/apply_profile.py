@@ -15,7 +15,7 @@ def run(argv, cwd):
     subprocess.run(argv, cwd=cwd, check=True)
 
 
-def apply(kernel, report):
+def apply(kernel, report, profile="baseline"):
     manifest = json.loads((HERE / "patch-series.json").read_text(encoding="utf-8"))
     makefile = (kernel / "Makefile").read_text(encoding="utf-8")
     numbers = [re.search(r"^" + key + r"\s*=\s*(\d+)", makefile, re.M).group(1)
@@ -25,7 +25,11 @@ def apply(kernel, report):
         raise RuntimeError("Efficiency patch series requires audited base " + manifest["base_kernel_version"])
     report.mkdir(parents=True, exist_ok=True)
     applied = []
-    for item in manifest["patches"]:
+    patches = list(manifest["patches"])
+    if profile != "baseline":
+        followups = json.loads((HERE / "stage2-series.json").read_text(encoding="utf-8"))
+        patches.append(followups[profile])
+    for item in patches:
         path = HERE / item["file"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
             raise RuntimeError("Patch checksum mismatch: " + item["file"])
@@ -48,12 +52,12 @@ def apply(kernel, report):
             raise RuntimeError("Patch returned success without changing source: " + item["file"])
         applied.append({**item, "before": before, "after": after})
     integrate(kernel, report / "rekernel-integration.json")
-    result = {"version": version, "source": manifest["base_commit"], "applied": applied,
+    result = {"version": version, "profile": profile, "source": manifest["base_commit"], "applied": applied,
               "build_verified": False, "runtime_verified": False}
     (report / "efficiency-patches.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
 
-def configure(kernel):
+def configure(kernel, profile="baseline"):
     fragment = (HERE / "ace6-baseline.config").read_text(encoding="utf-8")
     # The compressor patch adds a choice; select it only after all other config edits.
     defconfig = kernel / "arch/arm64/configs/gki_defconfig"
@@ -83,9 +87,13 @@ def configure(kernel):
         else:
             m = re.fullmatch(r"# CONFIG_([A-Z0-9_]+) is not set", line)
             if m: run(["scripts/config", "--file", str(defconfig), "--disable", m.group(1)], kernel)
+    if profile == "le9uo":
+        # A soft 5% clean-cache floor; avoid upstream's two hard 15% floors.
+        for name, value in [("ANON_MIN_RATIO", 0), ("CLEAN_LOW_RATIO", 5), ("CLEAN_MIN_RATIO", 0)]:
+            run(["scripts/config", "--file", str(defconfig), "--set-val", name, str(value)], kernel)
 
 
-def verify(kernel, report):
+def verify(kernel, report, profile="baseline"):
     actual = (kernel / "out/.config").read_text(encoding="utf-8").splitlines()
     required = [line for line in (HERE / "ace6-baseline.config").read_text(encoding="utf-8").splitlines()
                 if line.startswith("CONFIG_")]
@@ -94,6 +102,15 @@ def verify(kernel, report):
     forbidden = ["CONFIG_UKSM=y", "CONFIG_IOSCHED_BFQ=y", "CONFIG_BORE_SCHEDULER=y",
                  "CONFIG_HZ_1000=y", "CONFIG_REKERNEL=m", "CONFIG_REKERNEL_LEGACY_NETLINK=y"]
     selected = [line for line in forbidden if line in actual]
+    if profile == "le9uo":
+        for line in ["CONFIG_ANON_MIN_RATIO=0", "CONFIG_CLEAN_LOW_RATIO=5", "CONFIG_CLEAN_MIN_RATIO=0"]:
+            if line not in actual:
+                missing.append(line)
+    if profile == "kcompressd":
+        page_io = (kernel / "mm/page_io.c").read_text(encoding="utf-8")
+        for marker in ["set_user_nice(current, 19)", "if (cpu < 6)", "READ_ONCE(vm_kcompressd)"]:
+            if marker not in page_io:
+                missing.append("Kcompressd runtime policy: " + marker)
     cmdline = next((line for line in actual if line.startswith('CONFIG_CMDLINE="')), "")
     if "workqueue.unbound_cpus=0-5" not in cmdline:
         missing.append("Native early workqueue CPU mask boot parameter")
@@ -128,8 +145,9 @@ if __name__ == "__main__":
     parser.add_argument("action", choices=["apply", "configure", "verify"])
     parser.add_argument("--kernel", type=pathlib.Path, required=True)
     parser.add_argument("--report", type=pathlib.Path)
+    parser.add_argument("--profile", choices=["baseline", "kcompressd", "le9uo"], default="baseline")
     args = parser.parse_args()
     kernel = args.kernel.resolve()
-    if args.action == "configure": configure(kernel)
-    elif args.action == "apply": apply(kernel, args.report.resolve())
-    else: verify(kernel, args.report.resolve())
+    if args.action == "configure": configure(kernel, args.profile)
+    elif args.action == "apply": apply(kernel, args.report.resolve(), args.profile)
+    else: verify(kernel, args.report.resolve(), args.profile)
