@@ -12,10 +12,12 @@ import tempfile
 HERE = Path(__file__).resolve().parent / "crystal"
 DRIVER = "drivers/crystalfrostwork/crystal_hybridswap"
 PIN = "13d291aef3d1d9607ad3fa5ff30dc23b2888a3da"
+COMBINED_PROFILE = "crystal-lz4kds-le9uo"
 CRYSTAL_PROFILES = {
     "crystal": {"sddc": False, "compressor": "lz4kd", "lock": True, "kunit": False},
     "crystal-lz4kds-test": {"sddc": True, "compressor": "lz4kd", "lock": False, "kunit": True},
     "crystal-lz4kds": {"sddc": True, "compressor": "lz4kds", "lock": True, "kunit": False},
+    COMBINED_PROFILE: {"sddc": True, "compressor": "lz4kds", "lock": True, "kunit": False},
 }
 PROFILE_CHOICES = ("baseline", "kcompressd", "le9uo", *CRYSTAL_PROFILES)
 SDDC_INTEGRITY = {
@@ -27,6 +29,31 @@ SDDC_INTEGRITY = {
     "new_state_cases": 2, "expected_state_cases": 26, "expected_codec_cases": 6,
     "wire_format_changed": False, "exported_kmi_changed": False, "sddc_zms_native_enabled": False,
 }
+SDDC_STATS = {
+    "upstream_commit": PIN,
+    "ordered_patches": ["sddc-integrity.patch", "sddc-integrity-stats.patch"],
+    "integrity_patch_sha256": SDDC_INTEGRITY["patch_sha256"],
+    "stats_patch_sha256": "6690acd331ca6906ab065a389f67bdbaf917de5076e6cf9c42ff8165cfd6aba0",
+    "files": {
+        DRIVER + "/sddc/crystal_sddc.h": {
+            "original_sha256": "f22e978381f9aa0c391229dbfc52753b8dfffa94e71715229b6fa0776d32001e",
+            "after_integrity_sha256": "f22e978381f9aa0c391229dbfc52753b8dfffa94e71715229b6fa0776d32001e",
+            "after_stats_sha256": "c3565977600b99388a85a0b71cf5114657812d53c40fafa0bac8e143d275c4a5",
+        },
+        DRIVER + "/sddc/crystal_sddc.c": {
+            "original_sha256": SDDC_INTEGRITY["source_sha256"],
+            "after_integrity_sha256": SDDC_INTEGRITY["patched_sha256"],
+            "after_stats_sha256": "ed2e2a521865eced8bffac5629b5d1d72bb0e44f69ce19a90f3fddc2fd4f58a8",
+        },
+        DRIVER + "/zram_drv.c": {
+            "original_sha256": "5cb90c2b52919a5b115c5fd32c3fce750ca49b0d1a42f788e692ec62b1e02ea3",
+            "after_integrity_sha256": "5cb90c2b52919a5b115c5fd32c3fce750ca49b0d1a42f788e692ec62b1e02ea3",
+            "after_stats_sha256": "997e92108bec7237d314f5c95eed31a2f60c18625e42e17f669e0808867112f9",
+        },
+    },
+    "read_only_stats_export": True, "wire_format_changed": False, "global_kmi_changed": False,
+}
+STATS_PLATFORM_DRIVER_SHA256 = "b4931a77ad29f7d11d5b1d915054e0464077fe696925f793775559a22d03585a"
 
 
 def integrity_patch_policy():
@@ -45,10 +72,25 @@ def integrity_patch_policy():
     return {**SDDC_INTEGRITY, "patch_file": "sddc-integrity.patch", "fuzz": 0}
 
 
-def apply_integrity_patch(raw, scratch_parent):
-    policy = integrity_patch_policy()
-    if hashlib.sha256(raw).hexdigest() != policy["source_sha256"]:
-        raise RuntimeError("SDDC integrity source differs from the reviewed pin")
+def stats_patch_policy():
+    review = json.loads((HERE / "review/sddc-integrity-stats.json").read_text(encoding="utf-8"))
+    if any(review.get(name) != value for name, value in SDDC_STATS.items()):
+        raise RuntimeError("Unreviewed SDDC stats policy")
+    raw = (HERE / "sddc-integrity-stats.patch").read_bytes()
+    if hashlib.sha256(raw).hexdigest() != SDDC_STATS["stats_patch_sha256"]:
+        raise RuntimeError("SDDC stats patch digest differs")
+    old = re.findall(r"^--- a/(.+)$", raw.decode("utf-8"), re.M)
+    new = re.findall(r"^\+\+\+ b/(.+)$", raw.decode("utf-8"), re.M)
+    if set(old) != set(SDDC_STATS["files"]) or len(old) != 3 or new != old:
+        raise RuntimeError("SDDC stats patch destinations differ")
+    return {**SDDC_STATS, "files": {name: dict(values) for name, values in SDDC_STATS["files"].items()},
+            "ordered_patches": list(SDDC_STATS["ordered_patches"]),
+            "patch_file": "sddc-integrity-stats.patch", "fuzz": 0,
+            "platform_driver_sha256": STATS_PLATFORM_DRIVER_SHA256}
+
+
+def apply_reviewed_overlay(files, policy, scratch_parent):
+    """Apply only the already hash-checked patch to a bounded scratch tree."""
     program = shutil.which("patch")
     if not program and os.name == "nt":
         candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git/usr/bin/patch.exe"
@@ -61,16 +103,27 @@ def apply_integrity_patch(raw, scratch_parent):
         root = Path(temporary).resolve()
         if root.parent != scratch_parent or not root.name.startswith(".crystal-sddc-integrity-"):
             raise RuntimeError("Unexpected SDDC patch scratch directory")
-        target = root / policy["source_file"]
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(raw)
+        for name, raw in files.items():
+            target = (root / name).resolve()
+            if not target.is_relative_to(root):
+                raise RuntimeError("SDDC overlay source escapes its scratch tree")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
         command = [program, "--batch", "--forward", "--fuzz=0", "-p1", "-i", str(HERE / policy["patch_file"])]
         for extra in [["--dry-run"], []]:
             process = subprocess.run([*command, *extra], cwd=root, capture_output=True)
             if process.returncode:
                 raise RuntimeError("SDDC integrity patch failed: " +
                                    (process.stdout + process.stderr).decode("utf-8", "replace")[-4000:])
-        patched = target.read_bytes()
+        patched = {name: (root / name).read_bytes() for name in files}
+    return patched
+
+
+def apply_integrity_patch(raw, scratch_parent):
+    policy = integrity_patch_policy()
+    if hashlib.sha256(raw).hexdigest() != policy["source_sha256"]:
+        raise RuntimeError("SDDC integrity source differs from the reviewed pin")
+    patched = apply_reviewed_overlay({policy["source_file"]: raw}, policy, scratch_parent)[policy["source_file"]]
     if hashlib.sha256(patched).hexdigest() != policy["patched_sha256"]:
         raise RuntimeError("Patched SDDC source differs from the reviewed result")
     text = patched.decode("utf-8")
@@ -82,10 +135,46 @@ def apply_integrity_patch(raw, scratch_parent):
     return patched, policy
 
 
-def stage2_profile(profile):
+def apply_stats_patch(pending, scratch_parent):
+    policy = stats_patch_policy()
+    files = {name: pending[name] for name in policy["files"]}
+    for name, raw in files.items():
+        if hashlib.sha256(raw).hexdigest() != policy["files"][name]["after_integrity_sha256"]:
+            raise RuntimeError("SDDC stats input is not the reviewed integrity stage: " + name)
+    patched = apply_reviewed_overlay(files, policy, scratch_parent)
+    for name, raw in patched.items():
+        if hashlib.sha256(raw).hexdigest() != policy["files"][name]["after_stats_sha256"]:
+            raise RuntimeError("SDDC stats result differs: " + name)
+    pending.update(patched)
+    return policy
+
+
+def integrity_installed_hashes(profile):
+    integrity = integrity_patch_policy()
+    if profile != COMBINED_PROFILE:
+        return {integrity["source_file"]: integrity["patched_sha256"]}
+    stats = stats_patch_policy()
+    hashes = {name: values["after_stats_sha256"] for name, values in stats["files"].items()}
+    hashes[DRIVER + "/zram_drv.c"] = stats["platform_driver_sha256"]
+    return hashes
+
+
+def stage2_profiles(profile):
     if profile not in PROFILE_CHOICES:
         raise ValueError("Unknown efficiency profile: " + profile)
-    return "kcompressd" if profile in CRYSTAL_PROFILES else profile
+    if profile == "baseline":
+        return ()
+    if profile == COMBINED_PROFILE:
+        return ("kcompressd", "le9uo")
+    return ("kcompressd",) if profile in CRYSTAL_PROFILES else (profile,)
+
+
+def stage2_profile(profile):
+    """Compatibility helper for callers that only accept one follow-up patch."""
+    values = stage2_profiles(profile)
+    if len(values) > 1:
+        raise ValueError("Use the ordered stage2_profiles helper for a combined profile")
+    return values[0] if values else "baseline"
 
 
 def crystal_configuration(profile):
@@ -130,6 +219,20 @@ def crystal_configuration_errors(actual, profile):
     return errors
 
 
+def kunit_boot_errors(actual, profile):
+    """Declarations alone do not run KUnit when its default is disabled."""
+    if profile != "crystal-lz4kds-test":
+        return []
+    values = [line[len('CONFIG_CMDLINE="'):-1].split() for line in actual
+              if line.startswith('CONFIG_CMDLINE="') and line.endswith('"')]
+    if len(values) != 1:
+        return ["The SDDC test requires one explicit kernel command line"]
+    expected = {"kunit.enable": "1", "kunit.filter_glob": "crystal-sddc-*"}
+    return ["The SDDC test requires exactly one " + name + "=" + value
+            for name, value in expected.items()
+            if [word for word in values[0] if word.startswith(name + "=")] != [name + "=" + value]]
+
+
 def source_manifest(profile):
     settings = CRYSTAL_PROFILES[profile]
     manifest = json.loads((HERE / "source-manifest.json").read_text(encoding="utf-8"))
@@ -161,13 +264,15 @@ def integrate(kernel, report, profile="crystal"):
             raise RuntimeError("Crystal source digest differs: " + name)
         pending[name] = raw
 
-    integrity = None
+    integrity, stats = None, None
     if settings["sddc"]:
         name = SDDC_INTEGRITY["source_file"]
         pending[name], integrity = apply_integrity_patch(pending[name], kernel)
         codec_tests = pending[DRIVER + "/sddc/crystal_sddc_codec_test.c"].decode("utf-8")
         if len(re.findall(r"\bKUNIT_CASE\(", codec_tests)) != integrity["expected_codec_cases"]:
             raise RuntimeError("Unexpected SDDC codec KUnit case count")
+        if profile == COMBINED_PROFILE:
+            stats = apply_stats_patch(pending, kernel)
 
     # The vendor hook already accepts this enum in 6.6.89, but its definition
     # is private to vmscan.c. Do not change that exported hook or a core layout.
@@ -213,6 +318,8 @@ def integrate(kernel, report, profile="crystal"):
         raise RuntimeError("Crystal periodic-GC adaptation anchor differs")
     text = text.replace(anchor, "INIT_DEFERRABLE_WORK(&zram->zms_gc_periodic_work,")
     pending[name] = text.encode("utf-8")
+    if stats and hashlib.sha256(pending[name]).hexdigest() != stats["platform_driver_sha256"]:
+        raise RuntimeError("Combined Crystal driver platform-adaptation digest differs")
 
     # Keep the native comparison and the two explicit SDDC variants distinct,
     # including after a later config merge. No host reconstruction is imported.
@@ -282,6 +389,8 @@ def integrate(kernel, report, profile="crystal"):
                                                ["SDDC implementation objects", "private delta codec objects"]),
         "passed": True, "build_verified": False, "runtime_verified": False,
     }
+    if stats:
+        result["sddc_stats_patch"] = stats
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     return result

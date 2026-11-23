@@ -9,7 +9,7 @@ import subprocess
 from integrate_rekernel import integrate
 from integrate_crystal import (CRYSTAL_PROFILES, PROFILE_CHOICES, crystal_configuration,
                                crystal_configuration_errors, integrate as integrate_crystal,
-                               integrity_patch_policy, stage2_profile, unexpected_sddc_options)
+                               integrity_installed_hashes, kunit_boot_errors, stage2_profiles, unexpected_sddc_options)
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -29,9 +29,10 @@ def apply(kernel, report, profile="baseline"):
     report.mkdir(parents=True, exist_ok=True)
     applied = []
     patches = list(manifest["patches"])
-    if profile != "baseline":
+    followup_names = stage2_profiles(profile)
+    if followup_names:
         followups = json.loads((HERE / "stage2-series.json").read_text(encoding="utf-8"))
-        patches.append(followups[stage2_profile(profile)])
+        patches.extend(followups[name] for name in followup_names)
     for item in patches:
         path = HERE / item["file"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
@@ -72,8 +73,13 @@ def configure(kernel, profile="baseline"):
     if not cmdlines:
         raise RuntimeError("Missing OEM default kernel command line")
     cmdline = re.sub(r"(?:^|\s)workqueue\.unbound_cpus=\S+", "", cmdlines[-1]).strip()
+    cmdline += " workqueue.unbound_cpus=0-5"
+    if profile == "crystal-lz4kds-test":
+        for name in ["kunit.enable", "kunit.filter_glob"]:
+            cmdline = re.sub(r"(?:^|\s)" + re.escape(name) + r"=\S+", "", cmdline).strip()
+        cmdline += " kunit.enable=1 kunit.filter_glob=crystal-sddc-*"
     run(["scripts/config", "--file", str(defconfig), "--set-str", "CMDLINE",
-         cmdline + " workqueue.unbound_cpus=0-5"], kernel)
+         cmdline], kernel)
     for option in ["ZRAM", "ZSMALLOC"]:
         run(["scripts/config", "--file", str(defconfig), "--enable", option], kernel)
     for option in ["ZRAM_DEF_COMP_LZO", "ZRAM_DEF_COMP_LZORLE", "ZRAM_DEF_COMP_LZ4",
@@ -92,11 +98,11 @@ def configure(kernel, profile="baseline"):
         else:
             m = re.fullmatch(r"# CONFIG_([A-Z0-9_]+) is not set", line)
             if m: run(["scripts/config", "--file", str(defconfig), "--disable", m.group(1)], kernel)
-    if profile == "le9uo":
+    if "le9uo" in stage2_profiles(profile):
         # A soft 5% clean-cache floor; avoid upstream's two hard 15% floors.
         for name, value in [("ANON_MIN_RATIO", 0), ("CLEAN_LOW_RATIO", 5), ("CLEAN_MIN_RATIO", 0)]:
             run(["scripts/config", "--file", str(defconfig), "--set-val", name, str(value)], kernel)
-    if stage2_profile(profile) == "kcompressd":
+    if "kcompressd" in stage2_profiles(profile):
         # Match the accepted native-ZRAM baseline; this is not a ZSWAP port.
         run(["scripts/config", "--file", str(defconfig), "--disable", "ZSWAP"], kernel)
     if profile in CRYSTAL_PROFILES:
@@ -118,14 +124,18 @@ def verify(kernel, report, profile="baseline"):
     missing = [line for line in required if line not in actual]
     if profile in CRYSTAL_PROFILES:
         missing.extend(crystal_configuration_errors(actual, profile))
+        missing.extend(kunit_boot_errors(actual, profile))
     forbidden = ["CONFIG_UKSM=y", "CONFIG_IOSCHED_BFQ=y", "CONFIG_BORE_SCHEDULER=y",
                  "CONFIG_HZ_1000=y", "CONFIG_REKERNEL=m", "CONFIG_REKERNEL_LEGACY_NETLINK=y"]
     selected = [line for line in forbidden if line in actual]
-    if profile == "le9uo":
+    if "le9uo" in stage2_profiles(profile):
         for line in ["CONFIG_ANON_MIN_RATIO=0", "CONFIG_CLEAN_LOW_RATIO=5", "CONFIG_CLEAN_MIN_RATIO=0"]:
             if line not in actual:
                 missing.append(line)
-    if stage2_profile(profile) == "kcompressd":
+        vmscan = (kernel / "mm/vmscan.c").read_text(encoding="utf-8")
+        if not re.search(r"^bool sysctl_workingset_protection\s+__read_mostly\s*=\s*true;", vmscan, re.M):
+            missing.append("le9uo workingset_protection must default to 1")
+    if "kcompressd" in stage2_profiles(profile):
         if "# CONFIG_ZSWAP is not set" not in actual:
             missing.append("Kcompressd 6.6 native route requires CONFIG_ZSWAP=n")
         page_io = (kernel / "mm/page_io.c").read_text(encoding="utf-8")
@@ -139,10 +149,10 @@ def verify(kernel, report, profile="baseline"):
         if not all((source / name).is_file() for name in ["zms.c", "zram_drv.c", "zcomp.c"]):
             missing.append("Crystal/ZMS source is missing")
         if CRYSTAL_PROFILES[profile]["sddc"]:
-            integrity = integrity_patch_policy()
-            path = kernel / integrity["source_file"]
-            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != integrity["patched_sha256"]:
-                missing.append("Actual SDDC source lacks the reviewed integrity overlay")
+            for name, expected in integrity_installed_hashes(profile).items():
+                path = kernel / name
+                if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                    missing.append("Actual Crystal source lacks the reviewed overlay chain: " + name)
     cmdline = next((line for line in actual if line.startswith('CONFIG_CMDLINE="')), "")
     if "workqueue.unbound_cpus=0-5" not in cmdline:
         missing.append("Native early workqueue CPU mask boot parameter")

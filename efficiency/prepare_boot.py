@@ -9,9 +9,10 @@ import struct
 import subprocess
 import time
 
-from integrate_crystal import (CRYSTAL_PROFILES, PIN as CRYSTAL_PIN, PROFILE_CHOICES,
+from integrate_crystal import (COMBINED_PROFILE, CRYSTAL_PROFILES, PIN as CRYSTAL_PIN, PROFILE_CHOICES,
                                crystal_configuration, crystal_configuration_errors,
-                               integrity_patch_policy, source_manifest, stage2_profile)
+                               integrity_installed_hashes, integrity_patch_policy, kunit_boot_errors,
+                               source_manifest, stage2_profiles, stats_patch_policy)
 
 
 def digest(path):
@@ -72,16 +73,17 @@ def validate_profile_evidence(evidence, patches, expected_profile):
     files = [entry["file"] for entry in patches["applied"]]
     stage2 = {name for name in files if name in (
         "patches/kcompressd-6.6.89.patch", "patches/le9uo-6.6.89.patch")}
-    parent = stage2_profile(profile)
-    expected_stage2 = {f"patches/{parent}-6.6.89.patch"} if profile != "baseline" else set()
-    if stage2 != expected_stage2 or len(files) != 19 + bool(expected_stage2):
-        raise RuntimeError("Candidate does not contain exactly the requested isolated patch series")
+    parents = stage2_profiles(profile)
+    expected_stage2 = {f"patches/{parent}-6.6.89.patch" for parent in parents}
+    if stage2 != expected_stage2 or len(files) != 19 + len(parents):
+        raise RuntimeError("Candidate does not contain exactly the requested patch series")
     here = pathlib.Path(__file__).resolve().parent
     pinned = json.loads((here / "patch-series.json").read_text(encoding="utf-8"))["patches"]
     if len(pinned) != 19:
         raise RuntimeError("Unexpected accepted baseline patch count")
     if expected_stage2:
-        pinned += [json.loads((here / "stage2-series.json").read_text(encoding="utf-8"))[parent]]
+        followups = json.loads((here / "stage2-series.json").read_text(encoding="utf-8"))
+        pinned += [followups[parent] for parent in parents]
     if [(entry["file"], entry["sha256"]) for entry in patches["applied"]] != [
             (entry["file"], entry["sha256"]) for entry in pinned]:
         raise RuntimeError("Candidate patch order or digest differs from the pinned series")
@@ -104,14 +106,26 @@ def validate_profile_evidence(evidence, patches, expected_profile):
             raise RuntimeError("Candidate LZ4KDS integration policy differs")
         if CRYSTAL_PROFILES[profile]["sddc"]:
             integrity = integrity_patch_policy()
-            if crystal.get("sddc_integrity_patch") != integrity or installed.get(
-                    integrity["source_file"]) != integrity["patched_sha256"]:
+            if crystal.get("sddc_integrity_patch") != integrity:
                 raise RuntimeError("Candidate lacks the reviewed SDDC integrity overlay")
             if imported.get(integrity["source_file"]) != integrity["source_sha256"]:
                 raise RuntimeError("Candidate SDDC integrity base source differs")
-        errors = crystal_configuration_errors((evidence / "kernel.config").read_text(encoding="utf-8").splitlines(), profile)
+            for name, expected in integrity_installed_hashes(profile).items():
+                if installed.get(name) != expected:
+                    raise RuntimeError("Candidate installed overlay digest differs: " + name)
+            if profile == COMBINED_PROFILE:
+                stats = stats_patch_policy()
+                if crystal.get("sddc_stats_patch") != stats or any(
+                        imported.get(name) != values["original_sha256"] for name, values in stats["files"].items()):
+                    raise RuntimeError("Candidate lacks the reviewed stats overlay stages")
+        actual = (evidence / "kernel.config").read_text(encoding="utf-8").splitlines()
+        errors = crystal_configuration_errors(actual, profile) + kunit_boot_errors(actual, profile)
         if errors:
             raise RuntimeError("Candidate Crystal configuration differs: " + "; ".join(errors))
+    if "le9uo" in parents:
+        config = (evidence / "kernel.config").read_text(encoding="utf-8").splitlines()
+        if any(line not in config for line in ["CONFIG_ANON_MIN_RATIO=0", "CONFIG_CLEAN_LOW_RATIO=5", "CONFIG_CLEAN_MIN_RATIO=0"]):
+            raise RuntimeError("Candidate le9uo configuration differs from the accepted 0/5/0 defaults")
     return profile
 
 

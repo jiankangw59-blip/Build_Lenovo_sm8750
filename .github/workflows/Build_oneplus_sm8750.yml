@@ -18,6 +18,7 @@ on:
           - 'crystal'
           - 'crystal-lz4kds-test'
           - 'crystal-lz4kds'
+          - 'crystal-lz4kds-le9uo'
       enable_release:
         description: "发布到 Releases"
         required: true
@@ -143,7 +144,7 @@ jobs:
         if: ${{ env.EFFICIENCY_PROFILE != 'off' }}
         run: |
           set -euo pipefail
-          case "$EFFICIENCY_PROFILE" in baseline|kcompressd|le9uo|crystal|crystal-lz4kds-test|crystal-lz4kds) ;; *) exit 1 ;; esac
+          case "$EFFICIENCY_PROFILE" in baseline|kcompressd|le9uo|crystal|crystal-lz4kds-test|crystal-lz4kds|crystal-lz4kds-le9uo) ;; *) exit 1 ;; esac
           test "$DEVICES_NAME" = oneplus_ace_6
           test "$KERNEL_VERSION" = 6.6.89
           test "$ZRAM_PATCH" = LZ4KD
@@ -1005,7 +1006,7 @@ jobs:
             done
             if [[ "$EFFICIENCY_PROFILE" == crystal* ]]; then
               CRYSTAL_COMPRESSOR=lz4kd
-              if [ "$EFFICIENCY_PROFILE" = crystal-lz4kds ]; then
+              if [ "$EFFICIENCY_PROFILE" = crystal-lz4kds ] || [ "$EFFICIENCY_PROFILE" = crystal-lz4kds-le9uo ]; then
                 CRYSTAL_COMPRESSOR=lz4kds
               fi
               grep -qx "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP=\"${CRYSTAL_COMPRESSOR}\"" out/.config

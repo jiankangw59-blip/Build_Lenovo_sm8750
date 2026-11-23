@@ -1,0 +1,51 @@
+diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.h b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.h
+--- a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.h
++++ b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.h
+@@ -130,6 +130,9 @@
+ 	u64 pending_max;
+ 	u32 pending;
+ 	bool enabled;
++	u64 integrity_checks;
++	u64 integrity_failures;
++	u64 integrity_skipped;
+ };
+ 
+ #if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC)
+diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
+--- a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
++++ b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
+@@ -4031,6 +4031,9 @@
+ 		atomic64_read(&sddc->stats.conversion_failures);
+ 	stats->decode_failures = atomic64_read(&sddc->stats.decode_failures);
+ 	stats->flatten_failures = atomic64_read(&sddc->stats.flatten_failures);
++	stats->integrity_checks = atomic64_read(&sddc->stats.integrity_checks);
++	stats->integrity_failures = atomic64_read(&sddc->stats.integrity_failures);
++	stats->integrity_skipped = atomic64_read(&sddc->stats.integrity_skipped);
+ 	stats->limit_rejects = atomic64_read(&sddc->stats.limit_rejects);
+ 	stats->pending_max = atomic64_read(&sddc->stats.pending_max);
+ 	spin_lock(&sddc->state_lock);
+diff --git a/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c b/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c
+--- a/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c
++++ b/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c
+@@ -3293,7 +3293,10 @@
+ 		"conversion_failures: %llu\n"
+ 		"decode_failures: %llu\n"
+ 		"flatten_failures: %llu\n"
+-		"limit_rejects: %llu\n",
++		"limit_rejects: %llu\n"
++		"integrity_checks: %llu\n"
++		"integrity_failures: %llu\n"
++		"integrity_skipped: %llu\n",
+ 		stats.enabled, stats.queued, stats.coalesced, stats.dropped,
+ 		stats.ineligible, stats.shutdown_discarded, stats.worker_runs,
+ 		stats.pending, stats.pending_max, stats.observed, stats.stale,
+@@ -3316,7 +3319,8 @@
+ 		stats.released_reset_saved_bytes,
+ 		stats.released_other_saved_bytes, stats.conversion_failures,
+ 		stats.decode_failures, stats.flatten_failures,
+-		stats.limit_rejects);
++		stats.limit_rejects, stats.integrity_checks,
++		stats.integrity_failures, stats.integrity_skipped);
+ }
+ 
+ #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK

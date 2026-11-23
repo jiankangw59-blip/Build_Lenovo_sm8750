@@ -74,7 +74,7 @@ def expected_cases():
 
 def strip_prefix(line):
     # Remove one printk separator, preserving the meaningful KTAP indentation.
-    return re.sub(r"^(?:<\d+>)?\[\s*\d+(?:\.\d+)?\](?: \[\s*(?:T|C)\s*\d+\])? ?", "", line)
+    return re.sub(r"^(?:<\d+>)?\[\s*\d+(?:\.\d+)?\](?: ?\[\s*(?:T|C)\s*\d+\])? ?", "", line)
 
 
 def captured_identity(lines):

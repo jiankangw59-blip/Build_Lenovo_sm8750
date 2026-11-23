@@ -1,0 +1,31 @@
+{
+  "upstream_commit": "13d291aef3d1d9607ad3fa5ff30dc23b2888a3da",
+  "ordered_patches": [
+    "sddc-integrity.patch",
+    "sddc-integrity-stats.patch"
+  ],
+  "integrity_patch_sha256": "dea7c0e140926560adbe5fa6a30942c0f3b919c14690de613b49fdaf704e2554",
+  "stats_patch_sha256": "6690acd331ca6906ab065a389f67bdbaf917de5076e6cf9c42ff8165cfd6aba0",
+  "files": {
+    "drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.h": {
+      "original_sha256": "f22e978381f9aa0c391229dbfc52753b8dfffa94e71715229b6fa0776d32001e",
+      "after_integrity_sha256": "f22e978381f9aa0c391229dbfc52753b8dfffa94e71715229b6fa0776d32001e",
+      "after_stats_sha256": "c3565977600b99388a85a0b71cf5114657812d53c40fafa0bac8e143d275c4a5"
+    },
+    "drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c": {
+      "original_sha256": "7f0b3dc9c0cc9a0ce54d3aa5dbc05aac2bb464f7778969281112981055a9af2d",
+      "after_integrity_sha256": "e51140d12d447b21dc61101f819ad764a60d84ca949c8956a9a55f8095f6aa05",
+      "after_stats_sha256": "ed2e2a521865eced8bffac5629b5d1d72bb0e44f69ce19a90f3fddc2fd4f58a8"
+    },
+    "drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c": {
+      "original_sha256": "5cb90c2b52919a5b115c5fd32c3fce750ca49b0d1a42f788e692ec62b1e02ea3",
+      "after_integrity_sha256": "5cb90c2b52919a5b115c5fd32c3fce750ca49b0d1a42f788e692ec62b1e02ea3",
+      "after_stats_sha256": "997e92108bec7237d314f5c95eed31a2f60c18625e42e17f669e0808867112f9"
+    }
+  },
+  "read_only_stats_export": true,
+  "wire_format_changed": false,
+  "global_kmi_changed": false,
+  "kernel_compilation_verified": false,
+  "runtime_verified": false
+}
