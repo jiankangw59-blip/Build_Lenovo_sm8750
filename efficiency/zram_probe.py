@@ -49,6 +49,7 @@ def test(args):
         if args.writeback:
             root(f"test -f {sysfs}/backing_dev")
             root(f"mkdir -m 700 {stage}; fallocate -l 67108864 {stage}/backing.img; chmod 600 {stage}/backing.img")
+            root(f"chcon u:object_r:ksu_file:s0 {stage}/backing.img")
             loop = root("losetup -f")
             if not re.fullmatch(r"/dev/(?:block/)?loop\d+", loop):
                 raise RuntimeError("Unexpected loop device path: " + loop)
@@ -84,7 +85,13 @@ def test(args):
             assert_unused()
             root(f"printf '1\\n' > {sysfs}/reset; printf '{index}\\n' > /sys/class/zram-control/hot_remove")
             if loop:
-                root(f"losetup -d {loop}")
+                name = loop.rsplit("/", 1)[-1]
+                backing_node = f"/sys/block/{name}/loop/backing_file"
+                owner = root(f"if [ -e {backing_node} ]; then cat {backing_node}; else echo __detached__; fi")
+                if owner == stage + "/backing.img":
+                    root(f"losetup -d {loop}")
+                elif owner != "__detached__":
+                    raise RuntimeError("Test loop ownership changed; preserving its backing file")
             root(f"if [ -d {stage} ]; then rm -f {stage}/backing.img; rmdir {stage}; fi")
             result["cleanup"] = "complete"
         except Exception as error:
