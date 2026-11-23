@@ -84,8 +84,16 @@ if [ "$SCENE_SWAP_CHECK_ONLY" = true ]; then
     output.mkdir(parents=True, exist_ok=True)
     for name, text in {"startup.sh": startup, "tools.sh": tools}.items():
         (output / name).write_text(text, encoding="utf-8", newline="\n")
-    helper = Path(__file__).with_name("native_writeback.sh").read_text(encoding="utf-8")
-    (output / "native_writeback.sh").write_text(helper, encoding="utf-8", newline="\n")
+    for name in ["native_writeback.sh", "native_writeback_daemon.sh", "start_native_writeback.sh"]:
+        helper = Path(__file__).with_name(name).read_text(encoding="utf-8")
+        (output / name).write_text(helper, encoding="utf-8", newline="\n")
+    service = (source.parent / "service.sh").read_bytes()
+    if hashlib.sha256(service).hexdigest() != "593bb2081d6416085378e0c849a7c5963208397c4bec03e66efe5a0d19afc08a":
+        raise ValueError("Unreviewed Scene service source")
+    service = service.decode("utf-8").replace("\r\n", "\n")
+    # Hook only after the existing startup succeeded, before the remaining work.
+    service = replace_once(service, "echo \"\" >> $LOG\n", 'sh "$MODPATH/scripts/start_native_writeback.sh" || echo "Native writeback service start failed" >> "$LOG"\n\necho "" >> $LOG\n')
+    (output.parent / "service.sh").write_text(service, encoding="utf-8", newline="\n")
 
 
 if __name__ == "__main__":

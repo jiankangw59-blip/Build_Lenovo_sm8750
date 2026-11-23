@@ -1,5 +1,6 @@
 """Create and read back a PLQ110 candidate boot file, without flashing it."""
 import argparse
+import gzip
 import hashlib
 import json
 import pathlib
@@ -13,6 +14,51 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def compiled_notes(evidence):
+    wanted = {"_text", "__start_notes", "__stop_notes"}
+    symbols = {}
+    with (evidence / "efficiency/System.map").open(encoding="utf-8") as stream:
+        for line in stream:
+            fields = line.split()
+            if len(fields) == 3 and fields[2] in wanted:
+                symbols[fields[2]] = int(fields[0], 16)
+    if symbols.keys() != wanted:
+        raise RuntimeError("Compiled kernel lacks bounded notes symbols")
+    start, end = symbols["__start_notes"], symbols["__stop_notes"]
+    offset = start - symbols["_text"]
+    if not 0 <= offset or not 0 < end - start <= 65536:
+        raise RuntimeError("Invalid compiled notes bounds")
+    with (evidence / "Image").open("rb") as stream:
+        stream.seek(offset)
+        notes = stream.read(end - start)
+    if len(notes) != end - start:
+        raise RuntimeError("Compiled notes escape the exported Image")
+    with gzip.open(evidence / "efficiency/vmlinux.gz", "rb") as elf:
+        header = elf.read(64)
+        if header[:6] != b"\x7fELF\x02\x01":
+            raise RuntimeError("Expected a little-endian ELF64 vmlinux")
+        phoff = struct.unpack_from("<Q", header, 32)[0]
+        entsize, count = struct.unpack_from("<HH", header, 54)
+        elf.seek(phoff)
+        program_headers = elf.read(entsize * count)
+        mapped = None
+        for i in range(count):
+            kind, flags, file_offset, address, physical, file_size, memory_size, align = struct.unpack_from(
+                "<IIQQQQQQ", program_headers, i * entsize)
+            if kind == 1 and address <= start and end <= address + file_size:
+                if mapped is not None:
+                    raise RuntimeError("Ambiguous notes mapping")
+                mapped = file_offset + start - address
+        if mapped is None:
+            raise RuntimeError("Notes are outside the linked ELF load segments")
+        elf.seek(mapped)
+        if elf.read(end - start) != notes:
+            raise RuntimeError("Exported Image notes differ from the linked vmlinux")
+    return notes, {"sha256": hashlib.sha256(notes).hexdigest(), "size": len(notes),
+                   "image_offset": offset, "vmlinux_file_offset": mapped,
+                   "independent_elf_comparison": True}
+
+
 def prepare(args):
     evidence = args.evidence.resolve()
     image = evidence / "Image"
@@ -23,6 +69,15 @@ def prepare(args):
     patches = json.loads((evidence / "efficiency/efficiency-patches.json").read_text(encoding="utf-8"))
     if patches["version"] != "6.6.89" or patches["source"] != "c1802dd6f3343e71c166a3c67c50554c81880b6e":
         raise RuntimeError("Only the compatible Ace 6 6.6.89 baseline is accepted")
+    profile = patches.get("profile", "baseline")
+    if profile != args.expected_profile:
+        raise RuntimeError("Requested profile differs from the compiled artifact")
+    files = [entry["file"] for entry in patches["applied"]]
+    stage2 = {name for name in files if name in (
+        "patches/kcompressd-6.6.89.patch", "patches/le9uo-6.6.89.patch")}
+    expected_stage2 = {f"patches/{profile}-6.6.89.patch"} if profile != "baseline" else set()
+    if stage2 != expected_stage2 or len(files) != 19 + bool(expected_stage2):
+        raise RuntimeError("Candidate does not contain exactly the requested isolated patch series")
     release = (evidence / "kernel.release").read_text(encoding="utf-8").strip()
     if not release.startswith("6.6.89-"):
         raise RuntimeError("Unexpected actual kernel release: " + release)
@@ -31,6 +86,7 @@ def prepare(args):
         raise RuntimeError("Compiled Image checksum mismatch")
     if image.read_bytes()[56:60] != b"ARMd":
         raise RuntimeError("Expected an uncompressed ARM64 Image")
+    notes, notes_metadata = compiled_notes(evidence)
     tool = args.ak3.resolve() / "tools/magiskboot"
     if digest(tool) != provenance["ak3_files"]["tools/magiskboot"]:
         raise RuntimeError("AK3 magiskboot provenance mismatch")
@@ -95,12 +151,14 @@ cd ../verify
     if root("sha256sum /dev/block/by-name/boot_b").split()[0] != original_sha:
         raise RuntimeError("Boot partition changed externally during preparation")
     result = {"serial": args.serial, "model": "PLQ110", "active_slot": "_b",
-              "release": release, "source": patches["source"],
+              "release": release, "source": patches["source"], "profile": profile,
               "workflow_commit": (evidence / "workflow-commit.txt").read_text(encoding="utf-8").strip(),
               "kernel_sha256": kernel_sha, "candidate_boot_sha256": boot_sha,
               "candidate_size": actual_size, "rollback_boot_sha256": original_sha,
               "staging_directory": stage, "flash_performed": False,
               "kernel_readback_verified": True, "current_partition_unchanged": True}
+    result["kernel_notes"] = notes_metadata
+    (args.output / "compiled-kernel-notes.bin").write_bytes(notes)
     (args.output / "candidate-boot.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2))
 
@@ -112,4 +170,5 @@ if __name__ == "__main__":
     parser.add_argument("--ak3", type=pathlib.Path, required=True)
     parser.add_argument("--original", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
+    parser.add_argument("--expected-profile", choices=["baseline", "kcompressd", "le9uo"], default="baseline")
     prepare(parser.parse_args())
