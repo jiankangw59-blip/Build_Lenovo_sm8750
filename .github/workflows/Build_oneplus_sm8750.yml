@@ -48,6 +48,12 @@ on:
           - 'DISABLE'
         default: 'LZ4'
 
+      enable_fuse_bpf_revalidate:
+        description: "Apply FUSE BPF dentry revalidation (Gerrit 3943780)"
+        required: false
+        default: false
+        type: boolean
+
       custom_kernel_suffix:
         description: "✏️ 自定义内核名称- (-开头 留空则默认官方）"
         required: false
@@ -789,6 +795,16 @@ jobs:
             --kernel kernel_workspace/common --bakasu kernel_workspace/KernelSU \
             --report kernel_workspace/preflash
 
+      - name: Apply FUSE BPF dentry revalidation (3943780)
+        if: ${{ inputs.enable_fuse_bpf_revalidate }}
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          patch_file="$GITHUB_WORKSPACE/patch/fuse-bpf-lookup-revalidate-3943780.patch"
+          patch --dry-run --batch --forward --fuzz=0 -p1 < "$patch_file"
+          patch --batch --forward --fuzz=0 -p1 < "$patch_file"
+          echo "Applied FUSE BPF dentry revalidation patch 3943780"
+
       - name: 🔧 Set gki_defconfig (设置编译配置) 
         run: |
           cd kernel_workspace
@@ -911,6 +927,14 @@ jobs:
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
+
+          if [ '${{ inputs.enable_fuse_bpf_revalidate }}' = 'true' ]; then
+            if ! grep -qx 'CONFIG_FUSE_BPF=y' out/.config; then
+              echo "::error::FUSE BPF revalidation patch requires CONFIG_FUSE_BPF=y"
+              exit 1
+            fi
+          fi
+
           if [ "$ZRAM_PATCH" = 'LZ4KD' ]; then
             for symbol in ZRAM ZSMALLOC CRYPTO_LZ4K CRYPTO_LZ4KD CRYPTO_LZ4K_OPLUS CRYPTO_DEFLATE ZRAM_DEF_COMP_LZ4KD; do
               if ! grep -qx "CONFIG_${symbol}=y" out/.config; then
