@@ -57,6 +57,14 @@ def configure(kernel):
     fragment = (HERE / "ace6-baseline.config").read_text(encoding="utf-8")
     # The compressor patch adds a choice; select it only after all other config edits.
     defconfig = kernel / "arch/arm64/configs/gki_defconfig"
+    # A runtime mask update skips ordered WQs in 6.6. Set the native boot
+    # parameter before pools are created, while preserving the OEM command line.
+    cmdlines = re.findall(r'^CONFIG_CMDLINE="(.*)"$', defconfig.read_text(encoding="utf-8"), re.M)
+    if not cmdlines:
+        raise RuntimeError("Missing OEM default kernel command line")
+    cmdline = re.sub(r"(?:^|\s)workqueue\.unbound_cpus=\S+", "", cmdlines[-1]).strip()
+    run(["scripts/config", "--file", str(defconfig), "--set-str", "CMDLINE",
+         cmdline + " workqueue.unbound_cpus=0-5"], kernel)
     for option in ["ZRAM", "ZSMALLOC"]:
         run(["scripts/config", "--file", str(defconfig), "--enable", option], kernel)
     for option in ["ZRAM_DEF_COMP_LZO", "ZRAM_DEF_COMP_LZORLE", "ZRAM_DEF_COMP_LZ4",
@@ -86,6 +94,11 @@ def verify(kernel, report):
     forbidden = ["CONFIG_UKSM=y", "CONFIG_IOSCHED_BFQ=y", "CONFIG_BORE_SCHEDULER=y",
                  "CONFIG_HZ_1000=y", "CONFIG_REKERNEL=m", "CONFIG_REKERNEL_LEGACY_NETLINK=y"]
     selected = [line for line in forbidden if line in actual]
+    cmdline = next((line for line in actual if line.startswith('CONFIG_CMDLINE="')), "")
+    if "workqueue.unbound_cpus=0-5" not in cmdline:
+        missing.append("Native early workqueue CPU mask boot parameter")
+    if "CONFIG_CMDLINE_FORCE=y" in actual:
+        selected.append("Kernel command line must extend the bootloader arguments")
     selected += [line for line in actual if re.match(r"CONFIG_.*(?:LZ4KDS|SDDC).*=[ym]$", line)]
     if not re.search(r"^#define\s+BBR_VERSION\s+3\b", (kernel / "net/ipv4/tcp_bbr.c").read_text(encoding="utf-8"), re.M):
         missing.append("BBRv3 implementation source")
