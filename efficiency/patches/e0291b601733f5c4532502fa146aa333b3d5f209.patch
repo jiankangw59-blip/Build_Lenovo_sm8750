@@ -13,18 +13,17 @@ Signed-off-by: brokestar233 <3765589194@qq.com>
  1 file changed, 3 insertions(+)
 
 diff --git a/fs/f2fs/gc.c b/fs/f2fs/gc.c
-index 09e29d3e08af..a19c013af32d 100644
 --- a/fs/f2fs/gc.c
 +++ b/fs/f2fs/gc.c
-@@ -13,6 +13,7 @@
- #include <linux/delay.h>
+@@ -14,6 +14,7 @@
+ #include <linux/ioprio.h>
  #include <linux/freezer.h>
  #include <linux/sched/signal.h>
 +#include <uapi/linux/sched/types.h>
  #include <linux/random.h>
  #include <linux/sched/mm.h>
  
-@@ -196,6 +197,7 @@ static int gc_thread_func(void *data)
+@@ -192,6 +193,7 @@
  
  int f2fs_start_gc_thread(struct f2fs_sb_info *sbi)
  {
@@ -32,10 +31,10 @@ index 09e29d3e08af..a19c013af32d 100644
  	struct f2fs_gc_kthread *gc_th;
  	dev_t dev = sbi->sb->s_bdev->bd_dev;
  
-@@ -237,6 +239,7 @@ int f2fs_start_gc_thread(struct f2fs_sb_info *sbi)
+@@ -231,6 +233,7 @@
+ 		return err;
+ 	}
  
- 	set_user_nice(gc_th->f2fs_gc_task,
- 			PRIO_TO_NICE(sbi->critical_task_priority));
 +	sched_setscheduler(gc_th->f2fs_gc_task, SCHED_IDLE, &param);
  	set_task_ioprio(gc_th->f2fs_gc_task,
  		IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0));

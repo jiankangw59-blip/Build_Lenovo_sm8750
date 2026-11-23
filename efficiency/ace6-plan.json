@@ -1,5 +1,5 @@
 {
-  "device": {"model": "PLQ110", "soc": "SM8750", "os": "ColorOS 16", "kernel_series": "6.6"},
+  "device": {"model": "PLQ110", "soc": "SM8750", "os": "ColorOS 16", "kernel_series": "6.6", "required_kernel_version": "6.6.89", "source_commit": "c1802dd6f3343e71c166a3c67c50554c81880b6e"},
   "reference": {
     "requested_repository": "https://github.com/whitewhale0612/android_kernel_common_oneplus_sm8750-C16",
     "public_head": "5d6a242c375e656097504b02a2cb613ae090028e",

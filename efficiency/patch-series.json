@@ -1,7 +1,7 @@
 {
   "base_repo": "OnePlusOSS/android_kernel_common_oneplus_sm8750",
-  "base_commit": "65b954a773b183a9999b06bb1b2f921f12eaaf11",
-  "base_kernel_version": "6.6.118",
+  "base_commit": "c1802dd6f3343e71c166a3c67c50554c81880b6e",
+  "base_kernel_version": "6.6.89",
   "patches": [
     {
       "commit": "a1f8e41c83f9ce35a9cfe5e91772a57768097c1e",
@@ -17,21 +17,24 @@
     },
     {
       "commit": "7260c34c80917577aafa552e39add6ade493cedf",
-      "sha256": "3b2f08f37f4b8713f4953aa46a4a40b60d56d8dceab9450e86ab0227854b4578",
+      "sha256": "9c5de2af8175ff2126509efc21658681e313ff5ef1775a360d86f43f6da97ec0",
       "file": "patches/7260c34c80917577aafa552e39add6ade493cedf.patch",
-      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/7260c34c80917577aafa552e39add6ade493cedf"
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/7260c34c80917577aafa552e39add6ade493cedf",
+      "adaptation": "Place idle I/O priority after successful 6.6.89 GC kthread creation; do not reference the newer critical_task_priority field."
     },
     {
       "commit": "e0291b601733f5c4532502fa146aa333b3d5f209",
-      "sha256": "c0c7dc81a667aac99fd66a2f97270936d14f76c203a0e466859e41566ef9f16e",
+      "sha256": "a554ee57f2a3b0652d8dc9ba2280e79810ef2457772d23780ad8d64bdff7b73a",
       "file": "patches/e0291b601733f5c4532502fa146aa333b3d5f209.patch",
-      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/e0291b601733f5c4532502fa146aa333b3d5f209"
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/e0291b601733f5c4532502fa146aa333b3d5f209",
+      "adaptation": "Set SCHED_IDLE at the native 6.6.89 GC kthread initialization site."
     },
     {
       "commit": "2900e738109db0b1c6105eca24daf4d48869a9cb",
-      "sha256": "2c753585dc579f07ead676ac8a524a9c5b8f41f6546a742ecd37b0f490a2a801",
+      "sha256": "f8bcf875f163d96ee6ea60f2c47e66ac79b1e611f0127dfe947dd826856a4588",
       "file": "patches/2900e738109db0b1c6105eca24daf4d48869a9cb.patch",
-      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/2900e738109db0b1c6105eca24daf4d48869a9cb"
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/2900e738109db0b1c6105eca24daf4d48869a9cb",
+      "adaptation": "Rebase on official Ace 6 6.6.89; preserve the Android vendor hook adjacent to TLP ACK handling and all existing KMI adaptations."
     },
     {
       "commit": "45952959fc66176254a80bef833a621997deb7e6",

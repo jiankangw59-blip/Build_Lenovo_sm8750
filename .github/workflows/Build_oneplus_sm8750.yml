@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       efficiency_profile:
-        description: "PLQ110 audited efficiency profile (6.6.118 / pure LZ4KD / built-in official ReKernel)"
+        description: "PLQ110 audited efficiency profile (6.6.89 / pure LZ4KD / built-in official ReKernel)"
         required: false
         default: 'off'
         type: choice
@@ -140,7 +140,7 @@ jobs:
           set -euo pipefail
           test "$EFFICIENCY_PROFILE" = baseline
           test "$DEVICES_NAME" = oneplus_ace_6
-          test "$KERNEL_VERSION" = 6.6.118
+          test "$KERNEL_VERSION" = 6.6.89
           test "$ZRAM_PATCH" = LZ4KD
           test "$ENABLE_REKERNEL" = true
           test "$ENABLE_ADIOS" = false
@@ -872,7 +872,7 @@ jobs:
         if: ${{ env.EFFICIENCY_PROFILE != 'off' }}
         run: |
           set -euo pipefail
-          test "$KERNEL_SOURCE_REF" = 65b954a773b183a9999b06bb1b2f921f12eaaf11
+          test "$KERNEL_SOURCE_REF" = c1802dd6f3343e71c166a3c67c50554c81880b6e
           python3 efficiency/apply_profile.py apply \
             --kernel kernel_workspace/common --report kernel_workspace/preflash/efficiency
           python3 efficiency/apply_profile.py configure --kernel kernel_workspace/common
@@ -1023,7 +1023,7 @@ jobs:
               drivers/rekernel/rekernel_netfilter.o mm/vmscan.o mm/page_alloc.o mm/memory.o \
               drivers/cpuidle/governors/teo.o drivers/cpuidle/governors/menu.o \
               drivers/cpuidle/cpuidle.o drivers/block/zram/zram_drv.o \
-              crypto/lz4kd.o net/ipv4/tcp_bbr.o \
+              crypto/lz4kd.o net/ipv4/tcp_bbr.o fs/f2fs/gc.o \
               2>&1 | tee ../preflash/efficiency/compile-preflight.log
           fi
 
