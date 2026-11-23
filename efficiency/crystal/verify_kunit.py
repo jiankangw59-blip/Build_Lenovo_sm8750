@@ -17,7 +17,8 @@ import uuid
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-from integrate_crystal import DRIVER, PIN, integrity_patch_policy, source_manifest
+from integrate_crystal import (DRIVER, PIN, integrity_patch_policy, kunit_config_patch_policy,
+                               source_manifest)
 
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 NOTES_RE = re.compile(r"([0-9a-fA-F]{64})\s+\*?/sys/kernel/notes")
@@ -32,6 +33,7 @@ STATE_SUITE = "crystal-sddc-state"
 def expected_cases():
     manifest = source_manifest("crystal-lz4kds-test")
     integrity = integrity_patch_policy()
+    test_overlay = kunit_config_patch_policy()
     result, source_hashes = {}, {}
     for filename, array, expected_count in [
         ("crystal_sddc.c", "crystal_sddc_state_test_cases", 26),
@@ -69,7 +71,9 @@ def expected_cases():
     if set(result) != {STATE_SUITE, "crystal-sddc-codec"}:
         raise RuntimeError("Unexpected Crystal KUnit suite inventory")
     return result, {"upstream_commit": PIN, "source_sha256": source_hashes,
-                    "integrity_patch_sha256": integrity["patch_sha256"], "expected_total_cases": 32}
+                    "integrity_patch_sha256": integrity["patch_sha256"], "expected_total_cases": 32,
+                    "sddc_kunit_config_patch": test_overlay,
+                    "installed_sddc_sha256": test_overlay["patched_sha256"]}
 
 
 def strip_prefix(line):

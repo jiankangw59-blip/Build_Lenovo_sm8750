@@ -90,8 +90,29 @@ overlay (SDDC `ed2e2a521...`, private header `c35659776...`, raw driver
 `997e92108...`). Charging/deferrable-GC adaptation follows those overlays, making
 the final installed driver `b4931a77a...`. Source reports retain all intermediate
 digests; the final installed digest is not confused with the raw stats digest.
-The two earlier LZ4KDS builds continue to require `e51140d12...` as their final
-SDDC source and do not read or require the stats patch or its review record.
+The ordinary non-test `crystal-lz4kds` profile continues to require
+`e51140d12...` as its final SDDC source; the combined profile retains the stats
+chain above. Neither reads or requires the test-only overlay described below.
+
+Only `crystal-lz4kds-test` additionally applies `sddc-kunit-config.patch`, in the
+exact order original source → integrity (`e51140d12...`) → test configuration
+(`fe72aa733...`), using GNU patch `--fuzz=0`. It changes only
+`crystal_sddc_wb_sparse_state_test`: native ZMS disabled must expose the resident
+epoch 5 and NONE/zero sparse-WB identity; native enabled retains the original
+epoch 17/DELTA/reference-size/page-hash assertions. This corrects the test's
+expectations for both configurations without changing production functions,
+adding skips, or changing the 26 state plus 6 codec declarations/order.
+
+The test integration report separately records `sddc_kunit_config_patch`, its
+input/output source digests and patch order. Precompile checks require the
+installed `fe72aa733...` source, and boot preparation additionally requires the
+exact overlay record. The KTAP verifier records the same reviewed overlay in
+its declaration metadata while retaining the original 32-case acceptance
+rules. Older test artifacts with only `e51140d12...`, a missing/wrong overlay,
+or missing KUnit command-line parameters are rejected. Pure, ordinary non-test,
+combined, and earlier non-test artifact hashes/metadata remain unchanged.
+Host execution of the extracted test/snapshot functions uses mocked XArray and
+locks; it does not prove that kernel KUnit ran or passed.
 
 The final LZ4KDS profile must first pass the independent-device tests, including
 actual alias/delta counters, reference/generation reuse, concurrent overwrite

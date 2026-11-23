@@ -54,6 +54,14 @@ SDDC_STATS = {
     "read_only_stats_export": True, "wire_format_changed": False, "global_kmi_changed": False,
 }
 STATS_PLATFORM_DRIVER_SHA256 = "b4931a77ad29f7d11d5b1d915054e0464077fe696925f793775559a22d03585a"
+SDDC_KUNIT_CONFIG = {
+    "target": SDDC_INTEGRITY["source_file"],
+    "base_after_integrity_sha256": SDDC_INTEGRITY["patched_sha256"],
+    "patch_sha256": "570bd70e0866ab4ac97eb2a04dc0e8d0ff64b55a05941b1281d692f16843c766",
+    "patched_sha256": "fe72aa7337b979eea9c6a296531bb2f79e0663fa56cfc966bca3032391e2f02f",
+    "only_changed_case": "crystal_sddc_wb_sparse_state_test",
+    "production_code_changed": False, "state_cases": 26, "codec_cases": 6, "skipped_cases_added": 0,
+}
 
 
 def integrity_patch_policy():
@@ -87,6 +95,22 @@ def stats_patch_policy():
             "ordered_patches": list(SDDC_STATS["ordered_patches"]),
             "patch_file": "sddc-integrity-stats.patch", "fuzz": 0,
             "platform_driver_sha256": STATS_PLATFORM_DRIVER_SHA256}
+
+
+def kunit_config_patch_policy():
+    """This test-only overlay is not part of any non-test source chain."""
+    review = json.loads((HERE / "review/sddc-kunit-config.json").read_text(encoding="utf-8"))
+    if any(review.get(name) != value for name, value in SDDC_KUNIT_CONFIG.items()):
+        raise RuntimeError("Unreviewed SDDC KUnit configuration policy")
+    raw = (HERE / "sddc-kunit-config.patch").read_bytes()
+    if hashlib.sha256(raw).hexdigest() != SDDC_KUNIT_CONFIG["patch_sha256"]:
+        raise RuntimeError("SDDC KUnit configuration patch digest differs")
+    old = re.findall(r"^--- a/(.+)$", raw.decode("utf-8"), re.M)
+    new = re.findall(r"^\+\+\+ b/(.+)$", raw.decode("utf-8"), re.M)
+    if old != [SDDC_KUNIT_CONFIG["target"]] or new != old:
+        raise RuntimeError("SDDC KUnit configuration patch destinations differ")
+    return {**SDDC_KUNIT_CONFIG, "patch_file": "sddc-kunit-config.patch", "fuzz": 0,
+            "ordered_patches": ["sddc-integrity.patch", "sddc-kunit-config.patch"]}
 
 
 def apply_reviewed_overlay(files, policy, scratch_parent):
@@ -149,8 +173,31 @@ def apply_stats_patch(pending, scratch_parent):
     return policy
 
 
+def apply_kunit_config_patch(raw, scratch_parent):
+    policy = kunit_config_patch_policy()
+    if hashlib.sha256(raw).hexdigest() != policy["base_after_integrity_sha256"]:
+        raise RuntimeError("SDDC KUnit input is not the reviewed integrity stage")
+    patched = apply_reviewed_overlay({policy["target"]: raw}, policy, scratch_parent)[policy["target"]]
+    if hashlib.sha256(patched).hexdigest() != policy["patched_sha256"]:
+        raise RuntimeError("SDDC KUnit configuration result differs")
+    before, after = raw.decode("utf-8"), patched.decode("utf-8")
+    case = r"static void " + policy["only_changed_case"] + r"\(.*?\n\}"
+    old, new = re.findall(case, before, re.S), re.findall(case, after, re.S)
+    if len(old) != 1 or len(new) != 1 or before.replace(old[0], new[0], 1) != after:
+        raise RuntimeError("SDDC KUnit overlay changes more than its reviewed test body")
+    names = re.findall(r"\bKUNIT_CASE\((\w+)\)", before)
+    if (len(names) != policy["state_cases"] or len(set(names)) != len(names) or
+            re.findall(r"\bKUNIT_CASE\((\w+)\)", after) != names or
+            re.search(r"\b(?:kunit_skip|KUNIT_SKIP)\s*\(", new[0])):
+        raise RuntimeError("SDDC KUnit overlay changes or skips the declared cases")
+    return patched, policy
+
+
 def integrity_installed_hashes(profile):
     integrity = integrity_patch_policy()
+    if profile == "crystal-lz4kds-test":
+        test = kunit_config_patch_policy()
+        return {test["target"]: test["patched_sha256"]}
     if profile != COMBINED_PROFILE:
         return {integrity["source_file"]: integrity["patched_sha256"]}
     stats = stats_patch_policy()
@@ -264,7 +311,7 @@ def integrate(kernel, report, profile="crystal"):
             raise RuntimeError("Crystal source digest differs: " + name)
         pending[name] = raw
 
-    integrity, stats = None, None
+    integrity, stats, kunit_config = None, None, None
     if settings["sddc"]:
         name = SDDC_INTEGRITY["source_file"]
         pending[name], integrity = apply_integrity_patch(pending[name], kernel)
@@ -273,6 +320,8 @@ def integrate(kernel, report, profile="crystal"):
             raise RuntimeError("Unexpected SDDC codec KUnit case count")
         if profile == COMBINED_PROFILE:
             stats = apply_stats_patch(pending, kernel)
+        if settings["kunit"]:
+            pending[name], kunit_config = apply_kunit_config_patch(pending[name], kernel)
 
     # The vendor hook already accepts this enum in 6.6.89, but its definition
     # is private to vmscan.c. Do not change that exported hook or a core layout.
@@ -391,6 +440,8 @@ def integrate(kernel, report, profile="crystal"):
     }
     if stats:
         result["sddc_stats_patch"] = stats
+    if kunit_config:
+        result["sddc_kunit_config_patch"] = kunit_config
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     return result

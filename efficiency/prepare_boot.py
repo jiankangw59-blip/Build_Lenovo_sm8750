@@ -12,6 +12,7 @@ import time
 from integrate_crystal import (COMBINED_PROFILE, CRYSTAL_PROFILES, PIN as CRYSTAL_PIN, PROFILE_CHOICES,
                                crystal_configuration, crystal_configuration_errors,
                                integrity_installed_hashes, integrity_patch_policy, kunit_boot_errors,
+                               kunit_config_patch_policy,
                                source_manifest, stage2_profiles, stats_patch_policy)
 
 
@@ -113,6 +114,11 @@ def validate_profile_evidence(evidence, patches, expected_profile):
             for name, expected in integrity_installed_hashes(profile).items():
                 if installed.get(name) != expected:
                     raise RuntimeError("Candidate installed overlay digest differs: " + name)
+            if CRYSTAL_PROFILES[profile]["kunit"]:
+                test = kunit_config_patch_policy()
+                if (crystal.get("sddc_kunit_config_patch") != test or
+                        test["base_after_integrity_sha256"] != integrity["patched_sha256"]):
+                    raise RuntimeError("Candidate lacks the reviewed test-only SDDC KUnit overlay")
             if profile == COMBINED_PROFILE:
                 stats = stats_patch_policy()
                 if crystal.get("sddc_stats_patch") != stats or any(

@@ -1,0 +1,42 @@
+diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
+--- a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
++++ b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
+@@ -4735,6 +4735,8 @@
+ 	state->wire_size = 512;
+ 	state->page_hash = CRYSTAL_SDDC_TEST_PAGE_HASH;
+ 	state->kind = CRYSTAL_SDDC_DELTA;
++	/* Distinguish the resident slot epoch from the native WB epoch. */
++	ctx->mutation_seq[0] = 5;
+ 
+ 	ret = xa_insert(&ctx->sddc.wb_states, 0, NULL, GFP_KERNEL);
+ 	KUNIT_ASSERT_EQ(test, ret, 0);
+@@ -4745,12 +4747,23 @@
+ 		crystal_sddc_wb_state_install_locked(&ctx->sddc, 0, state));
+ 	crystal_sddc_snapshot_locked(&ctx->zram, 0, &snapshot);
+ 	crystal_sddc_slot_unlock(&ctx->zram, 0);
+-	KUNIT_EXPECT_EQ(test, snapshot.mutation_seq, (u64)17);
+-	KUNIT_EXPECT_EQ(test, snapshot.kind, (u8)CRYSTAL_SDDC_DELTA);
+-	KUNIT_EXPECT_EQ(test, snapshot.ref_size, (u32)768);
+-	KUNIT_EXPECT_EQ(test, snapshot.target_size, (u32)1024);
+-	KUNIT_EXPECT_EQ(test, snapshot.page_hash,
+-			(u32)CRYSTAL_SDDC_TEST_PAGE_HASH);
++	if (IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_ZMS_NATIVE)) {
++		KUNIT_EXPECT_EQ(test, snapshot.mutation_seq, (u64)17);
++		KUNIT_EXPECT_EQ(test, snapshot.kind, (u8)CRYSTAL_SDDC_DELTA);
++		KUNIT_EXPECT_EQ(test, snapshot.ref_size, (u32)768);
++		KUNIT_EXPECT_EQ(test, snapshot.target_size, (u32)1024);
++		KUNIT_EXPECT_EQ(test, snapshot.page_hash,
++				(u32)CRYSTAL_SDDC_TEST_PAGE_HASH);
++	} else {
++		/* Disabled native WB must not publish a sparse WB identity. */
++		KUNIT_EXPECT_EQ(test, snapshot.mutation_seq, (u64)5);
++		KUNIT_EXPECT_EQ(test, snapshot.kind, (u8)CRYSTAL_SDDC_NONE);
++		KUNIT_EXPECT_EQ(test, snapshot.ref.id, (u32)0);
++		KUNIT_EXPECT_EQ(test, snapshot.ref.generation, (u32)0);
++		KUNIT_EXPECT_EQ(test, snapshot.ref_size, (u32)0);
++		KUNIT_EXPECT_EQ(test, snapshot.target_size, (u32)0);
++		KUNIT_EXPECT_EQ(test, snapshot.page_hash, (u32)0);
++	}
+ 	crystal_sddc_slot_lock(&ctx->zram, 0);
+ 	KUNIT_EXPECT_TRUE(test,
+ 		crystal_sddc_snapshot_matches_locked(&ctx->zram, 0, &snapshot));
