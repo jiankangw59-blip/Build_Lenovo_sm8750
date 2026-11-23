@@ -1,0 +1,38 @@
+From 962787f52a1cacf7e3d3e85d8f8c6fbd1da8fcaa Mon Sep 17 00:00:00 2001
+From: Oleksandr Natalenko <oleksandr@natalenko.name>
+Date: Tue, 18 Mar 2025 14:16:56 +0100
+Subject: [PATCH] tcp: bbr3: update BBRv3 comments
+
+Remove stale BBRv1 and BBRv2 references from the PROBE_BW comments so they
+describe the imported BBRv3 implementation accurately.
+
+Change-Id: I6fa5746dc3ba2894cfbcdd873869cb2182028da9
+Signed-off-by: Oleksandr Natalenko <oleksandr@natalenko.name>
+(cherry picked from commit 10b701dcecdfc803363447ff1f99a6758c54c494)
+---
+ net/ipv4/tcp_bbr.c | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/net/ipv4/tcp_bbr.c b/net/ipv4/tcp_bbr.c
+index 0a15a7d66d02..fef587e7ead3 100644
+--- a/net/ipv4/tcp_bbr.c
++++ b/net/ipv4/tcp_bbr.c
+@@ -245,7 +245,7 @@ enum bbr_pacing_gain_phase {
+ 	BBR_BW_PROBE_UP		= 0,  /* push up inflight to probe for bw/vol */
+ 	BBR_BW_PROBE_DOWN	= 1,  /* drain excess inflight from the queue */
+ 	BBR_BW_PROBE_CRUISE	= 2,  /* use pipe, w/ headroom in queue/pipe */
+-	BBR_BW_PROBE_REFILL	= 3,  /* v2: refill the pipe again to 100% */
++	BBR_BW_PROBE_REFILL	= 3,  /* refill the pipe again to 100% */
+ };
+ #endif
+ 
+@@ -1191,8 +1191,7 @@ static void bbr_probe_inflight_hi_upward(struct sock *sk,
+ 
+ /* Does loss/ECN rate for this sample say inflight is "too high"?
+  * This is used by both the bbr_check_loss_too_high_in_startup() function,
+- * which can be used in either v1 or v2, and the PROBE_UP phase of v2, which
+- * uses it to notice when loss/ECN rates suggest inflight is too high.
++ * and in PROBE_UP.
+  */
+ static bool bbr_is_inflight_too_high(const struct sock *sk,
+ 				      const struct rate_sample *rs)

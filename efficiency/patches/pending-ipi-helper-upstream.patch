@@ -1,0 +1,78 @@
+From ccde6525183c5489de293cf91a441585fff3c847 Mon Sep 17 00:00:00 2001
+From: Ulf Hansson <ulf.hansson@linaro.org>
+Date: Wed, 5 Nov 2025 10:54:07 +0100
+Subject: [PATCH] smp: Introduce a helper function to check for pending IPIs
+
+When governors used during cpuidle try to find the most optimal idle state
+for a CPU or a group of CPUs, they are known to quite often fail. One
+reason for this is, that they are not taking into account whether there has
+been an IPI scheduled for any of the CPUs that are affected by the selected
+idle state.
+
+To enable pending IPIs to be taken into account for cpuidle decisions,
+introduce a new helper function, cpus_peek_for_pending_ipi().
+
+Suggested-by: Thomas Gleixner <tglx@linutronix.de>
+Reviewed-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Ulf Hansson <ulf.hansson@linaro.org>
+---
+ include/linux/smp.h |  5 +++++
+ kernel/smp.c        | 22 ++++++++++++++++++++++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/include/linux/smp.h b/include/linux/smp.h
+index 18e9c918325e5e..91d0ecf3b8d3bf 100644
+--- a/include/linux/smp.h
++++ b/include/linux/smp.h
+@@ -168,6 +168,7 @@ int smp_call_function_any(const struct cpumask *mask,
+ 
+ void kick_all_cpus_sync(void);
+ void wake_up_all_idle_cpus(void);
++bool cpus_peek_for_pending_ipi(const struct cpumask *mask);
+ 
+ /*
+  * Generic and arch helpers
+@@ -216,6 +217,10 @@ smp_call_function_any(const struct cpumask *mask, smp_call_func_t func,
+ 
+ static inline void kick_all_cpus_sync(void) {  }
+ static inline void wake_up_all_idle_cpus(void) {  }
++static inline bool cpus_peek_for_pending_ipi(const struct cpumask *mask)
++{
++	return false;
++}
+ 
+ #define setup_max_cpus 0
+ 
+diff --git a/kernel/smp.c b/kernel/smp.c
+index 02f52291fae425..f349960f79cad9 100644
+--- a/kernel/smp.c
++++ b/kernel/smp.c
+@@ -1087,6 +1087,28 @@ void wake_up_all_idle_cpus(void)
+ }
+ EXPORT_SYMBOL_GPL(wake_up_all_idle_cpus);
+ 
++/**
++ * cpus_peek_for_pending_ipi - Check for pending IPI for CPUs
++ * @mask: The CPU mask for the CPUs to check.
++ *
++ * This function walks through the @mask to check if there are any pending IPIs
++ * scheduled, for any of the CPUs in the @mask. It does not guarantee
++ * correctness as it only provides a racy snapshot.
++ *
++ * Returns true if there is a pending IPI scheduled and false otherwise.
++ */
++bool cpus_peek_for_pending_ipi(const struct cpumask *mask)
++{
++	unsigned int cpu;
++
++	for_each_cpu(cpu, mask) {
++		if (!llist_empty(per_cpu_ptr(&call_single_queue, cpu)))
++			return true;
++	}
++
++	return false;
++}
++
+ /**
+  * struct smp_call_on_cpu_struct - Call a function on a specific CPU
+  * @work: &work_struct

@@ -1,0 +1,30 @@
+From 7260c34c80917577aafa552e39add6ade493cedf Mon Sep 17 00:00:00 2001
+From: Park Ju Hyung <qkrwngud825@gmail.com>
+Date: Tue, 26 Sep 2017 10:51:24 +0900
+Subject: [PATCH] f2fs: set ioprio of GC kthread to idle
+
+GC should run conservatively as possible to reduce latency spikes to the user.
+
+Setting ioprio to idle class will allow the kernel to schedule GC thread's I/O
+to not affect any other processes' I/O requests.
+
+Change-Id: I06532130c0efda792bae6a49d502dd68b33fc85e
+Signed-off-by: Park Ju Hyung <qkrwngud825@gmail.com>
+Signed-off-by: engstk <eng.stk@sapo.pt>
+---
+ fs/f2fs/gc.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/fs/f2fs/gc.c b/fs/f2fs/gc.c
+index 9f7e1bc781a6..09e29d3e08af 100644
+--- a/fs/f2fs/gc.c
++++ b/fs/f2fs/gc.c
+@@ -237,6 +237,8 @@ int f2fs_start_gc_thread(struct f2fs_sb_info *sbi)
+ 
+ 	set_user_nice(gc_th->f2fs_gc_task,
+ 			PRIO_TO_NICE(sbi->critical_task_priority));
++	set_task_ioprio(gc_th->f2fs_gc_task,
++		IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0));
+ 	return 0;
+ }
+ 

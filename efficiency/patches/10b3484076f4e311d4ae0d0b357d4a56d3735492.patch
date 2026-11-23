@@ -1,0 +1,62 @@
+From 10b3484076f4e311d4ae0d0b357d4a56d3735492 Mon Sep 17 00:00:00 2001
+From: whitewhale0612 <2136512929@qq.com>
+Date: Sat, 7 Mar 2026 22:39:38 +0800
+Subject: [PATCH] mm, page_alloc, thp: prevent reclaim for __GFP_THISNODE THP
+ allocations
+
+Since commit cc638f3 ("mm, thp: tweak reclaim/compaction effort of
+local-only and all-node allocations"), THP page fault allocations have
+settled on the following scheme (from the commit log):
+
+1. local node only THP allocation with no reclaim, just compaction.
+2. for madvised VMA's or when synchronous compaction is enabled always - THP
+   allocation from any node with effort determined by global defrag setting
+   and VMA madvise
+3. fallback to base pages on any node
+
+Recent customer reports however revealed we have a gap in step 1 above.
+What we have seen is excessive reclaim due to THP page faults on a NUMA
+node that's close to its high watermark, while other nodes have plenty of
+free memory.
+
+The problem with step 1 is that it promises no reclaim after the
+compaction attempt, however reclaim is only avoided for certain compaction
+outcomes (deferred, or skipped due to insufficient free base pages), and
+not e.g.  when compaction is actually performed but fails (we did see
+compact_fail vmstat counter increasing).
+
+THP page faults can therefore exhibit a zone_reclaim_mode-like behavior,
+which is not the intention.
+
+Thus add a check for __GFP_THISNODE that corresponds to this exact
+situation and prevents continuing with reclaim/compaction once the initial
+compaction attempt isn't successful in allocating the page.
+---
+ mm/page_alloc.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 51977bc8edb1..c6c3ae5df90c 100755
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -4573,6 +4573,20 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
+ 			    compact_result == COMPACT_DEFERRED)
+ 				goto nopage;
+ 
++			/*
++			 * THP page faults may attempt local node only first,
++			 * but are then allowed to only compact, not reclaim,
++			 * see alloc_pages_mpol().
++			 *
++			 * Compaction can fail for other reasons than those
++			 * checked above and we don't want such THP allocations
++			 * to put reclaim pressure on a single node in a
++			 * situation where other nodes might have plenty of
++			 * available memory.
++			 */
++			 if (gfp_mask & __GFP_THISNODE)
++			 goto nopage;
++
+ 			/*
+ 			 * Looks like reclaim/compaction is worth trying, but
+ 			 * sync compaction could be very expensive, so keep

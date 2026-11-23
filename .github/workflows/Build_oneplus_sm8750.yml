@@ -5,6 +5,14 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
+      efficiency_profile:
+        description: "PLQ110 audited efficiency profile (6.6.118 / pure LZ4KD / built-in official ReKernel)"
+        required: false
+        default: 'off'
+        type: choice
+        options:
+          - 'off'
+          - 'baseline'
       enable_release:
         description: "发布到 Releases"
         required: true
@@ -119,12 +127,26 @@ jobs:
       ENABLE_SCX:             ${{ github.event.inputs.enable_scx }}
       ENABLE_BBG:             ${{ github.event.inputs.enable_bbg }}
       ENABLE_KSU:             'true'
+      EFFICIENCY_PROFILE:     ${{ github.event.inputs.efficiency_profile || 'off' }}
     outputs:
       ksuver: ${{ steps.ksu_step.outputs.ksuver }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      - name: Validate Ace 6 efficiency profile inputs
+        if: ${{ env.EFFICIENCY_PROFILE != 'off' }}
+        run: |
+          set -euo pipefail
+          test "$EFFICIENCY_PROFILE" = baseline
+          test "$DEVICES_NAME" = oneplus_ace_6
+          test "$KERNEL_VERSION" = 6.6.118
+          test "$ZRAM_PATCH" = LZ4KD
+          test "$ENABLE_REKERNEL" = true
+          test "$ENABLE_ADIOS" = false
+          test "$ENABLE_SCX" = false
+          test "$ENABLE_DROIDSPACES" = false
+          test '${{ inputs.enable_fuse_bpf_revalidate }}' = true
       - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
         run: |
           case "$ZRAM_PATCH" in
@@ -322,7 +344,9 @@ jobs:
           wait
           echo "所有源码及 llvm-Clang18 工具链初始化完成！"
           echo "正在去除 ABI 保护 & 去除 dirty 后缀..."
-          rm common/android/abi_gki_protected_exports_* || true
+          if [ "$EFFICIENCY_PROFILE" = off ]; then
+            rm common/android/abi_gki_protected_exports_* || true
+          fi
           for f in common/scripts/setlocalversion; do
             sed -i 's/ -dirty//g' "$f"
             sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
@@ -341,6 +365,9 @@ jobs:
           CACHE_VARIANT=""
           if [ "${{ env.ENABLE_DROIDSPACES }}" = "true" ]; then
             CACHE_VARIANT="${CACHE_VARIANT}-ds"
+          fi
+          if [ "$EFFICIENCY_PROFILE" != off ]; then
+            CACHE_VARIANT="${CACHE_VARIANT}-efficiency-${EFFICIENCY_PROFILE}"
           fi
           echo "CACHE_VARIANT=$CACHE_VARIANT" >> $GITHUB_ENV
           echo "当前构建内核机型：${{ env.DEVICES_NAME }}，缓存变体：${CACHE_VARIANT:-(无)}"
@@ -527,7 +554,7 @@ jobs:
           
 
       - name: 🔧 Add Re-Kernel Support (添加 Re-Kernel 支持)
-        if: ${{ env.ENABLE_REKERNEL == 'true' }}
+        if: ${{ env.ENABLE_REKERNEL == 'true' && env.EFFICIENCY_PROFILE == 'off' }}
         run: |
             cd kernel_workspace
             VERSION=$(awk -F'=' '/^VERSION[ \t]*=/ {gsub(/ /,"",$2); print $2}' common/Makefile)
@@ -666,7 +693,7 @@ jobs:
           patch -p1 < 002-zstd.patch || true
 
       - name: 🔧 Apply LZ4KD ZRAM patches (添加 LZ4KD 压缩支持)
-        if: ${{ env.ZRAM_PATCH == 'LZ4KD' }}
+        if: ${{ env.ZRAM_PATCH == 'LZ4KD' && env.EFFICIENCY_PROFILE == 'off' }}
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
@@ -841,6 +868,15 @@ jobs:
           #Remove check_defconfig
           sudo sed -i 's/check_defconfig//' ./common/build.config.gki
 
+      - name: Apply reviewed Ace 6 efficiency patch series
+        if: ${{ env.EFFICIENCY_PROFILE != 'off' }}
+        run: |
+          set -euo pipefail
+          test "$KERNEL_SOURCE_REF" = 65b954a773b183a9999b06bb1b2f921f12eaaf11
+          python3 efficiency/apply_profile.py apply \
+            --kernel kernel_workspace/common --report kernel_workspace/preflash/efficiency
+          python3 efficiency/apply_profile.py configure --kernel kernel_workspace/common
+
       - name: 🔧 Set Kernel name (设置内核名称)
         run: |
           cd kernel_workspace
@@ -935,8 +971,17 @@ jobs:
             fi
           fi
 
+          if [ "$EFFICIENCY_PROFILE" != off ]; then
+            python3 "$WORKDIR/efficiency/apply_profile.py" verify --kernel . \
+              --report ../preflash/efficiency/config-verification.json
+          fi
+
           if [ "$ZRAM_PATCH" = 'LZ4KD' ]; then
-            for symbol in ZRAM ZSMALLOC CRYPTO_LZ4K CRYPTO_LZ4KD CRYPTO_LZ4K_OPLUS CRYPTO_DEFLATE ZRAM_DEF_COMP_LZ4KD; do
+            LZ4KD_SYMBOLS='ZRAM ZSMALLOC CRYPTO_LZ4KD ZRAM_DEF_COMP_LZ4KD'
+            if [ "$EFFICIENCY_PROFILE" = off ]; then
+              LZ4KD_SYMBOLS="$LZ4KD_SYMBOLS CRYPTO_LZ4K CRYPTO_LZ4K_OPLUS CRYPTO_DEFLATE"
+            fi
+            for symbol in $LZ4KD_SYMBOLS; do
               if ! grep -qx "CONFIG_${symbol}=y" out/.config; then
                 echo "::error::LZ4KD configuration did not resolve to CONFIG_${symbol}=y"
                 exit 1
@@ -965,6 +1010,20 @@ jobs:
           fi
 
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image 2>&1 | tee build.log
+
+          if [ "$EFFICIENCY_PROFILE" != off ]; then
+            SYMVERS=out/Module.symvers
+            [ -s "$SYMVERS" ] || SYMVERS=out/vmlinux.symvers
+            test -s "$SYMVERS"
+            python3 "$WORKDIR/efficiency/kmi_baseline.py" verify \
+              --baseline "$WORKDIR/efficiency/kmi/plq110-C16-baseline.json.gz" \
+              --symvers "$SYMVERS" --vmlinux out/vmlinux \
+              --output ../preflash/efficiency/kmi-verification.json
+            cp "$SYMVERS" ../preflash/efficiency/Module.symvers
+            "$CLANG_DIR/llvm-nm" out/vmlinux > ../preflash/efficiency/kernel-symbols.txt
+            grep -E ' (start_rekernel|rekernel_netlink_start)(\.|$)' ../preflash/efficiency/kernel-symbols.txt
+            gzip -c -1 out/vmlinux > ../preflash/efficiency/vmlinux.gz
+          fi
 
           BUILT_KSU_VERSION="$(grep -oE '(BakaSU|ReSukiSU) version code: [0-9]+' build.log | awk '{print $NF}' | tail -n 1 || true)"
           if [ -z "$BUILT_KSU_VERSION" ]; then
@@ -1065,6 +1124,23 @@ jobs:
             exit 1
           fi
           
+      - name: Package the matching one-shot runtime policy
+        if: ${{ env.EFFICIENCY_PROFILE != 'off' }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
+          dest = Path('kernel_workspace/preflash/efficiency/Ace6-Kernel-Efficiency-Policy.zip')
+          dest.parent.mkdir(parents=True, exist_ok=True)
+          with ZipFile(dest, 'w', compression=ZIP_DEFLATED) as archive:
+              for path in sorted(Path('efficiency/runtime').iterdir()):
+                  if not path.is_file():
+                      continue
+                  info = ZipInfo(path.name)
+                  info.external_attr = (0o100755 if path.suffix == '.sh' else 0o100644) << 16
+                  archive.writestr(info, path.read_bytes(), compress_type=ZIP_DEFLATED)
+          PY
+
       - name: Record AK3 and compiled payload provenance
         run: |
           set -euo pipefail
@@ -1091,7 +1167,7 @@ jobs:
 
   upload_rekernel:
     name: Upload Re-Kernel Module
-    if: ${{ github.event.inputs.enable_ReKernel == 'true' }}
+    if: ${{ github.event.inputs.enable_ReKernel == 'true' && (github.event.inputs.efficiency_profile == 'off' || github.event.inputs.efficiency_profile == '') }}
     needs: build
     runs-on: ubuntu-latest
     steps:

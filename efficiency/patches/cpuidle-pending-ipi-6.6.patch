@@ -1,0 +1,25 @@
+From: Local integration <local@localhost>
+Subject: [PATCH] cpuidle: avoid idle entry with a pending local call-function IPI
+
+Backport the per-CPU pending-IPI check proposed by Maulik Shah:
+https://lore.kernel.org/r/20260403-cpuidle_ipi-v2-1-b3e44b032e2c@oss.qualcomm.com
+
+Keep the helper call inside instrumentation_begin/end: placing an instrumented
+function call before instrumentation_begin in noinstr code is invalid. Check
+only the current CPU, not the entire driver's mask. This is a best-effort
+snapshot, not a guarantee that no new interrupt can arrive after the check.
+
+--- a/drivers/cpuidle/cpuidle.c
++++ b/drivers/cpuidle/cpuidle.c
+@@ -222,6 +222,11 @@ noinstr int cpuidle_enter_state(struct cpuidle_device *dev,
+ 
+ 	instrumentation_begin();
+ 
++	if (cpus_peek_for_pending_ipi(cpumask_of(dev->cpu))) {
++		instrumentation_end();
++		return -EBUSY;
++	}
++
+ 	/*
+ 	 * The vendor hook may modify index, which means target_state and
+ 	 * broadcast must be assigned after the vendor hook.

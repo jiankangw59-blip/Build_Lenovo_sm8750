@@ -1,0 +1,47 @@
+From f995b9736c4c0d0b55ffdc74ef74de2f7ae827c9 Mon Sep 17 00:00:00 2001
+From: whitewhale0612 <2136512929@qq.com>
+Date: Mon, 15 Jun 2026 21:51:43 +0800
+Subject: [PATCH] mm: avoid unnecessary LRU drains in swap faults
+
+---
+ mm/memory.c | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/mm/memory.c b/mm/memory.c
+index eb6edcb5aaab..9cc56832f685 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -3635,12 +3635,18 @@ static bool wp_can_reuse_anon_folio(struct folio *folio,
+ 	 */
+ 	if (folio_test_ksm(folio) || folio_ref_count(folio) > 3)
+ 		return false;
+-	if (!folio_test_lru(folio))
++	if (!folio_test_lru(folio)) {
++		/*
++		 * Assume folio is on lru_cache and holds a cache reference.
++		 */
++		if (folio_ref_count(folio) > 2 + folio_test_swapcache(folio))
++			return false;
+ 		/*
+ 		 * We cannot easily detect+handle references from
+ 		 * remote LRU caches or references to LRU folios.
+ 		 */
+ 		lru_add_drain();
++	}
+ 	if (folio_ref_count(folio) > 1 + folio_test_swapcache(folio))
+ 		return false;
+ 	if (!folio_trylock(folio))
+@@ -4411,10 +4417,11 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
+ 		 * If we want to map a page that's in the swapcache writable, we
+ 		 * have to detect via the refcount if we're really the exclusive
+ 		 * owner. Try removing the extra reference from the local LRU
+-		 * caches if required.
++		 * caches only if that can plausibly make the folio reusable.
+ 		 */
+ 		if ((vmf->flags & FAULT_FLAG_WRITE) && folio == swapcache &&
+-		    !folio_test_ksm(folio) && !folio_test_lru(folio))
++		    !folio_test_ksm(folio) && !folio_test_lru(folio) &&
++		    folio_ref_count(folio) <= 2 + folio_nr_pages(folio))
+ 			lru_add_drain();
+ 	}
+ 

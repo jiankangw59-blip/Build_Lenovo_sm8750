@@ -1,0 +1,29 @@
+From 45952959fc66176254a80bef833a621997deb7e6 Mon Sep 17 00:00:00 2001
+From: Oleksandr Natalenko <oleksandr@natalenko.name>
+Date: Sat, 15 Mar 2025 22:31:15 +0100
+Subject: [PATCH] tcp: bbr3: wrap the initial pacing-rate calculation
+
+Wrap the initial pacing-rate calculation to follow the kernel coding style.
+This has no functional effect.
+
+Change-Id: I2df678fb4036e6edefc4fb98bd7251839ec23745
+Signed-off-by: Oleksandr Natalenko <oleksandr@natalenko.name>
+(cherry picked from commit e810e968c7729f6dd17853ddb892f996181a1bb9)
+---
+ net/ipv4/tcp_bbr.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/net/ipv4/tcp_bbr.c b/net/ipv4/tcp_bbr.c
+index 2bd17a8ae756..2eabc13e3353 100644
+--- a/net/ipv4/tcp_bbr.c
++++ b/net/ipv4/tcp_bbr.c
+@@ -472,7 +472,8 @@ static void bbr_init_pacing_rate_from_rtt(struct sock *sk)
+ 	bw = (u64)tcp_snd_cwnd(tp) * BW_UNIT;
+ 	do_div(bw, rtt_us);
+ 	WRITE_ONCE(sk->sk_pacing_rate,
+-		   bbr_bw_to_pacing_rate(sk, bw, bbr_param(sk, startup_pacing_gain)));
++		   bbr_bw_to_pacing_rate(sk, bw,
++					 bbr_param(sk, startup_pacing_gain)));
+ }
+ 
+ /* Pace using current bw estimate and a gain factor. */

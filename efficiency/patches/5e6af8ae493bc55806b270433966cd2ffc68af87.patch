@@ -1,0 +1,58 @@
+From 5e6af8ae493bc55806b270433966cd2ffc68af87 Mon Sep 17 00:00:00 2001
+From: Kairui Song <kasong@tencent.com>
+Date: Tue, 28 Apr 2026 02:07:03 +0800
+Subject: [PATCH] mm/mglru: remove no longer used reclaim argument for folio
+ protection
+
+Now dirty reclaim folios are handled after isolation, not before, since
+dirty reactivation must take the folio off LRU first, and that helps to
+unify the dirty handling logic.
+
+So this argument is no longer needed.  Just remove it.
+
+Reviewed-by: Axel Rasmussen <axelrasmussen@google.com>
+Signed-off-by: Kairui Song <kasong@tencent.com>
+---
+ mm/vmscan.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 4e1dda57b4a6..065ece899727 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -4114,7 +4114,7 @@ static int folio_update_gen(struct folio *folio, int gen)
+ }
+ 
+ /* protect pages accessed multiple times through file descriptors */
+-static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
++static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio)
+ {
+ 	int type = folio_is_file_lru(folio);
+ 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
+@@ -4699,7 +4699,7 @@ static bool inc_min_seq(struct lruvec *lruvec, int type, bool can_swap)
+ 			VM_WARN_ON_ONCE_FOLIO(folio_is_file_lru(folio) != type, folio);
+ 			VM_WARN_ON_ONCE_FOLIO(folio_zonenum(folio) != zone, folio);
+ 
+-			new_gen = folio_inc_gen(lruvec, folio, false);
++			new_gen = folio_inc_gen(lruvec, folio);
+ 			list_move_tail(&folio->lru, &lrugen->folios[new_gen][type][zone]);
+ 
+ 			if (!--remaining)
+@@ -5297,7 +5297,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
+ 	if (tier > tier_idx || refs == BIT(LRU_REFS_WIDTH)) {
+ 		int hist = lru_hist_from_seq(lrugen->min_seq[type]);
+ 
+-		gen = folio_inc_gen(lruvec, folio, false);
++		gen = folio_inc_gen(lruvec, folio);
+ 		list_move_tail(&folio->lru, &lrugen->folios[gen][type][zone]);
+ 
+ 		WRITE_ONCE(lrugen->protected[hist][type][tier - 1],
+@@ -5307,7 +5307,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
+ 
+ 	/* ineligible */
+ 	if (zone > sc->reclaim_idx) {
+-		gen = folio_inc_gen(lruvec, folio, false);
++		gen = folio_inc_gen(lruvec, folio);
+ 		list_move_tail(&folio->lru, &lrugen->folios[gen][type][zone]);
+ 		return true;
+ 	}
