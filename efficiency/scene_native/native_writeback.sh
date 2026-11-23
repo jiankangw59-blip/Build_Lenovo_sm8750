@@ -20,14 +20,24 @@ ace6_native_profile_active() {
 }
 
 ace6_native_loop_path() {
-    local name number
+    local name number attempt
     case "$1" in
         /dev/block/loop*|/dev/loop*|loop*) name=${1##*/} ;;
         *) return 1 ;;
     esac
     number=${name#loop}
     case "$number" in ''|*[!0-9]*) return 1 ;; esac
-    [ -b "/dev/block/$name" ] || return 1
+    # LOOP_CTL_GET_FREE can precede ueventd's creation of the device node.
+    # This is a bounded startup wait, never a background polling task.
+    attempt=0
+    while [ ! -b "/dev/block/$name" ] && [ "$attempt" -lt 30 ]; do
+        /system/bin/sleep 0.1
+        attempt=$((attempt + 1))
+    done
+    [ -b "/dev/block/$name" ] || {
+        echo '[ACE6-NATIVE] Loop node was not created within three seconds' >&2
+        return 1
+    }
     printf '/dev/block/%s\n' "$name"
 }
 
@@ -89,14 +99,14 @@ ace6_native_prepare_backing() {
         found=/dev/block/${found%%/*}
     done
     if [ -z "$found" ]; then
-        found=$(losetup -f) || return 1
+        found=$(/system/bin/losetup -f) || return 1
         found=$(ace6_native_loop_path "$found") || return 1
-        losetup "$found" "$ACE6_NATIVE_BACKING" || return 1
+        /system/bin/losetup "$found" "$ACE6_NATIVE_BACKING" || return 1
     fi
     ace6_native_backing_matches "$found" || return 1
     _ACE6_NATIVE_LOOP=$found
     exec 9<"$_ACE6_NATIVE_LOOP" || return 1
-    dd if="$_ACE6_NATIVE_LOOP" of=/dev/null bs=4096 count=1 2>/dev/null || return 1
+    /system/bin/dd if="$_ACE6_NATIVE_LOOP" of=/dev/null bs=4096 count=1 2>/dev/null || return 1
     ace6_native_profile_active || return 1
 }
 
@@ -134,7 +144,7 @@ ace6_native_cleanup_loop() {
     current=$(cat /sys/block/zram0/backing_dev 2>/dev/null) || return 0
     ace6_native_backing_matches "$current" && return 0
     if ace6_native_backing_matches "$_ACE6_NATIVE_LOOP"; then
-        losetup -d "$_ACE6_NATIVE_LOOP" || return 1
+        /system/bin/losetup -d "$_ACE6_NATIVE_LOOP" || return 1
     fi
 }
 
@@ -148,6 +158,8 @@ ace6_native_restore_ram_swap() {
     write_required_value 1 /sys/block/zram0/reset || return 1
     write_required_value "$target_alg" /sys/block/zram0/comp_algorithm || return 1
     write_required_value "${zram_size}M" /sys/block/zram0/disksize || return 1
-    mkswap /dev/block/zram0 >/dev/null || return 1
-    swapon /dev/block/zram0 -p 0 || return 1
+    # These functions are sourced before Scene defines its aliases. BusyBox
+    # standalone swapon omits -p, so use Android's checked system tools.
+    /system/bin/mkswap /dev/block/zram0 >/dev/null || return 1
+    /system/bin/swapon /dev/block/zram0 -p 0 || return 1
 }

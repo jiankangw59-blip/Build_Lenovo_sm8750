@@ -84,7 +84,7 @@ if [ "$SCENE_SWAP_CHECK_ONLY" = true ]; then
     output.mkdir(parents=True, exist_ok=True)
     for name, text in {"startup.sh": startup, "tools.sh": tools}.items():
         (output / name).write_text(text, encoding="utf-8", newline="\n")
-    for name in ["native_writeback.sh", "native_writeback_daemon.sh", "start_native_writeback.sh"]:
+    for name in ["native_writeback.sh", "native_writeback_daemon.sh", "start_native_writeback.sh", "early_native_writeback.sh"]:
         helper = Path(__file__).with_name(name).read_text(encoding="utf-8")
         (output / name).write_text(helper, encoding="utf-8", newline="\n")
     service = (source.parent / "service.sh").read_bytes()
@@ -94,6 +94,15 @@ if [ "$SCENE_SWAP_CHECK_ONLY" = true ]; then
     # Hook only after the existing startup succeeded, before the remaining work.
     service = replace_once(service, "echo \"\" >> $LOG\n", 'sh "$MODPATH/scripts/start_native_writeback.sh" || echo "Native writeback service start failed" >> "$LOG"\n\necho "" >> $LOG\n')
     (output.parent / "service.sh").write_text(service, encoding="utf-8", newline="\n")
+    postfs = (source.parent / "post-fs-data.sh").read_bytes()
+    if hashlib.sha256(postfs).hexdigest() != "7d6ab93904d824b3248c3529132b911fbf769f8cc7d2000a4dbea313f7de5868":
+        raise ValueError("Unreviewed Scene post-fs source")
+    postfs = postfs.decode("utf-8").replace("\r\n", "\n")
+    postfs = replace_once(postfs,
+        "# This device-specific filesystem startup entry deliberately performs no work.\n# The unchanged service.sh retains the existing swap policy and safeguards.",
+        "# Initialize the verified native ZRAM profile before app memory grows.\n# service.sh retains the remaining swap policy and safeguards.")
+    postfs = replace_once(postfs, "exit 0\n", 'sh "${0%/*}/scripts/early_native_writeback.sh"\nexit 0\n')
+    (output.parent / "post-fs-data.sh").write_text(postfs, encoding="utf-8", newline="\n")
 
 
 if __name__ == "__main__":
