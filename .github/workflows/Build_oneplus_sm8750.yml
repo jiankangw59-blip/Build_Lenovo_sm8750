@@ -1041,7 +1041,10 @@ jobs:
           if [ "$EFFICIENCY_PROFILE" != off ]; then
             ZRAM_PREFLIGHT='drivers/block/zram/zram_drv.o'
             if [ "$EFFICIENCY_PROFILE" = crystal ]; then
-              ZRAM_PREFLIGHT='drivers/crystalfrostwork/crystal_hybridswap/zram.o'
+              ZRAM_PREFLIGHT=''
+              for component in zcomp zms zram_drv core param zram_bridge memcg pressure stats; do
+                ZRAM_PREFLIGHT="$ZRAM_PREFLIGHT drivers/crystalfrostwork/crystal_hybridswap/${component}.o"
+              done
             fi
             make -k -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
               CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \

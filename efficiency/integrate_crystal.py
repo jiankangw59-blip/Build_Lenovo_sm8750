@@ -90,13 +90,17 @@ def integrate(kernel, report):
 
     links = {
         "drivers/Kconfig": '\nsource "' + DRIVER + '/Kconfig"\n',
-        "drivers/Makefile": "\nobj-$(CONFIG_CRYSTAL_HYBRIDSWAP) += crystalfrostwork/crystal_hybridswap/\n",
+        "drivers/Makefile": "\nobj-$(CONFIG_CRYSTAL_HYBRIDSWAP) += crystalfrostwork/\n",
     }
     for name, addition in links.items():
         raw = (kernel / name).read_bytes()
         if b"crystalfrostwork" in raw:
             raise RuntimeError("Preserve existing Crystal build linkage")
         pending[name] = raw + addition.encode("ascii")
+    parent = "drivers/crystalfrostwork/Makefile"
+    if (kernel / parent).exists():
+        raise RuntimeError("Preserve the existing Crystal parent Makefile")
+    pending[parent] = b"# SPDX-License-Identifier: GPL-2.0\nobj-$(CONFIG_CRYSTAL_HYBRIDSWAP) += crystal_hybridswap/\n"
 
     written = {}
     for name, raw in pending.items():
