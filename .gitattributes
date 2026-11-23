@@ -1,3 +1,4 @@
 efficiency/crystal/source/** -text -whitespace
 efficiency/crystal/*.patch -text -whitespace
+efficiency/patches/cpuidle-refinement-6.6.89.patch -text -whitespace
 efficiency/lz4kds_lab/vendor/** -text -whitespace

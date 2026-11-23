@@ -9,11 +9,13 @@ import struct
 import subprocess
 import time
 
-from integrate_crystal import (COMBINED_PROFILE, CRYSTAL_PROFILES, PIN as CRYSTAL_PIN, PROFILE_CHOICES,
+from integrate_crystal import (COMBINED_PROFILE, COMBINED_PROFILES, CRYSTAL_PROFILES, PIN as CRYSTAL_PIN, PROFILE_CHOICES,
                                crystal_configuration, crystal_configuration_errors,
                                integrity_installed_hashes, integrity_patch_policy, kunit_boot_errors,
                                kunit_config_patch_policy,
                                source_manifest, stage2_profiles, stats_patch_policy)
+from idle_refinement import (PROFILE as IDLE_PROFILE, check_source_hashes as check_idle_hashes,
+                             refinement_policy as idle_policy)
 
 
 def digest(path):
@@ -73,7 +75,8 @@ def validate_profile_evidence(evidence, patches, expected_profile):
         raise RuntimeError("Requested profile differs from the compiled artifact")
     files = [entry["file"] for entry in patches["applied"]]
     stage2 = {name for name in files if name in (
-        "patches/kcompressd-6.6.89.patch", "patches/le9uo-6.6.89.patch")}
+        "patches/kcompressd-6.6.89.patch", "patches/le9uo-6.6.89.patch",
+        "patches/cpuidle-refinement-6.6.89.patch")}
     parents = stage2_profiles(profile)
     expected_stage2 = {f"patches/{parent}-6.6.89.patch" for parent in parents}
     if stage2 != expected_stage2 or len(files) != 19 + len(parents):
@@ -88,6 +91,20 @@ def validate_profile_evidence(evidence, patches, expected_profile):
     if [(entry["file"], entry["sha256"]) for entry in patches["applied"]] != [
             (entry["file"], entry["sha256"]) for entry in pinned]:
         raise RuntimeError("Candidate patch order or digest differs from the pinned series")
+    if profile == IDLE_PROFILE:
+        idle = idle_policy()
+        final = patches["applied"][-1]
+        if (patches.get("cpuidle_refinement") != idle or final["file"] != idle["patch_file"] or
+                final["sha256"] != idle["patch_sha256"]):
+            raise RuntimeError("Candidate lacks the reviewed final cpuidle refinement")
+        check_idle_hashes(final.get("before", {}), "before", idle)
+        check_idle_hashes(final.get("after", {}), "after", idle)
+        preflight = json.loads((evidence / "efficiency/config-verification.json").read_text(encoding="utf-8"))
+        expected_sources = {name: values["after_sha256"] for name, values in idle["files"].items()}
+        expected_sources.update(idle["required_unchanged_files"])
+        if (preflight.get("passed") is not True or preflight.get("cpuidle_refinement") !=
+                {"policy": idle, "source_sha256": expected_sources, "passed": True}):
+            raise RuntimeError("Candidate cpuidle preflight source evidence differs")
     if profile in CRYSTAL_PROFILES:
         crystal = json.loads((evidence / "efficiency/crystal-integration.json").read_text(encoding="utf-8"))
         if crystal.get("passed") is not True or crystal.get("source_commit") != CRYSTAL_PIN:
@@ -119,7 +136,7 @@ def validate_profile_evidence(evidence, patches, expected_profile):
                 if (crystal.get("sddc_kunit_config_patch") != test or
                         test["base_after_integrity_sha256"] != integrity["patched_sha256"]):
                     raise RuntimeError("Candidate lacks the reviewed test-only SDDC KUnit overlay")
-            if profile == COMBINED_PROFILE:
+            if profile in COMBINED_PROFILES:
                 stats = stats_patch_policy()
                 if crystal.get("sddc_stats_patch") != stats or any(
                         imported.get(name) != values["original_sha256"] for name, values in stats["files"].items()):

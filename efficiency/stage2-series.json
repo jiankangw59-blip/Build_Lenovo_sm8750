@@ -10,5 +10,15 @@
     "sha256": "d79e65909fca38502ca726a6a5e884c62dd2cf771296327b9be9aefe484c0822",
     "upstream_commit": "768e5977bc4f8f8ebcb501ac3fb822d548896686",
     "adaptation": "Retain all OEM scan_control fields and use only byte45 padding; defaults anon/clean-low/clean-min=0/5/0"
+  },
+  "cpuidle-refinement": {
+    "file": "patches/cpuidle-refinement-6.6.89.patch",
+    "sha256": "41d5f251b8b5cca264dcfeac4f14184022dbe5d433b5270aa9d4e0d92923e919",
+    "upstream_commits": [
+      "80606f4eb8d7484ab7f7d6f0fd30d71e6fbcf328",
+      "e57c2bf2e89df3b176ab579abfd3ed54fd27034c",
+      "106a2662e655363db0dd73d9a91e1ec9afe9f4b1"
+    ],
+    "adaptation": "Add only after the accepted combined 21 patches: complete Menu stopped-tick safe-timer handling and TEO final deadline clamp; preserve OEM utilization/no-poll policy, ABI and qcom-cpu-lpm runtime selection"
   }
 }

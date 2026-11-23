@@ -25,14 +25,33 @@ The isolated builds and the final combined profile have distinct, checked polici
 | `crystal-lz4kds-test` | `lz4kd` | no | enabled for independent zramN trials | enabled |
 | `crystal-lz4kds` | `lz4kds` | yes | enabled | disabled |
 | `crystal-lz4kds-le9uo` | `lz4kds` | yes | enabled, with le9uo and read-only integrity stats | disabled |
+| `crystal-lz4kds-le9uo-idle` | `lz4kds` | yes | same combined data plane, plus the separate idle refinement | disabled |
 
-The combined profile retains Kcompressd and adds the unchanged, already accepted
+The combined profiles retain Kcompressd and add the unchanged, already accepted
 le9uo patch after it: `anon_min_ratio=0`, `clean_low_ratio=5`,
 `clean_min_ratio=0`, and `workingset_protection=1` by default. The original
 patches apply sequentially with `--fuzz=0`; no rebased replacement is used.
 The three earlier isolated profiles retain their existing dependencies and
 source/overlay chains. No performance or power benefit is inferred from combining
 previously separate functional checks.
+
+The additional `crystal-lz4kds-le9uo-idle` profile appends only the separately
+reviewed `cpuidle-refinement-6.6.89.patch` as item 22. The original 19 patches,
+Kcompressd and le9uo remain unchanged, and every imported/installed Crystal byte
+matches the original combined profile. The follow-up completes Menu's timer
+query when the tick is stopped and removes its older prediction fallback while
+retaining the OEM non-stopped I/O-wait latency adjustment. It also removes the
+old TEO veto only from the final real-timer deadline clamp, preserving the OEM
+utilization branch, exported APIs and no-poll helper behavior.
+
+`idle_refinement.py` pins the CI input and final output digests of Menu/TEO and
+the unchanged `gov.h` prerequisite. Apply checks both stages, precompile checks
+the actual source files, and boot preparation requires the exact 22-patch order,
+refinement metadata and source preflight report. Older profiles never require
+this new patch or metadata. The new profile generates the same configuration
+commands as the original combined profile: it does not select Menu/TEO or change
+the device's existing `qcom-cpu-lpm` runtime governor. These source corrections
+are not evidence of a power benefit while another governor is selected.
 
 The test profile keeps the main device's build-time default on ordinary
 compression, while allowing a private zramN to select `lz4kds`. Its ordinary
@@ -78,7 +97,7 @@ preparation requires the exact overlay record and the profile-specific installed
 digest for every LZ4KDS profile. The pure `crystal` profile never reads or requires this patch,
 so the earlier pure-control build remains independently verifiable.
 
-Only `crystal-lz4kds-le9uo` additionally applies `sddc-integrity-stats.patch`.
+The two combined profiles additionally apply `sddc-integrity-stats.patch`.
 It appends the read-only `integrity_checks`, `integrity_failures` and
 `integrity_skipped` counters while retaining the previous 46 `sddc_stat` fields
 in order. This enables a later policy controller to observe integrity state;
@@ -124,7 +143,8 @@ Build checks must include every Crystal object, original imported-symbol CRCs,
 core BTF layouts, the final configuration, and boot kernel readback. A successful
 source import or build is not runtime acceptance. The three isolated Crystal
 profiles retain exactly the accepted 19 baseline patches plus Kcompressd; the
-combined profile adds le9uo as item 21. Boot preparation checks
+original combined profile adds le9uo as item 21, and only the separate idle
+profile appends the refinement as item 22. Boot preparation checks
 their order/digests, the profile's source inventory, default codec, primary lock
 and KUnit selection before any device-side packing operation.
 

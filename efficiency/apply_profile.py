@@ -10,6 +10,8 @@ from integrate_rekernel import integrate
 from integrate_crystal import (CRYSTAL_PROFILES, PROFILE_CHOICES, crystal_configuration,
                                crystal_configuration_errors, integrate as integrate_crystal,
                                integrity_installed_hashes, kunit_boot_errors, stage2_profiles, unexpected_sddc_options)
+from idle_refinement import (PROFILE as IDLE_PROFILE, check_source_hashes as check_idle_hashes,
+                             refinement_policy as idle_policy, source_report as idle_source_report)
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -29,10 +31,15 @@ def apply(kernel, report, profile="baseline"):
     report.mkdir(parents=True, exist_ok=True)
     applied = []
     patches = list(manifest["patches"])
+    idle = idle_policy() if profile == IDLE_PROFILE else None
     followup_names = stage2_profiles(profile)
     if followup_names:
         followups = json.loads((HERE / "stage2-series.json").read_text(encoding="utf-8"))
         patches.extend(followups[name] for name in followup_names)
+    if idle and (len(patches) != 22 or [item["file"] for item in patches[-3:]] != [
+            "patches/kcompressd-6.6.89.patch", "patches/le9uo-6.6.89.patch", idle["patch_file"]] or
+            patches[-1]["sha256"] != idle["patch_sha256"]):
+        raise RuntimeError("Idle refinement requires the exact final three-patch order")
     for item in patches:
         path = HERE / item["file"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
@@ -45,6 +52,9 @@ def apply(kernel, report, profile="baseline"):
             raise RuntimeError("Patch destination escapes the kernel tree")
         before = {str(target.relative_to(kernel)): hashlib.sha256(target.read_bytes()).hexdigest()
                   if target.exists() else None for target in targets}
+        if idle and item["file"] == idle["patch_file"]:
+            check_idle_hashes(before, "before", idle)
+            idle_source_report(kernel, "before", idle)
         # Apply relative to this source tree and verify actual byte changes,
         # independently of Git repository discovery in nested CI directories.
         command = ["patch", "--batch", "--forward", "--fuzz=0", "-p1", "-i", str(path)]
@@ -52,6 +62,9 @@ def apply(kernel, report, profile="baseline"):
         run(command, kernel)
         after = {str(target.relative_to(kernel)): hashlib.sha256(target.read_bytes()).hexdigest()
                  for target in targets}
+        if idle and item["file"] == idle["patch_file"]:
+            check_idle_hashes(after, "after", idle)
+            idle_source_report(kernel, "after", idle)
         if not any(before[name] != digest for name, digest in after.items()):
             raise RuntimeError("Patch returned success without changing source: " + item["file"])
         applied.append({**item, "before": before, "after": after})
@@ -60,6 +73,8 @@ def apply(kernel, report, profile="baseline"):
         integrate_crystal(kernel, report / "crystal-integration.json", profile)
     result = {"version": version, "profile": profile, "source": manifest["base_commit"], "applied": applied,
               "build_verified": False, "runtime_verified": False}
+    if idle:
+        result["cpuidle_refinement"] = idle
     (report / "efficiency-patches.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
 
@@ -115,6 +130,7 @@ def configure(kernel, profile="baseline"):
 
 
 def verify(kernel, report, profile="baseline"):
+    idle = idle_source_report(kernel) if profile == IDLE_PROFILE else None
     actual = (kernel / "out/.config").read_text(encoding="utf-8").splitlines()
     required = [line for line in (HERE / "ace6-baseline.config").read_text(encoding="utf-8").splitlines()
                 if line.startswith("CONFIG_")]
@@ -176,6 +192,8 @@ def verify(kernel, report, profile="baseline"):
     if "GFP_KERNEL | __GFP_NOFAIL" not in erofs:
         missing.append("6.6 EROFS synchronous bounce allocation retry")
     result = {"missing": missing, "forbidden": selected, "passed": not (missing or selected)}
+    if idle:
+        result["cpuidle_refinement"] = idle
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))

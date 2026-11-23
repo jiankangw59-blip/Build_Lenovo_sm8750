@@ -13,11 +13,14 @@ HERE = Path(__file__).resolve().parent / "crystal"
 DRIVER = "drivers/crystalfrostwork/crystal_hybridswap"
 PIN = "13d291aef3d1d9607ad3fa5ff30dc23b2888a3da"
 COMBINED_PROFILE = "crystal-lz4kds-le9uo"
+IDLE_PROFILE = "crystal-lz4kds-le9uo-idle"
+COMBINED_PROFILES = frozenset((COMBINED_PROFILE, IDLE_PROFILE))
 CRYSTAL_PROFILES = {
     "crystal": {"sddc": False, "compressor": "lz4kd", "lock": True, "kunit": False},
     "crystal-lz4kds-test": {"sddc": True, "compressor": "lz4kd", "lock": False, "kunit": True},
     "crystal-lz4kds": {"sddc": True, "compressor": "lz4kds", "lock": True, "kunit": False},
     COMBINED_PROFILE: {"sddc": True, "compressor": "lz4kds", "lock": True, "kunit": False},
+    IDLE_PROFILE: {"sddc": True, "compressor": "lz4kds", "lock": True, "kunit": False},
 }
 PROFILE_CHOICES = ("baseline", "kcompressd", "le9uo", *CRYSTAL_PROFILES)
 SDDC_INTEGRITY = {
@@ -198,7 +201,7 @@ def integrity_installed_hashes(profile):
     if profile == "crystal-lz4kds-test":
         test = kunit_config_patch_policy()
         return {test["target"]: test["patched_sha256"]}
-    if profile != COMBINED_PROFILE:
+    if profile not in COMBINED_PROFILES:
         return {integrity["source_file"]: integrity["patched_sha256"]}
     stats = stats_patch_policy()
     hashes = {name: values["after_stats_sha256"] for name, values in stats["files"].items()}
@@ -211,6 +214,8 @@ def stage2_profiles(profile):
         raise ValueError("Unknown efficiency profile: " + profile)
     if profile == "baseline":
         return ()
+    if profile == IDLE_PROFILE:
+        return ("kcompressd", "le9uo", "cpuidle-refinement")
     if profile == COMBINED_PROFILE:
         return ("kcompressd", "le9uo")
     return ("kcompressd",) if profile in CRYSTAL_PROFILES else (profile,)
@@ -318,7 +323,7 @@ def integrate(kernel, report, profile="crystal"):
         codec_tests = pending[DRIVER + "/sddc/crystal_sddc_codec_test.c"].decode("utf-8")
         if len(re.findall(r"\bKUNIT_CASE\(", codec_tests)) != integrity["expected_codec_cases"]:
             raise RuntimeError("Unexpected SDDC codec KUnit case count")
-        if profile == COMBINED_PROFILE:
+        if profile in COMBINED_PROFILES:
             stats = apply_stats_patch(pending, kernel)
         if settings["kunit"]:
             pending[name], kunit_config = apply_kunit_config_patch(pending[name], kernel)
@@ -397,8 +402,10 @@ def integrate(kernel, report, profile="crystal"):
 #endif
 """
         condition = "!" if settings["kunit"] else ""
+        # The idle refinement must not change any Crystal installed byte.
+        guard_profile = COMBINED_PROFILE if profile in COMBINED_PROFILES else profile
         guard += (f"#if {condition}IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST)\n"
-                  f'#error "Unexpected SDDC KUnit selection for {profile}"\n#endif\n')
+                  f'#error "Unexpected SDDC KUnit selection for {guard_profile}"\n#endif\n')
     pending[name] = text.replace(anchor, anchor + guard).encode("utf-8")
 
     links = {
