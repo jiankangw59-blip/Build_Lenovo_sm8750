@@ -33,7 +33,11 @@ def compare(native, crystal):
     return {"comparison_performed": True, "pattern_schema": native["pattern_schema"],
             "native_codec": native["codec"], "crystal_codec": crystal["codec"], "rounds": rows,
             "scope": "Private loop logical I/O includes internal flush/GC, excludes file-allocation filesystem metadata; not UFS NAND writes",
-            "packing_isolated_from_codec_change": native["codec"] == crystal["codec"] == "lz4kd",
+            # Native Crypto API and the SDDC test kernel's private base encoder
+            # may share a codec name without sharing an implementation.
+            "encoder_implementation_equivalence_verified": False,
+            "packing_isolated_from_codec_change": False,
+            "attribution": "Combined backend result; codec names alone cannot isolate packing from encoder differences",
             "ufs_nand_writes_measured": False, "power_savings_verified": False}
 
 
