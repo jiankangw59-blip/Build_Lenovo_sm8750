@@ -56,9 +56,9 @@
     },
     {
       "file": "patches/lz4kd-native-no-blacklist.patch",
-      "sha256": "b577ce8e5c8f0f0fd182bd8fde67f1c56f23fb267dcd806d9ae78bf3ccb207f0",
+      "sha256": "4d57024660726804f702d2940ec0a151efb46e7e24ceafb85ad2246c54eb0f9c",
       "source": "https://github.com/luyancib-org/kernel_patches/blob/1434ad8799fe267aeae7d91fb667473d80c8f73d/other/lz4kd.patch",
-      "adaptation": "Removed the entire kernel/module/main.c hard blacklist; native ZRAM data-plane source remains unchanged."
+      "adaptation": "Remove OEM module blacklist and per-library -O3 override; native ZRAM remains unchanged and uses global -O2."
     },
     {
       "file": "patches/pending-ipi-helper-upstream.patch",

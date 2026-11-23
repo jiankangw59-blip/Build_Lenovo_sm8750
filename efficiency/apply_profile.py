@@ -109,6 +109,8 @@ def verify(kernel, report):
         # Check compiler flags rather than comments or compiler feature probes.
         if re.search(r"^KBUILD_CFLAGS\s*\+?=.*-O3", (kernel / "Makefile").read_text(encoding="utf-8"), re.M):
             selected.append("KBUILD_CFLAGS uses -O3")
+    if "-O3" in (kernel / "lib/lz4kd/Makefile").read_text(encoding="utf-8"):
+        selected.append("LZ4KD overrides the global -O2 policy")
     erofs = (kernel / "fs/erofs/zdata.c").read_text(encoding="utf-8")
     if "z_erofs_decompress_pcluster(&be, io->eio ? -EIO : 0);" not in erofs:
         missing.append("6.6 EROFS queue must propagate only physical I/O failure between clusters")
