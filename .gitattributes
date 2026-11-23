@@ -1,1 +1,2 @@
 efficiency/crystal/source/** -text -whitespace
+efficiency/lz4kds_lab/vendor/** -text -whitespace
