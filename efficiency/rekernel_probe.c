@@ -9,6 +9,36 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+static int multicast_groups(const unsigned char *cursor, int left) {
+    while (left >= NLA_HDRLEN) {
+        const struct nlattr *group = (const struct nlattr *)cursor;
+        if (group->nla_len < NLA_HDRLEN || group->nla_len > left) return -1;
+        const unsigned char *field = cursor + NLA_HDRLEN;
+        int available = group->nla_len - NLA_HDRLEN;
+        const char *name = NULL;
+        unsigned id = 0;
+        size_t name_length = 0;
+        while (available >= NLA_HDRLEN) {
+            const struct nlattr *a = (const struct nlattr *)field;
+            if (a->nla_len < NLA_HDRLEN || a->nla_len > available) return -1;
+            size_t length = a->nla_len - NLA_HDRLEN;
+            unsigned attribute = a->nla_type & NLA_TYPE_MASK;
+            if (attribute == CTRL_ATTR_MCAST_GRP_NAME && length) {
+                name = (const char *)field + NLA_HDRLEN;
+                name_length = length;
+            }
+            if (attribute == CTRL_ATTR_MCAST_GRP_ID && length == sizeof(id))
+                memcpy(&id, field + NLA_HDRLEN, sizeof(id));
+            unsigned step = NLA_ALIGN(a->nla_len);
+            field += step; available -= step;
+        }
+        if (name && id) printf("multicast_group=%.*s id=%u\n", (int)name_length, name, id);
+        unsigned step = NLA_ALIGN(group->nla_len);
+        cursor += step; left -= step;
+    }
+    return 0;
+}
+
 static int query(int fd, unsigned type, unsigned cmd, unsigned seq,
                  unsigned attr, const char *value, unsigned *family) {
     unsigned char request[256] = {0}, response[16384];
@@ -58,8 +88,8 @@ static int query(int fd, unsigned type, unsigned cmd, unsigned seq,
                 if (family && attribute == CTRL_ATTR_FAMILY_ID && length == 2) {
                     uint16_t id; memcpy(&id, data, 2); *family = id;
                     printf("family=rekernel id=%u\n", *family);
-                    return 0;
                 }
+                if (family && attribute == CTRL_ATTR_MCAST_GROUPS && multicast_groups(data, length)) return -1;
                 if (!family && attribute == 1 && length) {
                     printf("version_response=%.*s\n", (int)length, data);
                     return 0;
@@ -67,6 +97,7 @@ static int query(int fd, unsigned type, unsigned cmd, unsigned seq,
                 unsigned step = NLA_ALIGN(a->nla_len);
                 cursor += step; left -= step;
             }
+            if (family && *family) return 0;
         }
     }
     fprintf(stderr, "No matching ReKernel reply\n");
