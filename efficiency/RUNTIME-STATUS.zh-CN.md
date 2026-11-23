@@ -46,10 +46,26 @@ Kcompressd 队列深度为 24，kcompressd0 为内核线程、nice=19、CPU0–5
 
 测试进程只分配 64 MiB，设置 MADV_COLD，未使用 MADV_PAGEOUT 或填满 RAM；64 MiB 数据完整性校验通过，但本次测试进程自身没有被换出。因此 `kcompressd_probe.py` 的严格“自有页交换槽关联”判定仍返回未通过，不能把这次读回称为经 Kcompressd 换出后的已知数据校验。基线阴性对照在缺少功能时返回未通过且不启动负载或跟踪；当前自有页关联与性能受控对比仍待完成。私有跟踪实例已清理，原有全局 trace 状态保持不变。
 
+## le9uo 独立版本实机状态
+
+已按用户授权切换到 [45234533599](https://github.com/jiankangw59-blip/Build_Oneplus_Realme_Action/actions/runs/45234533599) 并重启；Kcompressd boot 已另存用于回退。当前 boot_b SHA256 为 `7b8002be51e53302a83a27320bc5a95964718d54f5a91a6cd7247d8ecaa33431`，notes 为 `17729afbb564bd411610b7240a4425f8e452630434b587a30acf1c5c29b42916`。
+
+本次启动五项底线检查通过。`workingset_protection=1`，匿名硬下限、干净缓存软下限、干净缓存硬下限为 0/5/0；同值写入和越界拒绝验证通过，配置保持原值。干净文件页快照按 zoneinfo 的 `nr_dirty` 扣除脏页；本次 5% 软下限约为 755.76 MiB，干净文件页远高于该值，因此未证明保护分支已触发或 refault/性能改善。
+
+本次自启控制器经熄屏 300 秒后自动写出 128 MiB，独立写计数从 64 增至 32,832，含 I/O 共 304 秒，同启动/当前进程/预算/读写错误检查全部通过。前后各一次 4 MiB 自有页面回写读回通过。AppOpt、qcom-cpu-lpm 和回收水位 99 保持原值，未增加全局内存压力或启动功耗采样。早期有 12 条 WARNING，其位置类别与已保存的两个 Kcompressd 启动快照相同；这不等于整机日志零警告，也不能据此认定为 le9uo 新增问题。
+
+## Crystal / ZMS / LZ4KDS 移植目标
+
+用户已明确将 ZRAM 最终目标改为 Crystal HybridSwap + ZMS + LZ4KDS。纯 LZ4KD 候选保留作对照及回退。固定公开源码提交为 `13d291aef3d1d9607ad3fa5ff30dc23b2888a3da`；用户提供的三 KO 反编译包用于核对接口、结构和数据路径。其 vermagic 为 6.6.118，不能直接当作本机 6.6.89 兼容模块；公开源和 KO 是不同变体，尚无证据确定整体版本先后。
+
+已增加纯 LZ4KD Crystal 独立构建，保留原有 6.6.89、Clang 18、O2、ThinLTO、Kcompressd、原厂 CRC 和 BTF 布局检查。未导入硬件覆盖、模块替换或私有分配器。充电门控改用公开 power-supply API，周期 GC 采用 deferrable timer，保留必要写入与整理；它仍可能在 CPU 因其他事件活跃时周期执行，不能称为无轮询。
+
+LZ4KDS 独立源码实验已完成宿主编译与 ARM64 交叉编译，普通页、完整 8 KiB 差分窗口、压缩流差分恢复、损坏输入、保护页及分配失败测试通过。详细范围见 `lz4kds_lab/README.zh-CN.md`；这尚未执行手机内核中的 SDDC 引用管理、异步转换或 ZMS 并发路径，也没有证明已解决错页/零页问题。Crystal 的真实 packed 落盘/冷读、LZ4KDS 独立设备验收和系统主设备启用仍待完成。
+
 ## 待完成
 
 - 用户选择先做日常体感测试，功耗采样暂缓。一次性采样进程已在冷却阶段终止，没有正式测量数据。新旧内核均无有效功耗基线，不作省电幅度结论；后续若恢复采样，应补测上一版 6.6.89，并采用同条件的旧版/新版对比。采样器不会自动重启。
-- Kcompressd 与 le9uo 独立候选均已构建成功，分别为 [45236244009](https://github.com/jiankangw59-blip/Build_Oneplus_Realme_Action/actions/runs/45236244009) 和 [45234533599](https://github.com/jiankangw59-blip/Build_Oneplus_Realme_Action/actions/runs/45234533599)。两者均完成主机复核：32,921 项 CRC、六组 BTF 布局及候选 boot 打包读回均通过。Kcompressd 已刷入并完成上述检查；le9uo 尚未刷入，两者的性能受控对比仍待完成。
+- Kcompressd 与 le9uo 独立候选均已完成构建、32,921 项 CRC、六组 BTF 布局、boot 打包读回和上述实机验收；两者的性能受控对比仍待完成。当前手机处于 le9uo 版本。
 - Kcompressd 候选明确 nice=19、CPU0–5，保留异步与原生 zswap 的 writeback 配对语义。
 - Kcompressd 首次候选构建在编译预检中失败：6.6.89 缺少上游候选依赖的 MTHP_STAT_ZSWPOUT、mem_cgroup_zswap_writeback_enabled 和 zswap_is_enabled。后续适配沿用已验收基线的 CONFIG_ZSWAP=n，只允许原生同步 ZRAM 卸载，不引入虚构的新版接口替身。保留本版本的原生 writeback 配对语义，修订版已完成编译及 KMI 检查。
 - le9uo 候选将三个新标志放在 scan_control 的既有 byte45 填充中；额外 BTF 检查禁止移动原字段。先使用 0/5/0 的匿名硬下限、干净缓存软下限、干净缓存硬下限比例，避免上游默认两个 15% 硬下限提前触发 OOM。其保护范围为干净文件缓存，不能称为只保护可执行文件。
