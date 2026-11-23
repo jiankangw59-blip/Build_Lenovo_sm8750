@@ -2,12 +2,18 @@
 #include "owned_logic.h"
 #include "lifecycle_pattern.h"
 #include "private_logic.h"
+#include "backing_logic.h"
 
 #ifdef _WIN32
 #define API __declspec(dllexport)
 #else
 #define API __attribute__((visibility("default")))
 #endif
+
+API int backing_path_valid(const char *path)
+{
+    return private_backing_path(path);
+}
 
 API void pattern_fill(unsigned char *out, unsigned page, uint64_t seed)
 {

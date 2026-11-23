@@ -16,7 +16,8 @@ python efficiency/crystal_tests/run_probe.py --serial DEVICE_SERIAL \
   --backend crystal --expected-notes COMPILED_NOTES_SHA256 \
   --expected-main-codec lz4kd --expected-main-sddc 0 \
   --codec lz4kd --expected-sddc 0 \
-  --binary FRESH_BUILD_DIR/crystal-block-probe --output CRYSTAL_REPORT.json
+  --binary FRESH_BUILD_DIR/crystal-block-probe \
+  --backing-binary FRESH_BUILD_DIR/crystal-backing-probe --output CRYSTAL_REPORT.json
 ```
 
 `--check-only` 只读核对，不读取有创建副作用的 `hot_add`。原生对照使用 `--backend native --codec lz4kd`。主设备的编解码器要求与新建私有设备独立；实验内核可保持主 zram0 为 lz4kd，只在新建的、尚未初始化的私有设备上选择 lz4kds。已匹配算法时跳过写入，以兼容同值写入也返回 EPERM 的 Crystal 锁定策略。
@@ -32,6 +33,8 @@ python efficiency/crystal_tests/compare.py --native NATIVE_REPORT.json \
   --crystal CRYSTAL_REPORT.json --output COMPARISON.json
 ```
 
-对照要求两边均为真实成功的实机报告、种子和完整输入相同。loop 指标包含该后端的 flush/GC I/O，但不包含创建测试文件的文件系统元数据，也不等于 UFS NAND 物理写入量。不同 codec 的对比不能把差异全部归因于 ZMS 打包；本工具不证明省电幅度。
+对照要求两边均为真实成功的实机报告、种子和完整输入相同，并采用 `owned-file-dio-sync-evict-mincore-v1`。旧 buffered-loop 报告会被拒绝混算。loop 指标包含该后端的 flush/GC I/O，但不包含创建测试文件的文件系统元数据，也不等于 UFS NAND 物理写入量。不同 codec 的对比不能把差异全部归因于 ZMS 打包；本工具不证明省电幅度。
+
+每轮先在尚未初始化、未绑定 backing 的私有 zramN 所对应新 loop 上，将逻辑块设为 4096 并启用 `LOOP_SET_DIRECT_IO`，双读回 ioctl status/sysfs dio=1。写回后除了同步 zramN，还对身份、inode、大小、0600/root 与 loop 绑定均重新核对的同一个 128 MiB 私有 backing FD 执行 fdatasync/fsync，再仅对此文件 DONTNEED。首次 verify 前以 PROT_NONE mmap/mincore 确认缓存页为 0；verify 后只观察，不先驱逐，要求仍为 0 与 DIO=1。这样能发现 F2FS 的 direct-I/O 回退造成的文件缓存驻留。不支持 DIO、同步失败或缓存不为空会拒绝冷读结论；缓存问题不等同于数据损坏。初始化阶段已有的缓存只记录，不能代替首次 verify 前后的检查。此流程不测 NAND 写入或断电持久性，也不修改系统其他缓存。
 
 失败清理会重新核对新设备和 loop 的所有权。若发现设备被激活、backing 改变或身份变化，保留设备、文件和阶段目录供人工核查，避免操作外来数据。

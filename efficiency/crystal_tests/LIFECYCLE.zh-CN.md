@@ -7,13 +7,14 @@
 1. 用旧 seed 的 sddc-pairs 充满，要求实际 alias 与 delta 计数均大于 0，并全量读回。
 2. 每 8 页仅把前 2 页覆盖为新 seed，校验整个 32 MiB：前 2 页必须是新数据，其余 6 页必须仍为旧数据。
 3. 仅 discard 每组前 2 页，再全量校验：这些页必须为零，其余旧数据保持不变。
-4. writeback 后显式 fdatasync/fsync，确认 ZMS dirty_pages=0 和物理写入增长，再首次冷读校验全部数据并要求物理读取增长。不清全局 cache。
+4. writeback 后同步私有 zramN，再经专用 helper 同步并定向驱逐同一 owner backing 文件缓存；首次冷读前后要求 loop status/sysfs DIO=1、4KiB 逻辑块与 mincore resident_pages=0。后置检查不先驱逐。保留 ZMS dirty_pages=0、前台 bd_stat 与 physical/loop 读取增长、全部已知数据校验条件。不清全局 cache，不测 NAND 或断电持久性。
 
 ```sh
 python efficiency/crystal_tests/run_lifecycle.py --serial DEVICE_SERIAL \
   --expected-notes EXPERIMENTAL_KERNEL_NOTES_SHA256 \
   --expected-main-codec lz4kd --expected-main-sddc 0 \
-  --binary FRESH_BUILD_DIR/crystal-lifecycle-probe --output LIFECYCLE_REPORT.json
+  --binary FRESH_BUILD_DIR/crystal-lifecycle-probe \
+  --backing-binary FRESH_BUILD_DIR/crystal-backing-probe --output LIFECYCLE_REPORT.json
 ```
 
 私有设备固定使用 lz4kds/SDDC=1。主设备可继续保持 lz4kd；工具不修改主设备算法或日常参数。缺少 Crystal 标记、编译支持或 notes 不匹配时必须在设备写入前退出。`--check-only` 只读预检。

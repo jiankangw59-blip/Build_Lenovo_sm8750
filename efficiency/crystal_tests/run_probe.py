@@ -96,12 +96,38 @@ class Target:
 
 
 class PrivateRound:
-    def __init__(self, root, stage, number, backend, codec, expected_sddc):
+    def __init__(self, root, stage, number, backend, codec, expected_sddc, backing_program=None):
         self.root, self.stage, self.backend = root, stage, backend
         self.codec, self.expected_sddc = codec, expected_sddc
         self.backing = f"{stage}/round-{number}.img"
         self.index = self.loop = self.inode = self.identity = None
         self.removed = False
+        self.backing_program = backing_program
+
+    def backing_check(self, mode):
+        self.assert_owned(require_backing=mode != "enable")
+        if mode not in ("enable", "check", "sync") or not self.backing_program:
+            raise RuntimeError("Dedicated owned-backing helper is required")
+        code = " ".join(shlex.quote(str(value)) for value in (
+            self.backing_program, mode, self.device, self.loop, self.backing,
+            self.backing_device, self.backing_inode))
+        result = json.loads(self.root(code, timeout=90))
+        if not (result.get("passed") is True and result.get("loop_status_direct_io") is True
+                and result.get("sysfs_dio") == 1
+                and type(result.get("resident_pages")) is int
+                and 0 <= result["resident_pages"] <= BACKING_BYTES // 4096
+                and (mode == "enable" or result["resident_pages"] == 0)
+                and result.get("loop_logical_block_bytes") == 4096
+                and result.get("backing_device") == self.backing_device
+                and result.get("backing_inode") == self.backing_inode
+                and result.get("backing_bytes") == BACKING_BYTES):
+            raise RuntimeError("Private DIO/cache ownership check did not pass")
+        if mode == "sync" and not (result.get("fdatasync") is True and result.get("fsync") is True
+                                    and result.get("cache_eviction_requested") is True):
+            raise RuntimeError("Private backing sync/eviction did not complete")
+        if mode != "sync" and result.get("cache_eviction_requested") is not False:
+            raise RuntimeError("Read-only cache observation must never evict first")
+        return result
 
     def assert_owned(self, require_backing=False):
         if self.index is None or not 0 < self.index < 1024:
@@ -153,6 +179,8 @@ test -b {device}
         # loop_file_name field, even when the underlying file is valid.
         if len(self.backing.encode("utf-8")) >= 64:
             raise RuntimeError("Choose a private backing path shorter than 64 bytes")
+        if not self.backing_program:
+            raise RuntimeError("Dedicated owned-backing helper is required before creating a device")
         self.index = int(self.root("cat /sys/class/zram-control/hot_add"))
         if not 0 < self.index < 1024:
             raise RuntimeError("hot_add returned unsafe index; never reset zram0")
@@ -183,6 +211,7 @@ test "$(stat -c %s {self.backing})" = {BACKING_BYTES}
 """)
         self.backing_metadata = self.root(f"stat -c '%u:%g %a %s' {self.backing}")
         self.backing_label = self.root(f"ls -Zd {self.backing}")
+        self.backing_device, self.backing_inode = map(int, self.root(f"stat -c '%d %i' {self.backing}").split())
         if self.backing_metadata != f"0:0 600 {BACKING_BYTES}" or "u:object_r:ksu_file:s0" not in self.backing_label:
             raise RuntimeError("Private backing permissions or SELinux label differ")
         self.loop = self.root("/system/bin/losetup -f")
@@ -195,6 +224,7 @@ test "$(stat -c %s {self.backing})" = {BACKING_BYTES}
         if self.root(f"cat /sys/block/{self.loop_name}/loop/backing_file") != self.backing:
             raise RuntimeError("Loop did not bind the owned file")
         self.assert_owned()
+        self.backing_direct_io_enabled = self.backing_check("enable")
         self.root(f"""set -e
 printf '%s\\n' {self.loop} > {self.sysfs}/backing_dev
 printf '%s\\n' {INPUT_BYTES} > {self.sysfs}/disksize
@@ -223,7 +253,8 @@ printf '%s\\n' 1 > {self.sysfs}/writeback_limit_enable
 def measure_round(private, program, seed, entry, pattern="mixed", require_conversions=False):
     entry.update(seed=seed, logical_input_bytes=INPUT_BYTES, passed=False,
                  device=private.device, initial=private.snapshot(),
-                 backing_metadata=private.backing_metadata, backing_label=private.backing_label)
+                 backing_metadata=private.backing_metadata, backing_label=private.backing_label,
+                 backing_direct_io_enabled=private.backing_direct_io_enabled)
     entry["fill"] = json.loads(private.root(f"{program} {private.device} write {seed} {pattern}", timeout=90))
     entry["before_writeback"] = private.snapshot()
     private.assert_owned(require_backing=True)
@@ -233,9 +264,12 @@ def measure_round(private, program, seed, entry, pattern="mixed", require_conver
     # No pattern page is read until this second, explicit flush succeeds.
     entry["post_writeback_flush"] = json.loads(private.root(
         f"{program} {private.device} flush {seed} {pattern}", timeout=90))
+    entry["post_writeback_backing_sync"] = private.backing_check("sync")
     entry["after_flush_before_first_read"] = private.snapshot()
+    entry["backing_before_first_read"] = private.backing_check("check")
     entry["first_full_readback"] = json.loads(private.root(
         f"{program} {private.device} verify {seed} {pattern}", timeout=90))
+    entry["backing_after_first_read"] = private.backing_check("check")
     entry["after_first_read"] = private.snapshot()
     before = entry["before_writeback"]
     flushed = entry["after_flush_before_first_read"]
@@ -260,6 +294,10 @@ def measure_round(private, program, seed, entry, pattern="mixed", require_conver
             and entry["first_full_readback"].get("pattern_schema") == (SCHEMA if pattern == "mixed" else PAIRS_SCHEMA)
             and entry["fill"]["fnv1a64"] == entry["first_full_readback"]["fnv1a64"],
         "explicit_post_writeback_flush": entry["post_writeback_flush"].get("passed") is True,
+        "owned_backing_file_synced_and_evicted": entry["post_writeback_backing_sync"].get("passed") is True,
+        "direct_io_and_zero_file_cache_before_and_after_read": all(
+            entry[key].get("passed") is True and entry[key].get("resident_pages") == 0
+            for key in ("backing_before_first_read", "backing_after_first_read")),
         "all_zms_dirty_pages_flushed": clean,
         "backend_writes_increased": writes > 0,
         "first_read_reached_backend": cold_read_reached_backend(flushed, after, private.backend),
@@ -289,7 +327,7 @@ def measure_round(private, program, seed, entry, pattern="mixed", require_conver
         "private_loop_read_bytes_during_first_read": loop_read_sectors * 512,
         "private_loop_flush_ios_including_internal_io": (after["loop"]["flush_ios"] -
             entry["initial"]["loop"]["flush_ios"]) if after["loop"]["flush_ios"] is not None else None,
-        "scope": "Backend/loop logical I/O including its flush/GC; not UFS NAND physical writes",
+        "scope": "Synced owned backing, loop DIO and file cache checked empty before/after read; loop I/O includes internal GC; no NAND/power-loss durability measurement",
     }
     entry.update(checks=checks, passed=all(checks.values()))
     return entry
@@ -323,6 +361,10 @@ def run(args):
         if blob[:6] != b"\x7fELF\x02\x01" or int.from_bytes(blob[18:20], "little") != 183:
             raise RuntimeError("Provide the compiled Android ARM64 helper")
         binary_sha = hashlib.sha256(blob).hexdigest()
+        backing_blob = args.backing_binary.read_bytes()
+        if backing_blob[:6] != b"\x7fELF\x02\x01" or int.from_bytes(backing_blob[18:20], "little") != 183:
+            raise RuntimeError("Provide the compiled Android ARM64 owned-backing helper")
+        backing_sha = hashlib.sha256(backing_blob).hexdigest()
         before_main = main_config()
         result["main_zram_configuration_before"] = before_main
         result["device_mutations_started"] = True
@@ -334,8 +376,14 @@ def run(args):
             raise RuntimeError("Staged helper checksum mismatch")
         root(f"set -e; chmod 700 {program}; chcon u:object_r:ksu_file:s0 {program}")
         result["helper_sha256"] = binary_sha
+        backing_program = stage + "/backing-probe"
+        target.adb("push", str(args.backing_binary), backing_program)
+        if root(f"sha256sum {backing_program}").split()[0] != backing_sha:
+            raise RuntimeError("Staged owned-backing helper checksum mismatch")
+        root(f"set -e; chmod 700 {backing_program}; chcon u:object_r:ksu_file:s0 {backing_program}")
+        result["backing_helper_sha256"] = backing_sha
         for number, seed in enumerate(SEEDS):
-            private = PrivateRound(root, stage, number, args.backend, args.codec, args.expected_sddc)
+            private = PrivateRound(root, stage, number, args.backend, args.codec, args.expected_sddc, backing_program)
             entry = {"seed": seed, "passed": False}
             result["rounds"].append(entry)
             try:
@@ -380,7 +428,7 @@ def run(args):
                 result["protected_baseline_readback_error"] = str(error)
         if stage and cleanup_ok:
             try:
-                root(f"set -e; test ! -L {stage}; rm -f {stage}/block-probe; rmdir {stage}")
+                root(f"set -e; test ! -L {stage}; rm -f {stage}/block-probe {stage}/backing-probe; rmdir {stage}")
                 result["staging_cleanup"] = "complete"
             except Exception as error:
                 result["staging_cleanup"] = str(error)
@@ -404,11 +452,12 @@ if __name__ == "__main__":
     parser.add_argument("--expected-main-sddc", type=int, choices=[0, 1], default=0)
     parser.add_argument("--expected-notes", action="append", required=True)
     parser.add_argument("--binary", type=Path)
+    parser.add_argument("--backing-binary", type=Path)
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if not args.check_only and not args.binary:
-        parser.error("Provide --binary for a writeback test")
+    if not args.check_only and (not args.binary or not args.backing_binary):
+        parser.error("Provide --binary and --backing-binary for a writeback test")
     if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in args.expected_notes):
         parser.error("Each notes entry must be a full lowercase SHA256")
     if args.backend == "native" and (args.codec != "lz4kd" or args.expected_sddc or args.expected_main_sddc):

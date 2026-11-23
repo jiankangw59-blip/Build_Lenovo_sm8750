@@ -46,6 +46,16 @@ def build(args):
     lifecycle_blob = lifecycle_binary.read_bytes()
     if lifecycle_blob[:6] != b"\x7fELF\x02\x01" or int.from_bytes(lifecycle_blob[18:20], "little") != 183:
         raise RuntimeError("Lifecycle compiler output is not AArch64 ELF64")
+    backing_binary = args.output / "crystal-backing-probe"
+    backing_command = [str(compiler), *flags, str(HERE / "backing_probe.c"), "-o", str(backing_binary)]
+    result = subprocess.run(backing_command, capture_output=True)
+    (args.output / "backing-build.stdout.txt").write_bytes(result.stdout)
+    (args.output / "backing-build.stderr.txt").write_bytes(result.stderr)
+    if result.returncode:
+        raise RuntimeError(result.stderr.decode("utf-8", "replace"))
+    backing_blob = backing_binary.read_bytes()
+    if backing_blob[:6] != b"\x7fELF\x02\x01" or int.from_bytes(backing_blob[18:20], "little") != 183:
+        raise RuntimeError("Owned-backing compiler output is not AArch64 ELF64")
     report = {"android_compiled": True, "android_device_used": False, "runtime_test_performed": False,
               "android_command": command, "helper": str(binary),
               "helper_sha256": hashlib.sha256(blob).hexdigest(),
@@ -53,6 +63,8 @@ def build(args):
               "owned_helper_sha256": hashlib.sha256(owned_blob).hexdigest(),
               "lifecycle_helper": str(lifecycle_binary), "lifecycle_command": lifecycle_command,
               "lifecycle_helper_sha256": hashlib.sha256(lifecycle_blob).hexdigest(),
+              "backing_helper": str(backing_binary), "backing_command": backing_command,
+              "backing_helper_sha256": hashlib.sha256(backing_blob).hexdigest(),
               "source_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                                  for p in HERE.iterdir() if p.is_file()}}
     if os.name == "nt":

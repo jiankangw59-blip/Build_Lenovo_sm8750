@@ -42,6 +42,10 @@ def run(args):
         if blob[:6] != b"\x7fELF\x02\x01" or int.from_bytes(blob[18:20], "little") != 183:
             raise RuntimeError("Require the compiled ARM64 lifecycle helper")
         result["helper_sha256"] = hashlib.sha256(blob).hexdigest()
+        backing_blob = args.backing_binary.read_bytes()
+        if backing_blob[:6] != b"\x7fELF\x02\x01" or int.from_bytes(backing_blob[18:20], "little") != 183:
+            raise RuntimeError("Require the compiled ARM64 owned-backing helper")
+        result["backing_helper_sha256"] = hashlib.sha256(backing_blob).hexdigest()
         result["main_configuration_before"] = main_config()
         result["device_mutations_started"] = True
         stage = "/data/adb/ace6lc-" + uuid.uuid4().hex[:20]
@@ -51,9 +55,14 @@ def run(args):
         if root(f"sha256sum {program}").split()[0] != result["helper_sha256"]:
             raise RuntimeError("Staged lifecycle helper checksum mismatch")
         root(f"set -e; chmod 700 {program}; chcon u:object_r:ksu_file:s0 {program}")
+        backing_program = stage + "/backing-probe"
+        target.adb("push", str(args.backing_binary), backing_program)
+        if root(f"sha256sum {backing_program}").split()[0] != result["backing_helper_sha256"]:
+            raise RuntimeError("Staged owned-backing helper checksum mismatch")
+        root(f"set -e; chmod 700 {backing_program}; chcon u:object_r:ksu_file:s0 {backing_program}")
         cases = ["sequential"] + (["concurrent"] if args.concurrent_seconds else [])
         for number, kind in enumerate(cases):
-            private = PrivateRound(root, stage, number, "crystal", "lz4kds", 1)
+            private = PrivateRound(root, stage, number, "crystal", "lz4kds", 1, backing_program)
             entry = {"kind": kind, "passed": False, "commands": {}, "snapshots": {}}
             result["cases"].append(entry)
 
@@ -106,6 +115,7 @@ def run(args):
             try:
                 private.prepare()
                 entry["device"] = private.device
+                entry["backing_direct_io_enabled"] = private.backing_direct_io_enabled
                 snap("initial")
                 result["runtime_test_attempted"] = True
                 command("fill")
@@ -136,8 +146,11 @@ def run(args):
                     root(f"set -e; printf 'all\\n' > {private.sysfs}/idle; printf 'idle\\n' > {private.sysfs}/writeback", timeout=120)
                     snap("after_writeback_before_flush")
                     command("flush")
+                    entry["post_writeback_backing_sync"] = private.backing_check("sync")
                     flushed = snap("after_flush_before_first_cold_read")
+                    entry["backing_before_first_cold_read"] = private.backing_check("check")
                     cold_verified = command("verify-discard", label="first-cold-read")
+                    entry["backing_after_first_cold_read"] = private.backing_check("check")
                     after = snap("after_first_cold_read")
                     writes = flushed["zms"]["physical_write_pages"] - before["zms"]["physical_write_pages"]
                     reads = after["zms"]["physical_read_pages"] - flushed["zms"]["physical_read_pages"]
@@ -147,6 +160,10 @@ def run(args):
                         "only_first_pair_discarded": discarded["pages_discarded"] == 2048,
                         "zeros_and_old_targets_correct_after_discard": discard_verified["bytes_processed"] == INPUT_BYTES,
                         "explicit_flush_completed": entry["commands"]["flush"]["result"]["fsync"] is True,
+                        "owned_backing_synced_and_evicted": entry["post_writeback_backing_sync"].get("passed") is True,
+                        "direct_io_zero_cache_before_and_after_read": all(
+                            entry[key].get("passed") is True and entry[key].get("resident_pages") == 0
+                            for key in ("backing_before_first_cold_read", "backing_after_first_cold_read")),
                         "zms_dirty_pages_zero_after_flush": flushed["zms"]["dirty_pages"] == 0,
                         "real_backend_writes": writes > 0,
                         "first_cold_read_reached_backend": cold_read_reached_backend(flushed, after, "crystal"),
@@ -192,7 +209,7 @@ def run(args):
                 result["passed"] = False
         if stage and cleanup_ok:
             try:
-                root(f"set -e; test ! -L {stage}; rm -f {stage}/probe; rmdir {stage}")
+                root(f"set -e; test ! -L {stage}; rm -f {stage}/probe {stage}/backing-probe; rmdir {stage}")
                 result["staging_cleanup"] = "complete"
             except Exception as error:
                 result["staging_cleanup"] = str(error)
@@ -213,11 +230,12 @@ if __name__ == "__main__":
     parser.add_argument("--new-seed", type=lambda x: int(x, 0), default=0x78EF019B)
     parser.add_argument("--concurrent-seconds", type=int, choices=[0, 2, 3, 4, 5], default=0)
     parser.add_argument("--binary", type=Path)
+    parser.add_argument("--backing-binary", type=Path)
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if not args.check_only and not args.binary:
-        parser.error("Provide the compiled lifecycle helper")
+    if not args.check_only and (not args.binary or not args.backing_binary):
+        parser.error("Provide the compiled lifecycle and owned-backing helpers")
     if any(not re.fullmatch(r"[0-9a-f]{64}", entry) for entry in args.expected_notes):
         parser.error("Notes entries must be full lowercase SHA256 values")
     if not 0 <= args.old_seed < 1 << 64 or not 0 <= args.new_seed < 1 << 64 or args.old_seed == args.new_seed:

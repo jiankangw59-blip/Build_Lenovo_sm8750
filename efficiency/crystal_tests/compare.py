@@ -3,6 +3,8 @@ import argparse
 import json
 from pathlib import Path
 
+STORAGE_READ_PROTOCOL = "owned-file-dio-sync-evict-mincore-v1"
+
 
 def compare(native, crystal):
     for data, backend in [(native, "native"), (crystal, "crystal")]:
@@ -10,6 +12,12 @@ def compare(native, crystal):
             raise RuntimeError("Comparison requires successful actual runs of both named backends")
         if not data.get("main_zram_configuration_unchanged") or not data.get("same_boot_after_test"):
             raise RuntimeError("A run changed its protected baseline or crossed a reboot")
+        if not data.get("rounds"):
+            raise RuntimeError("Use new matching DIO/backing-sync/cache-observation controls; do not mix old buffered reports")
+        for row in data.get("rounds", []):
+            if not row.get("passed") or not all(row.get("checks", {}).get(key) is True for key in (
+                    "owned_backing_file_synced_and_evicted", "direct_io_and_zero_file_cache_before_and_after_read")):
+                raise RuntimeError("Every compared round must have the explicit owned-backing cold-read checks")
     if native["pattern_schema"] != crystal["pattern_schema"]:
         raise RuntimeError("Patterns differ")
     by_seed = [{r["seed"]: r for r in data["rounds"]} for data in (native, crystal)]
@@ -31,6 +39,7 @@ def compare(native, crystal):
                      "loop_write_bytes_reduction": nw - cw,
                      "loop_write_reduction_fraction": (nw - cw) / nw})
     return {"comparison_performed": True, "pattern_schema": native["pattern_schema"],
+            "storage_read_protocol": STORAGE_READ_PROTOCOL,
             "native_codec": native["codec"], "crystal_codec": crystal["codec"], "rounds": rows,
             "scope": "Private loop logical I/O includes internal flush/GC, excludes file-allocation filesystem metadata; not UFS NAND writes",
             # Native Crypto API and the SDDC test kernel's private base encoder
