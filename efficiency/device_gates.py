@@ -22,17 +22,30 @@ def inspect(args):
     result["kernel_notes_sha256"] = notes
     result["expected_kernel_notes_match"] = (
         notes == args.expected_notes_sha256 if args.expected_notes_sha256 else None)
+    startup = ""
+    if args.startup_snapshot:
+        raw_startup = args.startup_snapshot.read_bytes()
+        startup = raw_startup.decode("utf-8")
+        if result["boot_id"] not in startup.splitlines() or not any(
+                line.split() == [notes, "/sys/kernel/notes"] for line in startup.splitlines()):
+            raise RuntimeError("Startup snapshot belongs to a different boot or kernel")
+        import hashlib
+        result["startup_snapshot"] = {"path": str(args.startup_snapshot),
+                                       "sha256": hashlib.sha256(raw_startup).hexdigest()}
 
     modules = {line.split()[0] for line in root("cat /proc/modules").splitlines() if line}
     critical = {"sched_walt", "qti_thermal_vendor_hooks", "qcom_cpufreq_thermal",
                 "thermal_config", "oplus_charger_present", "oplus_network_tuning"}
-    log = root("dmesg")
-    errors = [line for line in log.splitlines() if re.search(
+    log = root("dmesg") + "\n" + startup
+    candidates = [line for line in log.splitlines() if re.search(
         r"disagrees about version|unknown symbol|failed to load", line, re.I)]
+    firmware = [line for line in candidates if re.search(
+        r"cfg80211:\s+failed to load regulatory\.db\s*$", line, re.I)]
+    errors = [line for line in candidates if line not in firmware]
     result["gates"]["factory_modules"] = {
         "passed": not (critical - modules) and not errors,
         "missing_critical_modules": sorted(critical - modules), "load_errors": errors,
-        "loaded_modules": sorted(modules)}
+        "loaded_modules": sorted(modules), "firmware_warnings": firmware}
 
     lazy = root("cat /sys/module/rcutree/parameters/enable_rcu_lazy")
     threads = root("ps -A -T -o PID,TID,NAME")
@@ -74,7 +87,7 @@ def inspect(args):
     bd = root("cat /sys/block/zram0/bd_stat 2>/dev/null || true")
     counts = list(map(int, bd.split())) if re.fullmatch(r"\d+\s+\d+\s+\d+", bd) else []
     memory_errors = [line for line in log.splitlines() if re.search(
-        r"(?:zram|lz4kd).*(?:fail|error|corrupt)|(?:BUG:|Oops:|I/O error)", line, re.I)]
+        r"(?:zram|lz4kd).*(?:fail|error|corrupt)|(?:\bBUG:|\bOops:|I/O error)", line, re.I)]
     result["gates"]["zram_writeback"] = {
         "passed": "[lz4kd]" in algorithm and bool(counts)
                   and counts[1] > 0 and counts[2] > 0 and not memory_errors,
@@ -124,5 +137,7 @@ if __name__ == "__main__":
     parser.add_argument("--serial", required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--expected-notes-sha256")
+    parser.add_argument("--startup-snapshot", type=pathlib.Path,
+                        help="Earlier startup capture containing this boot ID, kernel-notes hash and init logs")
     args = parser.parse_args()
     raise SystemExit(0 if inspect(args) else 1)
