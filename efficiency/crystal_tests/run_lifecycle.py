@@ -9,7 +9,7 @@ import subprocess
 import time
 import uuid
 
-from run_probe import INPUT_BYTES, Target, PrivateRound, preflight
+from run_probe import INPUT_BYTES, Target, PrivateRound, preflight, cold_read_reached_backend
 
 
 def require_alias_and_delta(snapshot):
@@ -149,11 +149,12 @@ def run(args):
                         "explicit_flush_completed": entry["commands"]["flush"]["result"]["fsync"] is True,
                         "zms_dirty_pages_zero_after_flush": flushed["zms"]["dirty_pages"] == 0,
                         "real_backend_writes": writes > 0,
-                        "first_cold_read_reached_backend": reads > 0 and after["loop"]["read_sectors"] > flushed["loop"]["read_sectors"],
+                        "first_cold_read_reached_backend": cold_read_reached_backend(flushed, after, "crystal"),
                         "full_known_cold_read": cold_verified["bytes_processed"] == INPUT_BYTES,
                         "cold_hash_matches_before_writeback": cold_verified["fnv1a64"] == discard_verified["fnv1a64"],
                         "no_failed_backend_io": not after["zms"]["physical_write_failed_pages"] and not after["zms"]["physical_read_failed_pages"]}
                     entry["measurements"] = {"zms_physical_write_pages_delta": writes, "zms_physical_read_pages_delta": reads,
+                        "foreground_bd_read_pages_delta": after["bd_stat"][1] - flushed["bd_stat"][1],
                         "loop_write_sectors_including_internal_io": after["loop"]["write_sectors"] - before["loop"]["write_sectors"],
                         "loop_read_sectors_during_first_cold_read": after["loop"]["read_sectors"] - flushed["loop"]["read_sectors"],
                         "packed_bytes_after_flush": flushed["zms"]["packed_bytes"],

@@ -71,6 +71,16 @@ def loop_stats(text):
             "sector_bytes": 512, "flush_ios": values[15] if len(values) >= 17 else None}
 
 
+def cold_read_reached_backend(flushed, after, backend):
+    # GC increases total physical/loop reads but is excluded from bd_stat[1].
+    # Keep all three signals for Crystal so GC alone cannot prove cold readback.
+    foreground = after["bd_stat"][1] > flushed["bd_stat"][1]
+    loop = after["loop"]["read_sectors"] > flushed["loop"]["read_sectors"]
+    if backend == "crystal":
+        return foreground and loop and after["zms"]["physical_read_pages"] > flushed["zms"]["physical_read_pages"]
+    return foreground and loop
+
+
 class Target:
     def __init__(self, serial):
         self.serial = serial
@@ -252,7 +262,7 @@ def measure_round(private, program, seed, entry, pattern="mixed", require_conver
         "explicit_post_writeback_flush": entry["post_writeback_flush"].get("passed") is True,
         "all_zms_dirty_pages_flushed": clean,
         "backend_writes_increased": writes > 0,
-        "first_read_reached_backend": reads > 0 and loop_read_sectors > 0,
+        "first_read_reached_backend": cold_read_reached_backend(flushed, after, private.backend),
         "private_loop_writes_increased": loop_write_sectors > 0,
         "no_backend_failed_io": not failed and after["io_stat"][:2] == [0, 0],
     }
@@ -272,6 +282,7 @@ def measure_round(private, program, seed, entry, pattern="mixed", require_conver
         "stored_payload_bytes_after_flush": stored, "packed_bytes_after_flush": packed,
         "backend_physical_write_pages_delta": writes,
         "backend_physical_read_pages_delta": reads,
+        "foreground_bd_read_pages_delta": after["bd_stat"][1] - flushed["bd_stat"][1],
         "private_loop_write_sectors_including_internal_io": loop_write_sectors,
         "private_loop_read_sectors_during_first_read": loop_read_sectors,
         "private_loop_write_bytes_including_internal_io": loop_write_sectors * 512,
