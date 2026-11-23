@@ -91,6 +91,9 @@ def configure(kernel, profile="baseline"):
         # A soft 5% clean-cache floor; avoid upstream's two hard 15% floors.
         for name, value in [("ANON_MIN_RATIO", 0), ("CLEAN_LOW_RATIO", 5), ("CLEAN_MIN_RATIO", 0)]:
             run(["scripts/config", "--file", str(defconfig), "--set-val", name, str(value)], kernel)
+    if profile == "kcompressd":
+        # Match the accepted native-ZRAM baseline; this is not a ZSWAP port.
+        run(["scripts/config", "--file", str(defconfig), "--disable", "ZSWAP"], kernel)
 
 
 def verify(kernel, report, profile="baseline"):
@@ -107,6 +110,8 @@ def verify(kernel, report, profile="baseline"):
             if line not in actual:
                 missing.append(line)
     if profile == "kcompressd":
+        if "# CONFIG_ZSWAP is not set" not in actual:
+            missing.append("Kcompressd 6.6 native route requires CONFIG_ZSWAP=n")
         page_io = (kernel / "mm/page_io.c").read_text(encoding="utf-8")
         for marker in ["set_user_nice(current, 19)", "if (cpu < 6)", "READ_ONCE(vm_kcompressd)"]:
             if marker not in page_io:

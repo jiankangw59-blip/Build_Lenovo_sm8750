@@ -1,9 +1,9 @@
 {
   "kcompressd": {
     "file": "patches/kcompressd-6.6.89.patch",
-    "sha256": "6172ad69f3341beb561c7d999c7f00f5e71b71ac734780aad3fea588874ee95c",
+    "sha256": "d3f23f9bc2d043490038afd4388e21144e77b6281a61bd2c9b217d8df5ce10c8",
     "upstream_commit": "45351b52974ca39b6da957e1d62a6b881be190e7",
-    "adaptation": "nice=19, CPU0-5, READ_ONCE sysctl snapshot, paired native zswap writeback accounting"
+    "adaptation": "6.6 native synchronous-ZRAM route, CONFIG_ZSWAP=n; nice=19, CPU0-5, READ_ONCE sysctl snapshot, paired native zswap writeback accounting"
   },
   "le9uo": {
     "file": "patches/le9uo-6.6.89.patch",

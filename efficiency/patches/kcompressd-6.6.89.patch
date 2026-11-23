@@ -123,7 +123,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  #include "swap.h"
  
  #undef CREATE_TRACE_POINTS
-@@ -176,6 +178,116 @@
+@@ -176,6 +178,113 @@
  }
  
  /*
@@ -145,7 +145,6 @@ diff --git a/mm/page_io.c b/mm/page_io.c
 +	};
 +
 +	if (zswap_store(folio)) {
-+		count_mthp_stat(folio_order(folio), MTHP_STAT_ZSWPOUT);
 +		folio_start_writeback(folio);
 +		folio_unlock(folio);
 +		folio_end_writeback(folio);
@@ -190,13 +189,11 @@ diff --git a/mm/page_io.c b/mm/page_io.c
 +	if (!folio_test_anon(folio))
 +		return false;
 +
-+	/* Fall back to synchronously return AOP_WRITEPAGE_ACTIVATE */
-+	if (!mem_cgroup_zswap_writeback_enabled(folio_memcg(folio)))
-+		return false;
-+
-+	/* Swap device must be sync-efficient */
-+	if (!zswap_is_enabled() &&
-+	    !data_race(swp_swap_info(folio->swap)->flags & SWP_SYNCHRONOUS_IO))
++	/* This 6.6 profile uses native ZRAM, with CONFIG_ZSWAP disabled.
++	 * Do not borrow the newer zswap-only cgroup/API checks. Preserve
++	 * the native swap path for any non-synchronous backing device.
++	 */
++	if (!data_race(swp_swap_info(folio->swap)->flags & SWP_SYNCHRONOUS_IO))
 +		return false;
 +
 +	/* If the kcompress_fifo is full, we must swap out the head
@@ -240,7 +237,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
   * We may have stale swap cache pages in memory: notice
   * them here and get rid of the unnecessary final write.
   */
-@@ -198,6 +310,15 @@
+@@ -198,6 +307,15 @@
  		folio_unlock(folio);
  		return ret;
  	}
@@ -256,7 +253,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  	if (zswap_store(folio)) {
  		folio_start_writeback(folio);
  		folio_unlock(folio);
-@@ -205,6 +326,57 @@
+@@ -205,6 +323,57 @@
  		return 0;
  	}
  	__swap_writepage(&folio->page, wbc);
@@ -410,7 +407,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
   * This kswapd start function will be called by init and node-hot-add.
   */
  void __meminit kswapd_run(int nid)
-@@ -8166,13 +8220,97 @@
+@@ -8166,13 +8220,96 @@
  	if (!pgdat->kswapd) {
  		pgdat->kswapd = kthread_run(kswapd, pgdat, "kswapd%d", nid);
  		if (IS_ERR(pgdat->kswapd)) {
@@ -482,7 +479,6 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
 +					&pgdat->kcompress->kcompress_fifo_lock)) {
 +			/* Process the folio synchronously before cleanup */
 +			if (zswap_store(folio)) {
-+				count_mthp_stat(folio_order(folio), MTHP_STAT_ZSWPOUT);
 +				folio_start_writeback(folio);
 +				folio_unlock(folio);
 +				folio_end_writeback(folio);
@@ -511,7 +507,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  }
  
  /*
-@@ -8190,6 +8328,10 @@
+@@ -8190,6 +8327,10 @@
  		kthread_stop(kswapd);
  		pgdat->kswapd = NULL;
  	}

@@ -29,7 +29,7 @@
 - 用户选择先做日常体感测试，功耗采样暂缓。一次性采样进程已在冷却阶段终止，没有正式测量数据。新旧内核均无有效功耗基线，不作省电幅度结论；后续若恢复采样，应补测上一版 6.6.89，并采用同条件的旧版/新版对比。采样器不会自动重启。
 - Kcompressd 与 le9uo 分别建立独立候选，须通过同样 KMI、读回和重启检查，再做受控对比。两者均未编入本次已刷入的基线。
 - Kcompressd 候选明确 nice=19、CPU0–5，保留异步与原生 zswap 的 writeback 配对语义。
-- Kcompressd 首次候选构建在编译预检中失败：6.6.89 缺少上游候选依赖的 MTHP_STAT_ZSWPOUT、mem_cgroup_zswap_writeback_enabled 和 zswap_is_enabled，须继续适配，不作为可刷入产物。
+- Kcompressd 首次候选构建在编译预检中失败：6.6.89 缺少上游候选依赖的 MTHP_STAT_ZSWPOUT、mem_cgroup_zswap_writeback_enabled 和 zswap_is_enabled。后续适配沿用已验收基线的 CONFIG_ZSWAP=n，只允许原生同步 ZRAM 卸载，不引入虚构的新版接口替身。保留本版本的原生 writeback 配对语义，修订版仍须完成编译及 KMI 检查。
 - le9uo 候选将三个新标志放在 scan_control 的既有 byte45 填充中；额外 BTF 检查禁止移动原字段。先使用 0/5/0 的匿名硬下限、干净缓存软下限、干净缓存硬下限比例，避免上游默认两个 15% 硬下限提前触发 OOM。其保护范围为干净文件缓存，不能称为只保护可执行文件。
 
 当前功能验收通过不代表待机省电幅度或整套优化已经定版。
