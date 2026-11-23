@@ -24,6 +24,9 @@ def build(args):
     here = Path(__file__).resolve().parent
     subprocess.run([str(compiler), "-O2", "-Wall", "-Wextra", "-Werror",
                     str(here / "native_writeback_event.c"), "-o", str(scripts / "native_writeback_event")], check=True)
+    crystal = here.parent / "scene_crystal"
+    subprocess.run([str(compiler), "-O2", "-Wall", "-Wextra", "-Werror",
+                    str(crystal / "crystal_writeback_flush.c"), "-o", str(scripts / "crystal_writeback_flush")], check=True)
     # Windows' system32/bash.exe is a WSL launcher, not Git Bash.
     bash = str(args.bash) if args.bash else str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git/bin/bash.exe") if sys.platform == "win32" else shutil.which("bash")
     if not bash:
@@ -32,6 +35,8 @@ def build(args):
         subprocess.run([bash, "-n", str(script)], check=True)
     (args.output / "native-writeback.conf").write_text(
         (here / "native-writeback.conf").read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    (args.output / "crystal-writeback.conf").write_text(
+        (crystal / "crystal-writeback.conf").read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
     version = subprocess.run([str(compiler), "--version"], capture_output=True, text=True, check=True).stdout.splitlines()[0]
     files = {str(p.relative_to(args.output)).replace("\\", "/"): hashlib.sha256(p.read_bytes()).hexdigest()
              for p in args.output.rglob("*") if p.is_file()}
@@ -39,11 +44,21 @@ def build(args):
               "source_inputs": {**EXPECTED, **{"../" + key: value for key, value in EXPECTED_PARENT.items()}},
               "payload_sha256": files,
               "crystal": {"early_initialization_included": True, "automatic_policy_enabled": False,
+                          "event_controller_included": True, "automatic_enable_marker_created": False,
+                          "sddc_integrity_stats_required_for_lz4kds": True,
+                          "flush_helper_reads_or_writes_raw_blocks": False,
+                          "shared_physical_daily_ledger": "native-writeback.daily",
+                          "physical_daily_target_mb": 2048, "logical_batch_max_mb": 128,
+                          "physical_daily_hard_cap": False,
                           "enrollment_format": "known-crystal-kernels: <notes_sha256> <lz4kd|lz4kds>",
                           "backing_file": "/data/adb/ace6-kernel-efficiency/zms-backing.img",
                           "backing_created_during_early_boot": False,
                           "runtime_verification_performed": False},
               "controller_source_sha256": hashlib.sha256((here / "native_writeback_event.c").read_bytes()).hexdigest(),
+              "crystal_policy_source_sha256": {
+                  name: hashlib.sha256((crystal / name).read_bytes()).hexdigest()
+                  for name in ["crystal_writeback_flush.c", "crystal_writeback_policy.sh",
+                               "crystal_writeback_daemon.sh", "start_crystal_writeback.sh", "crystal-writeback.conf"]},
               "runtime_verification_performed_by_this_build": False}
     (args.output / "manifest.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))

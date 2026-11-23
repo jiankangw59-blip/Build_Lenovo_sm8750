@@ -92,7 +92,9 @@ if [ "$SCENE_SWAP_CHECK_ONLY" = true ]; then
         helper = Path(__file__).with_name(name).read_text(encoding="utf-8")
         (output / name).write_text(helper, encoding="utf-8", newline="\n")
     crystal = Path(__file__).resolve().parent.parent / "scene_crystal"
-    for name in ["crystal_writeback.sh", "early_crystal_writeback.sh"]:
+    for name in ["crystal_writeback.sh", "early_crystal_writeback.sh",
+                 "crystal_writeback_policy.sh", "crystal_writeback_daemon.sh",
+                 "start_crystal_writeback.sh"]:
         helper = (crystal / name).read_text(encoding="utf-8")
         (output / name).write_text(helper, encoding="utf-8", newline="\n")
     service = (source.parent / "service.sh").read_bytes()
@@ -100,7 +102,7 @@ if [ "$SCENE_SWAP_CHECK_ONLY" = true ]; then
         raise ValueError("Unreviewed Scene service source")
     service = service.decode("utf-8").replace("\r\n", "\n")
     # Hook only after the existing startup succeeded, before the remaining work.
-    service = replace_once(service, "echo \"\" >> $LOG\n", 'sh "$MODPATH/scripts/start_native_writeback.sh" || echo "Native writeback service start failed" >> "$LOG"\n\necho "" >> $LOG\n')
+    service = replace_once(service, "echo \"\" >> $LOG\n", 'sh "$MODPATH/scripts/start_native_writeback.sh" || echo "Native writeback service start failed" >> "$LOG"\nsh "$MODPATH/scripts/start_crystal_writeback.sh" || echo "Crystal writeback service start failed" >> "$LOG"\n\necho "" >> $LOG\n')
     (output.parent / "service.sh").write_text(service, encoding="utf-8", newline="\n")
     postfs = (source.parent / "post-fs-data.sh").read_bytes()
     if hashlib.sha256(postfs).hexdigest() != EXPECTED_PARENT["post-fs-data.sh"]:

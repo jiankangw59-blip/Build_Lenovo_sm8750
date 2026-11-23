@@ -1,0 +1,86 @@
+{
+  "prepared_only": true,
+  "deployed": false,
+  "started": false,
+  "android_device_used": false,
+  "automatic_default": false,
+  "enable_marker_created": false,
+  "logical_batch_max_mb": 128,
+  "physical_daily_target_mb": 2048,
+  "physical_daily_hard_cap": false,
+  "pending_format": "v2",
+  "legacy_or_incomplete_pending_refused": true,
+  "physical_read_failed_pages_required": true,
+  "final_observed_errors_checked": true,
+  "last_snapshot_is_not_atomic_across_sysfs_files": true,
+  "final_production_source_sha256": {
+    "crystal-writeback.conf": "dedabfb50443a102916d920573efabc7aa8911555b559aa89bdcfb40a6380a34",
+    "crystal_writeback.sh": "b898db3e05721c94c94e8c208c81abbc467d0126593b174ee38f6a9552f1490c",
+    "crystal_writeback_daemon.sh": "3fd717c11f4257d8e557695326ca27914043c21e48a841f3adc7623550800dea",
+    "crystal_writeback_flush.c": "c0abb5b6523cb97216968e3adbb27b7cec4c168bd8df255f01a8d8ef40fd2782",
+    "crystal_writeback_policy.sh": "6f8b182d6a17f8113c307308ec202bb23fb7620209b396a631cdde00e9694070",
+    "early_crystal_writeback.sh": "e480503e6c2de96799192a0a81d38066082e6a2efe4ebb47aa7d9b72c4a8f882",
+    "start_crystal_writeback.sh": "f0d50253b5ea6c23ed6f4eee62a77b3a7d00d5c8f4a45034484582ac9caee72d"
+  },
+  "host_test_source_sha256": {
+    "test_policy_host.py": "a9f1cea32a719affdae0378c9516da170ddc940865c9309aef3cf799e962ce2a",
+    "test_policy_daemon_host.py": "84c02eb0159d1f04fe5ed9a74d9fd527893b1b7d4310bada255ae57522a9fc1a",
+    "test_policy_final_snapshot_host.py": "4a2f151912e35fb33b50ad4b930780f14c6ce266165b9d83f3be618aded691be"
+  },
+  "checks": {
+    "policy_control_flow": 47,
+    "daemon_regression": 11,
+    "final_observation_regression": 9,
+    "early_initialization_regression_reused": 19,
+    "ndk_build": true,
+    "all_payload_bash_n": true,
+    "python_compile": true,
+    "flush_dynamic_io_symbols": true
+  },
+  "regression_stages": {
+    "read_failure_and_v2_pending": {
+      "policy_checks": 47,
+      "daemon_checks": 11,
+      "policy_source_sha256": "6b9dd2625a3c5cd2cb67966e75fbccd5234b6f2a26e8c714dc4d540507efd3ca",
+      "final_observation_order_reorder_not_yet_applied": true
+    },
+    "final_observation_order": {
+      "checks": 9,
+      "production_source_hashes_stable": true,
+      "policy_source_sha256": "6f8b182d6a17f8113c307308ec202bb23fb7620209b396a631cdde00e9694070",
+      "error_classes_injected": 8,
+      "successful_physical_increment_control": 1
+    },
+    "early_initialization": {
+      "rerun_this_review": false,
+      "unchanged_sources": true
+    }
+  },
+  "evidence": {
+    "policy": "C:\\Users\\22703\\Documents\\module-audits\\ace6-efficiency-20261123\\scene-crystal-policy-host-read-failure-v1\\host-checks.json",
+    "daemon": "C:\\Users\\22703\\Documents\\module-audits\\ace6-efficiency-20261123\\scene-crystal-policy-daemon-read-failure-v1\\host-checks.json",
+    "final_observation": "C:\\Users\\22703\\Documents\\module-audits\\ace6-efficiency-20261123\\scene-crystal-policy-final-snapshot-v1\\host-checks.json",
+    "early_reused": "C:\\Users\\22703\\Documents\\module-audits\\ace6-efficiency-20261123\\scene-crystal-early-regression-v4\\host-checks.json",
+    "payload": "C:\\Users\\22703\\Documents\\module-audits\\ace6-efficiency-20261123\\scene-crystal-auto-prepared-payload-read-failure-v2\\manifest.json"
+  },
+  "payload_manifest_sha256": "a4f044e173d3c3784bcc615ceedce996f9ef3b0df0277b31ce0d1106d5943fd2",
+  "native_event_sha256": "2018861ee060c8ccf7e0b8d8ebcc39b03d6b245f861fd9ae4b142fa6c3074ea8",
+  "flush_binary_sha256": "388849a5295a09ac59ba438e146748db1cc444a4e72b517bca3bb29be2b6d3ca",
+  "payload_comparison_base": "C:\\Users\\22703\\Documents\\module-audits\\ace6-efficiency-20261123\\scene-crystal-auto-prepared-payload-v3",
+  "existing_payload_files_preserved": 15,
+  "existing_payload_files_changed": [
+    "scripts/crystal_writeback_daemon.sh",
+    "scripts/crystal_writeback_policy.sh"
+  ],
+  "kernel_io_mocked_in_host_tests": true,
+  "event_timing_mocked_in_host_tests": true,
+  "android_runtime_verified": false,
+  "lz4kds_requires_integrity_stats_export": true,
+  "no_adb_flash_reboot_commit_or_push": true,
+  "flush_binary_relevant_io_imports": [
+    "open",
+    "fstat",
+    "fsync"
+  ],
+  "flush_binary_has_raw_read_write_imports": false
+}
