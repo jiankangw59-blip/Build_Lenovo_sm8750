@@ -7,6 +7,10 @@ EXPECTED = {
     "startup.sh": "fa6fb614138e45ba42956ca138cd55d86051f232ec29ffe3773689c88b5091d1",
     "tools.sh": "0211ce173f6a6bc3aa37de9baeb09db19ecd29ce3e70aa9cba85885de4d6441a",
 }
+EXPECTED_PARENT = {
+    "service.sh": "593bb2081d6416085378e0c849a7c5963208397c4bec03e66efe5a0d19afc08a",
+    "post-fs-data.sh": "7d6ab93904d824b3248c3529132b911fbf769f8cc7d2000a4dbea313f7de5868",
+}
 
 
 def replace_once(text, old, new):
@@ -87,21 +91,25 @@ if [ "$SCENE_SWAP_CHECK_ONLY" = true ]; then
     for name in ["native_writeback.sh", "native_writeback_daemon.sh", "start_native_writeback.sh", "early_native_writeback.sh"]:
         helper = Path(__file__).with_name(name).read_text(encoding="utf-8")
         (output / name).write_text(helper, encoding="utf-8", newline="\n")
+    crystal = Path(__file__).resolve().parent.parent / "scene_crystal"
+    for name in ["crystal_writeback.sh", "early_crystal_writeback.sh"]:
+        helper = (crystal / name).read_text(encoding="utf-8")
+        (output / name).write_text(helper, encoding="utf-8", newline="\n")
     service = (source.parent / "service.sh").read_bytes()
-    if hashlib.sha256(service).hexdigest() != "593bb2081d6416085378e0c849a7c5963208397c4bec03e66efe5a0d19afc08a":
+    if hashlib.sha256(service).hexdigest() != EXPECTED_PARENT["service.sh"]:
         raise ValueError("Unreviewed Scene service source")
     service = service.decode("utf-8").replace("\r\n", "\n")
     # Hook only after the existing startup succeeded, before the remaining work.
     service = replace_once(service, "echo \"\" >> $LOG\n", 'sh "$MODPATH/scripts/start_native_writeback.sh" || echo "Native writeback service start failed" >> "$LOG"\n\necho "" >> $LOG\n')
     (output.parent / "service.sh").write_text(service, encoding="utf-8", newline="\n")
     postfs = (source.parent / "post-fs-data.sh").read_bytes()
-    if hashlib.sha256(postfs).hexdigest() != "7d6ab93904d824b3248c3529132b911fbf769f8cc7d2000a4dbea313f7de5868":
+    if hashlib.sha256(postfs).hexdigest() != EXPECTED_PARENT["post-fs-data.sh"]:
         raise ValueError("Unreviewed Scene post-fs source")
     postfs = postfs.decode("utf-8").replace("\r\n", "\n")
     postfs = replace_once(postfs,
         "# This device-specific filesystem startup entry deliberately performs no work.\n# The unchanged service.sh retains the existing swap policy and safeguards.",
-        "# Initialize the verified native ZRAM profile before app memory grows.\n# service.sh retains the remaining swap policy and safeguards.")
-    postfs = replace_once(postfs, "exit 0\n", 'sh "${0%/*}/scripts/early_native_writeback.sh"\nexit 0\n')
+        "# Initialize an enrolled Crystal or native ZRAM profile before apps grow.\n# service.sh retains the remaining swap policy and safeguards.")
+    postfs = replace_once(postfs, "exit 0\n", 'sh "${0%/*}/scripts/early_crystal_writeback.sh"\nsh "${0%/*}/scripts/early_native_writeback.sh"\nexit 0\n')
     (output.parent / "post-fs-data.sh").write_text(postfs, encoding="utf-8", newline="\n")
 
 

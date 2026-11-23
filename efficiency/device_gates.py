@@ -25,7 +25,7 @@ def inspect(args):
     startup = ""
     if args.startup_snapshot:
         raw_startup = args.startup_snapshot.read_bytes()
-        startup = raw_startup.decode("utf-8")
+        startup = raw_startup.decode("utf-8", "replace")
         if result["boot_id"] not in startup.splitlines() or not any(
                 line.split() == [notes, "/sys/kernel/notes"] for line in startup.splitlines()):
             raise RuntimeError("Startup snapshot belongs to a different boot or kernel")
@@ -89,9 +89,10 @@ def inspect(args):
     memory_errors = [line for line in log.splitlines() if re.search(
         r"(?:zram|lz4kd).*(?:fail|error|corrupt)|(?:\bBUG:|\bOops:|I/O error)", line, re.I)]
     result["gates"]["zram_writeback"] = {
-        "passed": "[lz4kd]" in algorithm and bool(counts)
+        "passed": f"[{args.expected_compressor}]" in algorithm and bool(counts)
                   and counts[1] > 0 and counts[2] > 0 and not memory_errors,
-        "algorithm": algorithm, "backing_device": backing, "bd_stat": bd,
+        "algorithm": algorithm, "expected_compressor": args.expected_compressor,
+        "backing_device": backing, "bd_stat": bd,
         "errors": memory_errors,
         "scope": "Counters require backing reads and writes; data integrity needs the separate isolated readback probe."}
 
@@ -137,6 +138,7 @@ if __name__ == "__main__":
     parser.add_argument("--serial", required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--expected-notes-sha256")
+    parser.add_argument("--expected-compressor", choices=["lz4kd", "lz4kds"], default="lz4kd")
     parser.add_argument("--startup-snapshot", type=pathlib.Path,
                         help="Earlier startup capture containing this boot ID, kernel-notes hash and init logs")
     args = parser.parse_args()

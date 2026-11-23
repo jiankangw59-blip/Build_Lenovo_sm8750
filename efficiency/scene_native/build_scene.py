@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 
-from prepare_scene import prepare, EXPECTED
+from prepare_scene import prepare, EXPECTED, EXPECTED_PARENT
 
 
 def build(args):
@@ -36,7 +36,13 @@ def build(args):
     files = {str(p.relative_to(args.output)).replace("\\", "/"): hashlib.sha256(p.read_bytes()).hexdigest()
              for p in args.output.rglob("*") if p.is_file()}
     report = {"compiler": version, "flags": ["-O2", "-Wall", "-Wextra", "-Werror"],
-              "source_inputs": EXPECTED, "payload_sha256": files,
+              "source_inputs": {**EXPECTED, **{"../" + key: value for key, value in EXPECTED_PARENT.items()}},
+              "payload_sha256": files,
+              "crystal": {"early_initialization_included": True, "automatic_policy_enabled": False,
+                          "enrollment_format": "known-crystal-kernels: <notes_sha256> <lz4kd|lz4kds>",
+                          "backing_file": "/data/adb/ace6-kernel-efficiency/zms-backing.img",
+                          "backing_created_during_early_boot": False,
+                          "runtime_verification_performed": False},
               "controller_source_sha256": hashlib.sha256((here / "native_writeback_event.c").read_bytes()).hexdigest(),
               "runtime_verification_performed_by_this_build": False}
     (args.output / "manifest.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
