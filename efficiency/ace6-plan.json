@@ -19,14 +19,17 @@
     "required_transport": "Generic Netlink; verified from the phone's installed and loaded ReKernel ELF",
     "replace_existing_ksu_loader_only_after_runtime_verification": true
   },
-  "memory_route": "native-zram-with-pure-lz4kd-and-writeback",
+  "memory_route": "accepted-native-zram-with-pure-lz4kd-and-writeback; isolated-crystal-zms-lz4kd-candidate",
   "preserve": ["BakaSU", "SUSFS", "FUSE dentry revalidation 3943780", "AppOpt rules and thread affinity", "factory WALT and thermal/charging/network modules", "factory HMBIRD implementation"],
   "stages": [
     {"id": "baseline", "requires": ["cpuidle-teo-menu", "pending-ipi", "rcu-lazy", "power-efficient-workqueue", "workqueue-cpumask-3f", "native-zram-lz4kd-writeback", "mglru-and-mm-fixes", "f2fs-compression-atgc-gc-merge", "f2fs-idle-gc", "erofs-pcpu-and-bounce-retry", "bbr3-fq-codel-ecn2", "builtin-rekernel", "clang18-thinlto-o2", "kmi-preflight", "five-device-gates", "idle-power-baseline"]},
     {"id": "kcompressd", "after": "baseline", "single_changed_feature": "Kcompressd-Unofficial", "requires": ["readback-integrity", "kmi-preflight", "five-device-gates", "controlled-comparison"]},
-    {"id": "le9uo", "after": "baseline", "single_changed_feature": "le9uo", "requires": ["readback-integrity", "kmi-preflight", "five-device-gates", "controlled-comparison"]}
+    {"id": "le9uo", "after": "baseline", "single_changed_feature": "le9uo", "requires": ["readback-integrity", "kmi-preflight", "five-device-gates", "controlled-comparison"]},
+    {"id": "crystal", "after": "kcompressd", "single_changed_feature": "Crystal HybridSwap + ZMS, pure Crypto API LZ4KD", "requires": ["pinned-source-import", "kmi-preflight", "independent-backing-file", "packed-stream-flush-and-physical-readback", "five-device-gates", "controlled-backing-write-comparison"]}
   ],
   "optional_review": ["factory HMBIRD exception-path fixes", "SM_IDLE with unchanged exported structure layout", "ADIOS as an isolated A/B variant", "ARM64 memcpy/strlen/crypto assembly where applicable"],
-  "forbidden": ["LZ4KDS", "SDDC", "UKSM", "BFQ", "device-tree overwriter", "module overlay framework", "13T charging overrides", "BORE", "HZ=1000", "voltage table changes", "factory module blacklisting", "task_struct or rq KMI layout changes"],
+  "production_candidate_excludes": ["LZ4KDS", "SDDC"],
+  "experiments": [{"id": "lz4kds_lab", "purpose": "Restore source against decompiled KO and DWARF, isolated codec tests", "enabled_on_phone": false}],
+  "forbidden": ["UKSM", "BFQ", "device-tree overwriter", "module overlay framework", "13T charging overrides", "BORE", "HZ=1000", "voltage table changes", "factory module blacklisting", "task_struct or rq KMI layout changes"],
   "completion_requires": ["successful reproducible kernel build", "boot and rollback artifacts", "actual factory module load verification", "RCU lazy active on all eight CPUs", "workqueue mask 3f and worker affinity verification", "pure lz4kd with actual writeback and verified readback", "official built-in ReKernel with no loaded duplicate ko and successful Generic Netlink version query; upstream does not create proc nodes in this transport", "idle-current baseline", "required isolated follow-up comparisons"]
 }

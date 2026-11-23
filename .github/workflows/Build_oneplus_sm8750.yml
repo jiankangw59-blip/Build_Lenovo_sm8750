@@ -15,6 +15,7 @@ on:
           - 'baseline'
           - 'kcompressd'
           - 'le9uo'
+          - 'crystal'
       enable_release:
         description: "发布到 Releases"
         required: true
@@ -140,7 +141,7 @@ jobs:
         if: ${{ env.EFFICIENCY_PROFILE != 'off' }}
         run: |
           set -euo pipefail
-          case "$EFFICIENCY_PROFILE" in baseline|kcompressd|le9uo) ;; *) exit 1 ;; esac
+          case "$EFFICIENCY_PROFILE" in baseline|kcompressd|le9uo|crystal) ;; *) exit 1 ;; esac
           test "$DEVICES_NAME" = oneplus_ace_6
           test "$KERNEL_VERSION" = 6.6.89
           test "$ZRAM_PATCH" = LZ4KD
@@ -988,6 +989,9 @@ jobs:
 
           if [ "$ZRAM_PATCH" = 'LZ4KD' ]; then
             LZ4KD_SYMBOLS='ZRAM ZSMALLOC CRYPTO_LZ4KD ZRAM_DEF_COMP_LZ4KD'
+            if [ "$EFFICIENCY_PROFILE" = crystal ]; then
+              LZ4KD_SYMBOLS='ZSMALLOC CRYPTO_LZ4KD CRYSTAL_HYBRIDSWAP CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK'
+            fi
             if [ "$EFFICIENCY_PROFILE" = off ]; then
               LZ4KD_SYMBOLS="$LZ4KD_SYMBOLS CRYPTO_LZ4K CRYPTO_LZ4K_OPLUS CRYPTO_DEFLATE"
             fi
@@ -997,7 +1001,11 @@ jobs:
                 exit 1
               fi
             done
-            grep -qx 'CONFIG_ZRAM_DEF_COMP="lz4kd"' out/.config
+            if [ "$EFFICIENCY_PROFILE" = crystal ]; then
+              grep -qx 'CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP="lz4kd"' out/.config
+            else
+              grep -qx 'CONFIG_ZRAM_DEF_COMP="lz4kd"' out/.config
+            fi
           fi
           if [ "$EFFICIENCY_PROFILE" != off ]; then
             make -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
@@ -1031,6 +1039,10 @@ jobs:
           fi
 
           if [ "$EFFICIENCY_PROFILE" != off ]; then
+            ZRAM_PREFLIGHT='drivers/block/zram/zram_drv.o'
+            if [ "$EFFICIENCY_PROFILE" = crystal ]; then
+              ZRAM_PREFLIGHT='drivers/crystalfrostwork/crystal_hybridswap/zram.o'
+            fi
             make -k -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
               CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \
               KCFLAGS+=-O2 KCFLAGS+=-Wno-error \
@@ -1039,7 +1051,7 @@ jobs:
               drivers/rekernel/rekernel_netfilter.o mm/vmscan.o mm/page_alloc.o mm/memory.o \
               mm/page_io.o mm/mm_init.o kernel/sysctl.o \
               drivers/cpuidle/governors/teo.o drivers/cpuidle/governors/menu.o \
-              drivers/cpuidle/cpuidle.o drivers/block/zram/zram_drv.o \
+              drivers/cpuidle/cpuidle.o $ZRAM_PREFLIGHT \
               crypto/lz4kd.o net/ipv4/tcp_bbr.o fs/f2fs/gc.o \
               2>&1 | tee ../preflash/efficiency/compile-preflight.log
           fi

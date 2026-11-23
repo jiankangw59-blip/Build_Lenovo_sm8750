@@ -75,9 +75,20 @@ def prepare(args):
     files = [entry["file"] for entry in patches["applied"]]
     stage2 = {name for name in files if name in (
         "patches/kcompressd-6.6.89.patch", "patches/le9uo-6.6.89.patch")}
-    expected_stage2 = {f"patches/{profile}-6.6.89.patch"} if profile != "baseline" else set()
+    stage2_profile = "kcompressd" if profile == "crystal" else profile
+    expected_stage2 = {f"patches/{stage2_profile}-6.6.89.patch"} if profile != "baseline" else set()
     if stage2 != expected_stage2 or len(files) != 19 + bool(expected_stage2):
         raise RuntimeError("Candidate does not contain exactly the requested isolated patch series")
+    if profile == "crystal":
+        crystal = json.loads((evidence / "efficiency/crystal-integration.json").read_text(encoding="utf-8"))
+        if crystal.get("passed") is not True or crystal.get("source_commit") != "13d291aef3d1d9607ad3fa5ff30dc23b2888a3da":
+            raise RuntimeError("Candidate lacks the pinned Crystal integration report")
+        config = (evidence / "kernel.config").read_text(encoding="utf-8")
+        for line in ["CONFIG_CRYSTAL_HYBRIDSWAP=y", "# CONFIG_ZRAM is not set",
+                     'CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP="lz4kd"',
+                     "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_LOCK_DEF_COMP=y"]:
+            if line not in config.splitlines():
+                raise RuntimeError("Candidate Crystal configuration differs: " + line)
     release = (evidence / "kernel.release").read_text(encoding="utf-8").strip()
     if not release.startswith("6.6.89-"):
         raise RuntimeError("Unexpected actual kernel release: " + release)
@@ -170,5 +181,5 @@ if __name__ == "__main__":
     parser.add_argument("--ak3", type=pathlib.Path, required=True)
     parser.add_argument("--original", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
-    parser.add_argument("--expected-profile", choices=["baseline", "kcompressd", "le9uo"], default="baseline")
+    parser.add_argument("--expected-profile", choices=["baseline", "kcompressd", "le9uo", "crystal"], default="baseline")
     prepare(parser.parse_args())
