@@ -994,6 +994,17 @@ jobs:
             done
             grep -qx 'CONFIG_ZRAM_DEF_COMP="lz4kd"' out/.config
           fi
+          if [ "$EFFICIENCY_PROFILE" != off ]; then
+            make -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+              CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \
+              KCFLAGS+=-O2 KCFLAGS+=-Wno-error KBUILD_SYMTYPES=1 kernel/module/version.o
+            cp out/kernel/module/.version.o.cmd ../preflash/efficiency/module-version.cmd
+            cp out/kernel/module/version.symtypes ../preflash/efficiency/module-version.symtypes
+            python3 "$WORKDIR/efficiency/kmi_baseline.py" quick-crc \
+              --baseline "$WORKDIR/efficiency/kmi/plq110-C16-baseline.json.gz" \
+              --cmd-file out/kernel/module/.version.o.cmd \
+              --output ../preflash/efficiency/common-crc-verification.json
+          fi
           if [ "$ENABLE_SUSFS" = 'true' ]; then
             make -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
               CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \
@@ -1033,12 +1044,14 @@ jobs:
             SYMVERS=out/Module.symvers
             [ -s "$SYMVERS" ] || SYMVERS=out/vmlinux.symvers
             test -s "$SYMVERS"
+            cp "$SYMVERS" ../preflash/efficiency/Module.symvers
+            cp out/System.map ../preflash/efficiency/System.map
+            "$CLANG_DIR/llvm-nm" out/vmlinux > ../preflash/efficiency/kernel-symbols.txt
+            "$CLANG_DIR/llvm-objcopy" --dump-section .BTF=../preflash/efficiency/compiled-kernel.btf out/vmlinux
             python3 "$WORKDIR/efficiency/kmi_baseline.py" verify \
               --baseline "$WORKDIR/efficiency/kmi/plq110-C16-baseline.json.gz" \
               --symvers "$SYMVERS" --vmlinux out/vmlinux \
               --output ../preflash/efficiency/kmi-verification.json
-            cp "$SYMVERS" ../preflash/efficiency/Module.symvers
-            "$CLANG_DIR/llvm-nm" out/vmlinux > ../preflash/efficiency/kernel-symbols.txt
             grep -E ' (start_rekernel|rekernel_netlink_start)(\.|$)' ../preflash/efficiency/kernel-symbols.txt
             grep -E '[[:space:]]__initcall__.*_start_rekernel7$' out/System.map \
               | tee ../preflash/efficiency/rekernel-initcall.txt
@@ -1060,6 +1073,13 @@ jobs:
           echo "ccache 状态："
           ccache -s
       
+      - name: Preserve efficiency compiler cache after failed verification
+        if: ${{ failure() && !cancelled() && env.EFFICIENCY_PROFILE != 'off' && env.CCACHE_DIR != '' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ env.DEVICES_NAME }}${{ env.CACHE_VARIANT }}-${{ github.run_id }}-failed
+
       - name: 🕒 Calculate build time (计算构建时间)
         run: |
           END=$(date +%s)

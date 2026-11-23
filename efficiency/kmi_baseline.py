@@ -194,11 +194,34 @@ def verify(args):
                              "expected_size": expected["size"], "actual_size": actual[name]["size"]})
     if checked == 0: failures.append({"reason": "No baseline loaded OEM imports were checked"})
     report = {"checked_imports": checked, "failures": failures, "passed": not failures,
+              "actual_structures": actual,
               "scope": "GKI CRCs referenced by baseline loaded OEM modules and four explicit BTF structure layouts; runtime module loading remains required."}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(json.dumps(report, indent=2))
+    print(json.dumps({"checked_imports": checked, "passed": not failures,
+                      "failure_count": len(failures), "first_failures": failures[:10]}, indent=2))
     if failures: raise SystemExit(1)
+
+
+def quick_crc(args):
+    raw = gzip.decompress(args.baseline.read_bytes()) if args.baseline.suffix == ".gz" else args.baseline.read_bytes()
+    baseline = json.loads(raw)
+    expected = {int(m["imports"]["module_layout"], 16)
+                for m in baseline["modules"].values()
+                if m["loaded_at_baseline"] and "module_layout" in m["imports"]}
+    if len(expected) != 1:
+        raise RuntimeError("OEM baseline does not agree on module_layout CRC")
+    matches = re.findall(r"^#SYMVER\s+module_layout\s+(0x[0-9a-fA-F]+)\s*$",
+                         args.cmd_file.read_text(encoding="utf-8"), re.M)
+    actual = {int(value, 16) for value in matches}
+    result = {"symbol": "module_layout", "expected": [f"0x{x:08x}" for x in expected],
+              "actual": [f"0x{x:08x}" for x in actual], "passed": actual == expected,
+              "scope": "Early common-type CRC check; full post-link OEM import and BTF checks remain mandatory."}
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(result, indent=2))
+    if not result["passed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
@@ -215,5 +238,9 @@ if __name__ == "__main__":
     check.add_argument("--symvers", type=pathlib.Path, required=True)
     check.add_argument("--vmlinux", type=pathlib.Path, required=True)
     check.add_argument("--output", type=pathlib.Path, required=True)
+    quick = commands.add_parser("quick-crc")
+    quick.add_argument("--baseline", type=pathlib.Path, required=True)
+    quick.add_argument("--cmd-file", type=pathlib.Path, required=True)
+    quick.add_argument("--output", type=pathlib.Path, required=True)
     opts = parser.parse_args()
-    capture(opts) if opts.command == "capture" else verify(opts)
+    {"capture": capture, "verify": verify, "quick-crc": quick_crc}[opts.command](opts)
