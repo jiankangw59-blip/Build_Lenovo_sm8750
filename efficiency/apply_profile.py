@@ -15,6 +15,11 @@ from idle_refinement import (PROFILE as IDLE_PROFILE, check_source_hashes as che
                              source_report as idle_source_report)
 
 HERE = pathlib.Path(__file__).resolve().parent
+HONK_BUILTIN_CONFIG = (
+    "BPF_SYSCALL", "BPF_JIT", "BPF_JIT_ALWAYS_ON", "CGROUP_BPF", "DEBUG_INFO_BTF",
+    "NET_XGRESS", "NET_SCH_INGRESS", "NET_CLS_BPF", "NET_NS", "VETH",
+    "IP_MULTIPLE_TABLES", "IPV6_MULTIPLE_TABLES", "KPROBE_EVENTS", "BPF_EVENTS",
+)
 
 
 def run(argv, cwd):
@@ -156,8 +161,8 @@ def configure(kernel, profile="baseline"):
 
 
 def verify(kernel, report, profile="baseline"):
-    idle = (idle_source_report(kernel, policy=idle_policy(kernel_version(kernel)))
-            if profile == IDLE_PROFILE else None)
+    version = kernel_version(kernel) if profile == IDLE_PROFILE else None
+    idle = idle_source_report(kernel, policy=idle_policy(version)) if version else None
     actual = (kernel / "out/.config").read_text(encoding="utf-8").splitlines()
     required = [line for line in (HERE / "ace6-baseline.config").read_text(encoding="utf-8").splitlines()
                 if line.startswith("CONFIG_")]
@@ -217,9 +222,19 @@ def verify(kernel, report, profile="baseline"):
         missing.append("6.6 EROFS queue must propagate only physical I/O failure between clusters")
     if "GFP_KERNEL | __GFP_NOFAIL" not in erofs:
         missing.append("6.6 EROFS synchronous bounce allocation retry")
+    honk_datapath = None
+    if version == "6.6.118":
+        # Honk loads its own eBPF object. Check the resolved GKI capabilities
+        # for TCX, cgroup, netns routing and receive tracing without changing ABI.
+        built_in = [f"CONFIG_{symbol}=y" for symbol in HONK_BUILTIN_CONFIG]
+        honk_missing = [line for line in built_in if line not in actual]
+        missing.extend(honk_missing)
+        honk_datapath = {"required": built_in, "missing": honk_missing, "passed": not honk_missing}
     result = {"missing": missing, "forbidden": selected, "passed": not (missing or selected)}
     if idle:
         result["cpuidle_refinement"] = idle
+    if honk_datapath is not None:
+        result["honk_datapath"] = honk_datapath
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
