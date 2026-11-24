@@ -115,6 +115,12 @@ on:
         default: true
         type: boolean
 
+      build_kernel:
+        description: "构建内核及相关产物"
+        required: false
+        default: true
+        type: boolean
+
       enable_honk:
         description: "并行构建带补丁的 Honk Android ARM64"
         required: false
@@ -170,6 +176,7 @@ jobs:
 
   build:
     name: Build_${{ github.event.inputs.device_name }}
+    if: ${{ inputs.build_kernel }}
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -1399,7 +1406,7 @@ jobs:
   release:
     name: 📤 Create Release (创建发布)
     needs: [build, upload_rekernel]
-    if: ${{ github.event.inputs.enable_release == 'true' && always() && needs.build.result != 'failure' }}
+    if: ${{ always() && inputs.build_kernel && github.event.inputs.enable_release == 'true' && needs.build.result != 'failure' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
