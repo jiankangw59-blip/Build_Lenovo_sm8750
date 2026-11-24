@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import shlex
 import subprocess
 from types import SimpleNamespace
@@ -66,7 +67,8 @@ def run(args):
     review("no startup proof no exemption", startup=None, error=True)
     review("wrong notes no exemption", notes="8" * 64, error=True)
     review("wrong boot no exemption", boot=OTHER_BOOT, error=True)
-    review("incomplete32 no exemption", startup=valid.replace(b"    ok 6 crystal_sddc_codec_lz4kd_decode_delta_bounds_test", b"    not ok 6 crystal_sddc_codec_lz4kd_decode_delta_bounds_test"), error=True)
+    incomplete = re.sub(rb"    ok 6 ([A-Za-z0-9_-]+)", rb"    not ok 6 \1", valid, count=1)
+    review("incomplete32 no exemption", startup=incomplete, error=True)
     # Remove the last suite result without depending on any particular case name.
     review("truncated suite no exemption", startup=b"\n".join(valid.splitlines()[:-1]) + b"\n", error=True)
     bad = valid.replace(("    ok 2 " + verify_kunit.NEGATIVE_CASE).encode(),

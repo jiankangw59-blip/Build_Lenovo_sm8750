@@ -16,6 +16,11 @@ def capture_lines(raw):
 
 def memory_error_reasons(line):
     """Recognize data-path failures, preserving genuine errors beside zero stats."""
+    # A passing KTAP case name may contain words such as "error". Its label is
+    # protocol output, not a data-path diagnostic.
+    if re.match(r"^(?:\s*<\d+>)?\[\s*\d+(?:\.\d+)?\](?:\s*\[\s*(?:T|C)\s*\d+\])?\s*ok\s+\d+\s+", line) or \
+            re.match(r"^\s*ok\s+\d+\s+", line):
+        return []
     context = re.search(r"zram|lz4kd|crystal|zms|sddc", line, re.I)
     cleaned = line
     reasons = []
