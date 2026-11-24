@@ -166,11 +166,22 @@ def verify(args):
             if symbol not in exports or int(exports[symbol], 16) != int(crc, 16):
                 failures.append({"module": name, "symbol": symbol, "expected": crc, "actual": exports.get(symbol)})
     btf = Btf(args.vmlinux.read_bytes())
-    actual = btf.layouts(baseline["structures"])
+    expected_layouts = baseline["structures"].copy()
+    scan_control = None
+    if args.kernel_version == "6.6.118":
+        path = pathlib.Path(__file__).with_name("kmi") / "plq110-6.6.118-layouts.json.gz"
+        snapshot = path.read_bytes()
+        if hashlib.sha256(snapshot).hexdigest() != "ea9641104b5d0b45e7103bf68590cb3f295279464ab8e2e72abca62b260beba4":
+            raise RuntimeError("Unreviewed 6.6.118 KMI layout baseline")
+        layouts = json.loads(gzip.decompress(snapshot))["structs"]
+        for name in ("task_struct", "rq"):
+            expected_layouts[name] = layouts[name]
+        scan_control = layouts["scan_control"]
+    actual = btf.layouts(expected_layouts)
     from memory_layout import verify_memory_layouts
-    memory_failures, memory_actual = verify_memory_layouts(btf)
+    memory_failures, memory_actual = verify_memory_layouts(btf, scan_control)
     failures.extend(memory_failures)
-    for name, expected in baseline["structures"].items():
+    for name, expected in expected_layouts.items():
         compatible = actual[name] == expected
         if name in ("tcp_sock", "inet_connection_sock"):
             # BBRv3 can consume an existing KABI reserve or unused bits. Every
@@ -242,6 +253,7 @@ if __name__ == "__main__":
     check.add_argument("--baseline", type=pathlib.Path, required=True)
     check.add_argument("--symvers", type=pathlib.Path, required=True)
     check.add_argument("--vmlinux", type=pathlib.Path, required=True)
+    check.add_argument("--kernel-version", choices=["6.6.89", "6.6.118"], default="6.6.89")
     check.add_argument("--output", type=pathlib.Path, required=True)
     quick = commands.add_parser("quick-crc")
     quick.add_argument("--baseline", type=pathlib.Path, required=True)

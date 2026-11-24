@@ -11,7 +11,8 @@ from integrate_crystal import (CRYSTAL_PROFILES, PROFILE_CHOICES, crystal_config
                                crystal_configuration_errors, integrate as integrate_crystal,
                                integrity_installed_hashes, kunit_boot_errors, stage2_profiles, unexpected_sddc_options)
 from idle_refinement import (PROFILE as IDLE_PROFILE, check_source_hashes as check_idle_hashes,
-                             refinement_policy as idle_policy, source_report as idle_source_report)
+                             load_118_port, refinement_policy as idle_policy,
+                             source_report as idle_source_report)
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -20,26 +21,43 @@ def run(argv, cwd):
     subprocess.run(argv, cwd=cwd, check=True)
 
 
-def apply(kernel, report, profile="baseline"):
-    manifest = json.loads((HERE / "patch-series.json").read_text(encoding="utf-8"))
+def kernel_version(kernel):
     makefile = (kernel / "Makefile").read_text(encoding="utf-8")
     numbers = [re.search(r"^" + key + r"\s*=\s*(\d+)", makefile, re.M).group(1)
                for key in ["VERSION", "PATCHLEVEL", "SUBLEVEL"]]
-    version = ".".join(numbers)
-    if version != manifest["base_kernel_version"]:
-        raise RuntimeError("Efficiency patch series requires audited base " + manifest["base_kernel_version"])
+    return ".".join(numbers)
+
+
+def apply(kernel, report, profile="baseline"):
+    manifest = json.loads((HERE / "patch-series.json").read_text(encoding="utf-8"))
+    version = kernel_version(kernel)
+    source_commit = manifest["base_commit"]
+    replacements = {}
+    if version == "6.6.118" and profile == IDLE_PROFILE:
+        port = load_118_port()
+        source_commit = port["base_commit"]
+        replacements = port["replacement_patches"]
+    elif version != manifest["base_kernel_version"]:
+        raise RuntimeError("Unreviewed efficiency profile and kernel version: " + profile + " " + version)
     report.mkdir(parents=True, exist_ok=True)
     applied = []
     patches = list(manifest["patches"])
-    idle = idle_policy() if profile == IDLE_PROFILE else None
+    idle = idle_policy(version) if profile == IDLE_PROFILE else None
     followup_names = stage2_profiles(profile)
     if followup_names:
         followups = json.loads((HERE / "stage2-series.json").read_text(encoding="utf-8"))
         patches.extend(followups[name] for name in followup_names)
-    if idle and (len(patches) != 22 or [item["file"] for item in patches[-3:]] != [
-            "patches/kcompressd-6.6.89.patch", "patches/le9uo-6.6.89.patch", idle["patch_file"]] or
-            patches[-1]["sha256"] != idle["patch_sha256"]):
+    if idle and (len(patches) != idle["base_patch_count"] + 1 or
+                 [item["file"] for item in patches[-3:]] != [
+                     "patches/kcompressd-6.6.89.patch", "patches/le9uo-6.6.89.patch",
+                     "patches/cpuidle-refinement-6.6.89.patch"]):
         raise RuntimeError("Idle refinement requires the exact final three-patch order")
+    if not replacements.keys() <= {item["file"] for item in patches}:
+        raise RuntimeError("Replacement patch does not match the reviewed series")
+    patches = [{**item, **replacements.get(item["file"], {})} for item in patches]
+    if idle and (patches[-1]["file"] != idle["patch_file"] or
+                 patches[-1]["sha256"] != idle["patch_sha256"]):
+        raise RuntimeError("Idle refinement patch differs from its source policy")
     for item in patches:
         path = HERE / item["file"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
@@ -71,7 +89,7 @@ def apply(kernel, report, profile="baseline"):
     integrate(kernel, report / "rekernel-integration.json")
     if profile in CRYSTAL_PROFILES:
         integrate_crystal(kernel, report / "crystal-integration.json", profile)
-    result = {"version": version, "profile": profile, "source": manifest["base_commit"], "applied": applied,
+    result = {"version": version, "profile": profile, "source": source_commit, "applied": applied,
               "build_verified": False, "runtime_verified": False}
     if idle:
         result["cpuidle_refinement"] = idle
@@ -136,7 +154,8 @@ def configure(kernel, profile="baseline"):
 
 
 def verify(kernel, report, profile="baseline"):
-    idle = idle_source_report(kernel) if profile == IDLE_PROFILE else None
+    idle = (idle_source_report(kernel, policy=idle_policy(kernel_version(kernel)))
+            if profile == IDLE_PROFILE else None)
     actual = (kernel / "out/.config").read_text(encoding="utf-8").splitlines()
     required = [line for line in (HERE / "ace6-baseline.config").read_text(encoding="utf-8").splitlines()
                 if line.startswith("CONFIG_")]

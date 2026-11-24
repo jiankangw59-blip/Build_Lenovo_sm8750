@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 
-def compare_memory_layouts(expected, actual):
+def compare_memory_layouts(expected, actual, scan_padding_bit=360):
     failures = []
     for name, old in expected.items():
         new = actual[name]
@@ -16,7 +16,8 @@ def compare_memory_layouts(expected, actual):
             if field in protected or field in reserved:
                 continue
             if name == "scan_control":
-                allowed = {"anon_below_min": 360, "clean_below_low": 361, "clean_below_min": 362}
+                allowed = {"anon_below_min": scan_padding_bit, "clean_below_low": scan_padding_bit + 1,
+                           "clean_below_min": scan_padding_bit + 2}
                 valid = (allowed.get(field["name"]) == field["offset_bits"] and
                          field["bitfield_bits"] == 1 and field["type"] == "int:unsigned int:4:32")
             else:
@@ -27,7 +28,11 @@ def compare_memory_layouts(expected, actual):
     return failures
 
 
-def verify_memory_layouts(btf):
+def verify_memory_layouts(btf, scan_control=None):
     expected = json.loads(Path(__file__).with_name("kmi").joinpath("plq110-memory-layouts.json").read_text(encoding="utf-8"))
+    scan_padding_bit = 360
+    if scan_control is not None:
+        expected["scan_control"] = scan_control
+        scan_padding_bit = 424
     actual = btf.layouts(expected)
-    return compare_memory_layouts(expected, actual), actual
+    return compare_memory_layouts(expected, actual, scan_padding_bit), actual

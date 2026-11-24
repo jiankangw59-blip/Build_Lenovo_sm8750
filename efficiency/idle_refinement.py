@@ -30,20 +30,41 @@ POLICY = {
 }
 
 
-def refinement_policy():
-    review = json.loads((HERE / "cpuidle-refinement.json").read_text(encoding="utf-8"))
-    if any(review.get(name) != value for name, value in POLICY.items()):
-        raise RuntimeError("Unreviewed cpuidle refinement policy")
-    raw = (HERE / POLICY["patch_file"]).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != POLICY["patch_sha256"]:
+def load_118_port():
+    port = json.loads((HERE / "ace6-6.6.118.json").read_text(encoding="utf-8"))
+    idle = port["cpuidle_refinement"]
+    if (port["base_kernel_version"] != "6.6.118" or
+            port["base_commit"] != "65b954a773b183a9999b06bb1b2f921f12eaaf11" or
+            port["profile"] != PROFILE or idle["base_source_commit"] != port["base_commit"] or
+            any(idle[name] != POLICY[name] for name in (
+                "base_profile", "base_patch_count", "upstream_commits",
+                "global_kmi_layout_changed", "runtime_governor_changed", "fuzz")) or
+            set(idle["files"]) != set(POLICY["files"]) or
+            set(idle["required_unchanged_files"]) != set(POLICY["required_unchanged_files"])):
+        raise RuntimeError("Unreviewed 6.6.118 efficiency port")
+    return port
+
+
+def refinement_policy(version="6.6.89"):
+    if version == "6.6.89":
+        review = json.loads((HERE / "cpuidle-refinement.json").read_text(encoding="utf-8"))
+        if any(review.get(name) != value for name, value in POLICY.items()):
+            raise RuntimeError("Unreviewed cpuidle refinement policy")
+        policy = POLICY
+    elif version == "6.6.118":
+        policy = load_118_port()["cpuidle_refinement"]
+    else:
+        raise RuntimeError("Unreviewed cpuidle refinement kernel version: " + version)
+    raw = (HERE / policy["patch_file"]).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != policy["patch_sha256"]:
         raise RuntimeError("Cpuidle refinement patch digest differs")
     old = re.findall(r"^--- a/(.+)$", raw.decode("utf-8"), re.M)
     new = re.findall(r"^\+\+\+ b/(.+)$", raw.decode("utf-8"), re.M)
-    if len(old) != len(POLICY["files"]) or set(old) != set(POLICY["files"]) or new != old:
+    if len(old) != len(policy["files"]) or set(old) != set(policy["files"]) or new != old:
         raise RuntimeError("Cpuidle refinement destinations differ")
-    return {**POLICY, "files": {name: dict(values) for name, values in POLICY["files"].items()},
-            "required_unchanged_files": dict(POLICY["required_unchanged_files"]),
-            "upstream_commits": list(POLICY["upstream_commits"])}
+    return {**policy, "files": {name: dict(values) for name, values in policy["files"].items()},
+            "required_unchanged_files": dict(policy["required_unchanged_files"]),
+            "upstream_commits": list(policy["upstream_commits"])}
 
 
 def check_source_hashes(observed, stage, policy=None):
