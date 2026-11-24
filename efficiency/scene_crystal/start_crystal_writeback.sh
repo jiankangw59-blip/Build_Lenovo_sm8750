@@ -1,6 +1,8 @@
 #!/system/bin/sh
 DIR=${0%/*}
 . "$DIR/crystal_writeback_policy.sh" || exit 1
+# The boot enrollment selects the kernel as the sole automatic policy.
+[ ! -f "$CW_STATE/crystal-kernel-writeback.enabled" ] || exit 0
 # Native/le9uo exits before logs, locks, journals or shared ledger writes.
 ace6_crystal_profile_active && cw_load_config && cw_identity && cw_software_counters || exit 0
 [ -x "$DIR/native_writeback_event" ] && [ -x "$CW_FLUSH" ] &&

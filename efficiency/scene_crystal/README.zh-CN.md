@@ -1,6 +1,6 @@
 # Scene 模块二：Crystal 初始化与待启用事件策略
 
-早期 helper 只初始化已明确登记的 Crystal 数据面。新增事件控制器仅作为待审核载荷提供，默认 `crystal_writeback_auto=false`，另需独立 `crystal-writeback-auto.enabled`，**本轮不部署、不启动自动回写**。纯 LZ4KD 对照候选和最终 LZ4KDS 候选使用同一结构，每个内核分别登记预期算法。当前没有 Crystal 自动策略真机验收。
+早期 helper 只初始化已明确登记的 Crystal 数据面。用户态事件控制器默认 `crystal_writeback_auto=false`，另需独立的 `crystal-writeback-auto.enabled`。纯 LZ4KD 对照候选和最终 LZ4KDS 候选使用同一结构，每个内核分别登记预期算法。Crystal 自带的内核回写策略由晚期服务单独启用。
 
 ## 启用条件
 
@@ -30,7 +30,7 @@
 
 hash-locked `prepare_scene.py` 从原始四份 Scene 文件生成载荷，post-fs-data 先调用 Crystal helper，再调用原生 helper。两套白名单独立，原生 helper 在 Crystal 节点存在时退出。晚期原有 startup 对完全匹配配置直接跳过；若不匹配，原有 HybridSwap runtime guard 会拒绝 teardown。原生自动回写 launcher 也会因原生 profile 不满足而退出。
 
-Crystal 的 enabled/core_enabled 保持 0，不设置 memcg 阈值，不启用驱动周期自动策略。待启用的用户态事件控制器详见 `POLICY.zh-CN.md`；它复用已验收原生事件程序的阻塞事件/冷却接口，使用独立状态。ZMS 的功能性 dirty flush 和 GC 属于驱动数据路径，可能在手动测试后运行；“自动策略关闭”不代表所有内部工作都被停掉。
+早期初始化将 Crystal 的 enabled/core_enabled 设为 0。Scene 的晚期服务只在 `crystal-kernel-writeback.enabled` 登记的内核上启用 Crystal 内核回写策略，每行填一个内核 notes SHA-256。启用前核对本次启动的 ZRAM、算法和 backing。若现有内存水位全为 0 且 ERM 未接管，则设置低水位 1024 MiB、高水位 1536 MiB、剩余交换阈值 1024 MiB。晚期结果记录于 `crystal-kernel-writeback.status`。内核策略登记优先于 `POLICY.zh-CN.md` 中的用户态事件控制器。
 
 建立新 backing 时设置的 `writeback_limit=2097152` 是 8 GiB **逻辑 slot 迁移上限**，不是物理写量计量。新增控制器按逻辑消耗恢复内核限额，按包含GC的ZMS物理计数计入共享原生日日账，不能直接复用原生 `limit + bd_writes` 的判定。2GiB是用户态计费目标，不是覆盖未来GC的物理硬限。
 
@@ -40,6 +40,6 @@ Crystal 的 enabled/core_enabled 保持 0，不设置 memcg 阈值，不启用�
 
 `run_host_checks.py --bash <Git Bash> --output <新审计目录>` 在私有目录模拟 sysfs 和 swap 工具，覆盖 19 项控制流：未启用/原生/le9uo退出、重复登记拒绝、配置选择、外部 backing、繁忙交换、低 RAM、幂等、两种算法的结构、关闭回写、配置容量，以及绑定/容量分配失败后的 RAM 恢复。测试明确标记 `kernel_io_mocked=true`、`android_runtime_verified=false`。
 
-`scene_native/build_scene.py` 对全部 shell 做 bash -n、重建原生事件程序与只读fsync helper，输出载荷SHA256和四份Scene源哈希。与已验收早期Crystal-v2载荷相比，已有文件仅service.sh增加独立launcher；原生事件程序、原生控制器/配置及早期helper字节保持不变。本轮新增自动策略载荷未部署，没有把主机结果当作启动或数据验证。打包配置是独立 `crystal-writeback.conf`，不得覆盖 `/data/swap_config.conf` 或已有自定义策略配置。
+`scene_native/build_scene.py` 对全部 shell 做 bash -n、重建原生事件程序与只读 fsync helper，输出载荷 SHA-256 和 Scene 源哈希。生成的 `service.sh` 在既有 `startup.sh` 成功后调用内核策略启动脚本和可选的用户态事件控制器。用户态打包配置是独立的 `crystal-writeback.conf`，保留 `/data/swap_config.conf` 与已有的自定义策略配置。
 
 真机后续仍需核对：当前 notes 和 boot ID、早期结果、16 GiB/正确算法/优先级、原厂模块、既有原生控制器没有误启动；私有测试 zram 的 writeback 后必须再 fsync，并用真实后端读写增量和数据校验确认 ZMS 落盘。
