@@ -171,12 +171,18 @@ def verify(args):
     if args.kernel_version == "6.6.118":
         path = pathlib.Path(__file__).with_name("kmi") / "plq110-6.6.118-layouts.json.gz"
         snapshot = path.read_bytes()
-        if hashlib.sha256(snapshot).hexdigest() != "ea9641104b5d0b45e7103bf68590cb3f295279464ab8e2e72abca62b260beba4":
+        if hashlib.sha256(snapshot).hexdigest() != "6d61bb7c0bd20530ddfe15c6158aecfe4cf207a8bb0b5d33682862901459ec09":
             raise RuntimeError("Unreviewed 6.6.118 KMI layout baseline")
-        layouts = json.loads(gzip.decompress(snapshot))["structs"]
-        for name in ("task_struct", "rq"):
-            expected_layouts[name] = layouts[name]
-        scan_control = layouts["scan_control"]
+        scan_control = json.loads(gzip.decompress(snapshot))["structs"]["scan_control"]
+        # The pinned OnePlus source keeps the 6.6.89 OEM scheduler layout
+        # with SCHED_CLASS_EXT enabled, adding dmabuf_info in task KABI slot 3.
+        # Keep every other task field and the entire OEM rq layout exact.
+        task = expected_layouts["task_struct"]
+        members = list(task["members"])
+        reserved3 = {"name": "android_kabi_reserved3", "offset_bits": 28736,
+                     "bitfield_bits": 0, "type": "int:unsigned long long:8:64"}
+        members[members.index(reserved3)] = {**reserved3, "name": "", "type": "union::8"}
+        expected_layouts["task_struct"] = {**task, "members": members}
     actual = btf.layouts(expected_layouts)
     from memory_layout import verify_memory_layouts
     memory_failures, memory_actual = verify_memory_layouts(btf, scan_control)

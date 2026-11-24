@@ -1172,7 +1172,7 @@ jobs:
               }
 
               for (const cache of caches) {
-                if (cache.key.startsWith(prefix) && cache.key !== currentKey) {
+                if (cache.ref === context.ref && cache.key.startsWith(prefix) && cache.key !== currentKey) {
                   core.info(`Deleting cache: ${cache.key} (ID: ${cache.id})`);
                   await github.rest.actions.deleteActionsCacheById({
                     owner,
