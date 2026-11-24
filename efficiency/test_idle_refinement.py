@@ -92,7 +92,9 @@ def run(args):
     integrated = crystal.integrate(kernel, kernel / "integration.json", crystal.IDLE_PROFILE)
     historical = read(old_fixture / "integration.json")
     ok("all 30 immutable Crystal import digests equal combined", integrated["source_sha256"] == historical["source_sha256"] and len(integrated["source_sha256"]) == 30)
-    ok("all installed Crystal and linkage bytes equal combined", integrated["installed_sha256"] == historical["installed_sha256"])
+    zms = crystal.zms_stats_patch_policy()
+    expected_installed = {**historical["installed_sha256"], zms["source_file"]: zms["patched_sha256"]}
+    ok("only ZMS stats source differs from historical combined", integrated["installed_sha256"] == expected_installed)
     ok("same integrity and read-only stats stages", integrated["sddc_integrity_patch"] == historical["sddc_integrity_patch"] and integrated["sddc_stats_patch"] == historical["sddc_stats_patch"])
     ok("same default lock native and KUnit configuration", crystal.crystal_configuration(crystal.IDLE_PROFILE) == crystal.crystal_configuration(crystal.COMBINED_PROFILE))
     for name in ("mm/page_io.c", "Makefile", "kernel/module/main.c", "lib/lz4kd/Makefile", "fs/erofs/zdata.c", "net/ipv4/tcp_bbr.c"):
@@ -101,9 +103,9 @@ def run(args):
         cp(before / name, kernel / name)
     old_evidence = args.audit / "run-45268976269/preflash-verification_6.6.89"
     actual_old_integration = read(old_evidence / "efficiency/crystal-integration.json")
-    ok("all 30 installed source hashes equal actual db79 artifact", all(
+    ok("installed source hashes except ZMS equal actual db79 artifact", all(
         integrated["installed_sha256"][name] == actual_old_integration["installed_sha256"][name]
-        for name in integrated["source_sha256"]))
+        for name in integrated["source_sha256"] if name != zms["source_file"]))
     config = (old_evidence / "kernel.config").read_text(encoding="utf-8")
     write(kernel / "out/.config", config)
     evidence = kernel / "evidence"
@@ -182,7 +184,12 @@ def run(args):
         records = read(previous / "efficiency/efficiency-patches.json")
         profile = records.get("profile", "baseline")
         with patch.object(prepare_boot, "idle_policy", side_effect=AssertionError("old profile read idle policy")):
-            ok("historical metadata " + run_id, prepare_boot.validate_profile_evidence(previous, records, profile) == profile)
+            if profile in crystal.CRYSTAL_PROFILES:
+                reject("historical Crystal build lacks the ZMS stats fix " + run_id,
+                       lambda: prepare_boot.validate_profile_evidence(previous, records, profile))
+            else:
+                ok("historical non-Crystal metadata " + run_id,
+                   prepare_boot.validate_profile_evidence(previous, records, profile) == profile)
         historical_runs[run_id] = {"profile": profile, "commit": (previous / "workflow-commit.txt").read_text().strip()}
 
     workflow = (HERE.parent / ".github/workflows/Build_oneplus_sm8750.yml").read_text(encoding="utf-8")

@@ -1,6 +1,15 @@
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
 --- a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
 +++ b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
+@@ -4389,7 +4389,7 @@
+ 
+ static void crystal_sddc_sample_eligibility_test(struct kunit *test)
+ {
+-	KUNIT_EXPECT_TRUE(test,
++	KUNIT_EXPECT_FALSE(test,
+ 		crystal_sddc_sample_eligible(CRYSTAL_SDDC_INDEX_MIN_SIZE));
+ 	KUNIT_EXPECT_TRUE(test,
+ 		crystal_sddc_sample_eligible(CRYSTAL_SDDC_INDEX_MIN_SIZE + 1));
 @@ -4735,6 +4735,8 @@
  	state->wire_size = 512;
  	state->page_hash = CRYSTAL_SDDC_TEST_PAGE_HASH;

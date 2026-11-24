@@ -119,21 +119,25 @@ chain above. Neither reads or requires the test-only overlay described below.
 
 Only `crystal-lz4kds-test` additionally applies `sddc-kunit-config.patch`, in the
 exact order original source → integrity (`e51140d12...`) → test configuration
-(`fe72aa733...`), using GNU patch `--fuzz=0`. It changes only
-`crystal_sddc_wb_sparse_state_test`: native ZMS disabled must expose the resident
+(`d724c9ab...`), using GNU patch `--fuzz=0`. It corrects two test bodies. In
+`crystal_sddc_wb_sparse_state_test`, native ZMS disabled must expose the resident
 epoch 5 and NONE/zero sparse-WB identity; native enabled retains the original
-epoch 17/DELTA/reference-size/page-hash assertions. This corrects the test's
-expectations for both configurations without changing production functions,
-adding skips, or changing the 26 state plus 6 codec declarations/order.
+epoch 17/DELTA/reference-size/page-hash assertions. The sample eligibility test
+requires a stream larger than 256 bytes, matching runtime admission. Both
+fixes preserve production functions and all 32 test declarations.
 
 The test integration report separately records `sddc_kunit_config_patch`, its
 input/output source digests and patch order. Precompile checks require the
-installed `fe72aa733...` source, and boot preparation additionally requires the
+installed `d724c9ab...` source, and boot preparation additionally requires the
 exact overlay record. The KTAP verifier records the same reviewed overlay in
 its declaration metadata while retaining the original 32-case acceptance
-rules. Older test artifacts with only `e51140d12...`, a missing/wrong overlay,
-or missing KUnit command-line parameters are rejected. Pure, ordinary non-test,
-combined, and earlier non-test artifact hashes/metadata remain unchanged.
+rules. Boot preparation rejects test artifacts without the current overlay or
+KUnit command-line parameters.
+
+All Crystal profiles now sum per-CPU deltas for ZMS stats snapshots. An idle
+snapshot can distinguish fully flushed storage from a stale nonzero global
+subtotal. Watermark reads in the store and flush loops remain batched. The
+preflash report identifies the `zms-exact-stats.patch` source and result.
 Host execution of the extracted test/snapshot functions uses mocked XArray and
 locks; it does not prove that kernel KUnit ran or passed.
 

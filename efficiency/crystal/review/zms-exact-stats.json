@@ -1,0 +1,12 @@
+{
+  "source_file": "drivers/crystalfrostwork/crystal_hybridswap/zms.c",
+  "source_sha256": "e3f6b60165558ac29c591a55bcc3ab21c11ee6162ae0095ebb3d78ecdc7a11a8",
+  "patch_sha256": "7d781a401ff0878e95bf38e71f919541329b15705d621a90538507480fe52754",
+  "patched_sha256": "8a7bde34007ab6a2eeba579db38235188f19e2e263f5afe54fd1a39a1ea4e8b6",
+  "patch_file": "zms-exact-stats.patch",
+  "fuzz": 0,
+  "counter_batch": 32,
+  "external_snapshot_sums_per_cpu_deltas": true,
+  "hot_path_watermarks_changed": false,
+  "kmi_layout_changed": false
+}

@@ -60,10 +60,20 @@ STATS_PLATFORM_DRIVER_SHA256 = "b4931a77ad29f7d11d5b1d915054e0464077fe696925f793
 SDDC_KUNIT_CONFIG = {
     "target": SDDC_INTEGRITY["source_file"],
     "base_after_integrity_sha256": SDDC_INTEGRITY["patched_sha256"],
-    "patch_sha256": "570bd70e0866ab4ac97eb2a04dc0e8d0ff64b55a05941b1281d692f16843c766",
-    "patched_sha256": "fe72aa7337b979eea9c6a296531bb2f79e0663fa56cfc966bca3032391e2f02f",
-    "only_changed_case": "crystal_sddc_wb_sparse_state_test",
+    "patch_sha256": "aaaa94ccca0319ba219c144008ced46daed4c912e40e14484b0df1fc957cf5ef",
+    "patched_sha256": "d724c9abf6c85f214b8840af739855376bd78810b45c92b56e5bb705f59977b3",
+    "changed_cases": ["crystal_sddc_wb_sparse_state_test", "crystal_sddc_sample_eligibility_test"],
     "production_code_changed": False, "state_cases": 26, "codec_cases": 6, "skipped_cases_added": 0,
+}
+
+ZMS_STATS = {
+    "source_file": DRIVER + "/zms.c",
+    "source_sha256": "e3f6b60165558ac29c591a55bcc3ab21c11ee6162ae0095ebb3d78ecdc7a11a8",
+    "patch_sha256": "7d781a401ff0878e95bf38e71f919541329b15705d621a90538507480fe52754",
+    "patched_sha256": "8a7bde34007ab6a2eeba579db38235188f19e2e263f5afe54fd1a39a1ea4e8b6",
+    "patch_file": "zms-exact-stats.patch", "fuzz": 0,
+    "counter_batch": 32, "external_snapshot_sums_per_cpu_deltas": True,
+    "hot_path_watermarks_changed": False, "kmi_layout_changed": False,
 }
 
 
@@ -114,6 +124,21 @@ def kunit_config_patch_policy():
         raise RuntimeError("SDDC KUnit configuration patch destinations differ")
     return {**SDDC_KUNIT_CONFIG, "patch_file": "sddc-kunit-config.patch", "fuzz": 0,
             "ordered_patches": ["sddc-integrity.patch", "sddc-kunit-config.patch"]}
+
+
+def zms_stats_patch_policy():
+    review = json.loads((HERE / "review/zms-exact-stats.json").read_text(encoding="utf-8"))
+    if any(review.get(name) != value for name, value in ZMS_STATS.items()):
+        raise RuntimeError("Unreviewed ZMS exact-stat snapshot policy")
+    raw = (HERE / ZMS_STATS["patch_file"]).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != ZMS_STATS["patch_sha256"]:
+        raise RuntimeError("ZMS exact-stat patch digest differs")
+    text = raw.decode("utf-8")
+    old = re.findall(r"^--- a/(.+)$", text, re.M)
+    new = re.findall(r"^\+\+\+ b/(.+)$", text, re.M)
+    if old != [ZMS_STATS["source_file"]] or new != old:
+        raise RuntimeError("ZMS exact-stat patch destination differs")
+    return {**ZMS_STATS}
 
 
 def apply_reviewed_overlay(files, policy, scratch_parent):
@@ -184,28 +209,36 @@ def apply_kunit_config_patch(raw, scratch_parent):
     if hashlib.sha256(patched).hexdigest() != policy["patched_sha256"]:
         raise RuntimeError("SDDC KUnit configuration result differs")
     before, after = raw.decode("utf-8"), patched.decode("utf-8")
-    case = r"static void " + policy["only_changed_case"] + r"\(.*?\n\}"
-    old, new = re.findall(case, before, re.S), re.findall(case, after, re.S)
-    if len(old) != 1 or len(new) != 1 or before.replace(old[0], new[0], 1) != after:
-        raise RuntimeError("SDDC KUnit overlay changes more than its reviewed test body")
+    expected = before
+    for name in policy["changed_cases"]:
+        case = r"static void " + name + r"\(.*?\n\}"
+        old, new = re.findall(case, expected, re.S), re.findall(case, after, re.S)
+        if (len(old) != 1 or len(new) != 1 or new[0] == old[0] or
+                re.search(r"\b(?:kunit_skip|KUNIT_SKIP)\s*\(", new[0])):
+            raise RuntimeError("Invalid SDDC KUnit overlay test body: " + name)
+        expected = expected.replace(old[0], new[0], 1)
+    if expected != after:
+        raise RuntimeError("SDDC KUnit overlay changes more than its reviewed test bodies")
     names = re.findall(r"\bKUNIT_CASE\((\w+)\)", before)
     if (len(names) != policy["state_cases"] or len(set(names)) != len(names) or
-            re.findall(r"\bKUNIT_CASE\((\w+)\)", after) != names or
-            re.search(r"\b(?:kunit_skip|KUNIT_SKIP)\s*\(", new[0])):
+            re.findall(r"\bKUNIT_CASE\((\w+)\)", after) != names):
         raise RuntimeError("SDDC KUnit overlay changes or skips the declared cases")
     return patched, policy
 
 
 def integrity_installed_hashes(profile):
     integrity = integrity_patch_policy()
+    zms = zms_stats_patch_policy()
+    zms_hash = {zms["source_file"]: zms["patched_sha256"]}
     if profile == "crystal-lz4kds-test":
         test = kunit_config_patch_policy()
-        return {test["target"]: test["patched_sha256"]}
+        return {test["target"]: test["patched_sha256"], **zms_hash}
     if profile not in COMBINED_PROFILES:
-        return {integrity["source_file"]: integrity["patched_sha256"]}
+        return {integrity["source_file"]: integrity["patched_sha256"], **zms_hash}
     stats = stats_patch_policy()
     hashes = {name: values["after_stats_sha256"] for name, values in stats["files"].items()}
     hashes[DRIVER + "/zram_drv.c"] = stats["platform_driver_sha256"]
+    hashes.update(zms_hash)
     return hashes
 
 
@@ -317,6 +350,12 @@ def integrate(kernel, report, profile="crystal"):
         pending[name] = raw
 
     integrity, stats, kunit_config = None, None, None
+    zms_policy = zms_stats_patch_policy()
+    zms_name = zms_policy["source_file"]
+    pending[zms_name] = apply_reviewed_overlay(
+        {zms_name: pending[zms_name]}, zms_policy, kernel)[zms_name]
+    if hashlib.sha256(pending[zms_name]).hexdigest() != zms_policy["patched_sha256"]:
+        raise RuntimeError("ZMS exact-stat result differs")
     if settings["sddc"]:
         name = SDDC_INTEGRITY["source_file"]
         pending[name], integrity = apply_integrity_patch(pending[name], kernel)
@@ -440,6 +479,7 @@ def integrate(kernel, report, profile="crystal"):
         "configuration": crystal_configuration(profile),
         "native_sddc_zms": False, "sddc_kunit_requested": settings["kunit"],
         "sddc_integrity_patch": integrity,
+        "zms_exact_stats_patch": zms_policy,
         "excluded": ["proprietary framework", "hardware overrides", "module overlay", "sidecar allocator",
                      "native SDDC-to-ZMS"] + ([] if settings["sddc"] else
                                                ["SDDC implementation objects", "private delta codec objects"]),

@@ -115,11 +115,13 @@ def run(args):
     assert applied.returncode == 0, applied.stderr.decode("utf-8", "replace")
     assert sha(dest) == meta["patched_sha256"]
     before, after = original.decode(), dest.read_text(encoding="utf-8")
-    old_case, new_case = extract(before, CASE), extract(after, CASE)
-    assert before.replace(old_case, new_case, 1) == after, "Production code changed"
+    expected = before
+    for case in meta["changed_cases"]:
+        expected = expected.replace(extract(before, case), extract(after, case), 1)
+    assert expected == after, "Production code changed"
     names = re.findall(r"^\s*KUNIT_CASE\((\w+)\)", after, re.M)
     assert len(names) == 26 and len(set(names)) == 26
-    assert "kunit_skip" not in new_case
+    assert all("kunit_skip" not in extract(after, case) for case in meta["changed_cases"])
     modes = []
     for stage, source in (("before", before), ("after", after)):
         body = "\n".join(extract(source, name) for name in (

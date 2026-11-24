@@ -1,16 +1,15 @@
 {
   "target": "drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c",
   "base_after_integrity_sha256": "e51140d12d447b21dc61101f819ad764a60d84ca949c8956a9a55f8095f6aa05",
-  "patch_sha256": "570bd70e0866ab4ac97eb2a04dc0e8d0ff64b55a05941b1281d692f16843c766",
-  "patched_sha256": "fe72aa7337b979eea9c6a296531bb2f79e0663fa56cfc966bca3032391e2f02f",
-  "only_changed_case": "crystal_sddc_wb_sparse_state_test",
+  "patch_sha256": "aaaa94ccca0319ba219c144008ced46daed4c912e40e14484b0df1fc957cf5ef",
+  "patched_sha256": "d724c9abf6c85f214b8840af739855376bd78810b45c92b56e5bb705f59977b3",
   "production_code_changed": false,
   "state_cases": 26,
   "codec_cases": 6,
   "skipped_cases_added": 0,
   "kernel_kunit_executed": false,
   "optional_after_stats_input_sha256": "ed2e2a521865eced8bffac5629b5d1d72bb0e44f69ce19a90f3fddc2fd4f58a8",
-  "after_stats_and_kunit_config_sha256": "572cf6a8e82efbd24358e85ac6cddbff0806efdcd54fac43f1994000973efaab",
+  "after_stats_and_kunit_config_sha256": "9e1e90701e6f707146b309bebe6929c195941b329785368d264a291630128afb",
   "host_exact_case_and_snapshot_branch_verified": true,
   "host_kernel_locks_and_xarray_mocked": true,
   "host_modes": [
@@ -79,5 +78,9 @@
     "crystal_sddc_native_wb_kind"
   ],
   "existing_integrity_patch_sha256": "dea7c0e140926560adbe5fa6a30942c0f3b919c14690de613b49fdaf704e2554",
-  "existing_stats_patch_sha256": "6690acd331ca6906ab065a389f67bdbaf917de5076e6cf9c42ff8165cfd6aba0"
+  "existing_stats_patch_sha256": "6690acd331ca6906ab065a389f67bdbaf917de5076e6cf9c42ff8165cfd6aba0",
+  "changed_cases": [
+    "crystal_sddc_wb_sparse_state_test",
+    "crystal_sddc_sample_eligibility_test"
+  ]
 }

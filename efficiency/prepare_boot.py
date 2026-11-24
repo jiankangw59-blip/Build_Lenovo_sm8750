@@ -13,7 +13,8 @@ from integrate_crystal import (COMBINED_PROFILE, COMBINED_PROFILES, CRYSTAL_PROF
                                crystal_configuration, crystal_configuration_errors,
                                integrity_installed_hashes, integrity_patch_policy, kunit_boot_errors,
                                kunit_config_patch_policy,
-                               source_manifest, stage2_profiles, stats_patch_policy)
+                               source_manifest, stage2_profiles, stats_patch_policy,
+                               zms_stats_patch_policy)
 from idle_refinement import (PROFILE as IDLE_PROFILE, check_source_hashes as check_idle_hashes,
                              refinement_policy as idle_policy)
 
@@ -122,6 +123,12 @@ def validate_profile_evidence(evidence, patches, expected_profile):
                                       crystal.get("native_sddc_zms") is not False or
                                       crystal.get("sddc_kunit_requested") is not CRYSTAL_PROFILES[profile]["kunit"]):
             raise RuntimeError("Candidate LZ4KDS integration policy differs")
+        zms = zms_stats_patch_policy()
+        zms_source = zms["source_file"]
+        if (crystal.get("zms_exact_stats_patch") != zms or
+                imported.get(zms_source) != zms["source_sha256"] or
+                installed.get(zms_source) != zms["patched_sha256"]):
+            raise RuntimeError("Candidate lacks the reviewed exact ZMS statistics overlay")
         if CRYSTAL_PROFILES[profile]["sddc"]:
             integrity = integrity_patch_policy()
             if crystal.get("sddc_integrity_patch") != integrity:

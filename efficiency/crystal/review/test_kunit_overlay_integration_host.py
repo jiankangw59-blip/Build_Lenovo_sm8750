@@ -72,7 +72,7 @@ def run(args):
        all("--fuzz=0" in command for command in commands) and
        [Path(command[command.index("-i") + 1]).name for command in commands] ==
        ["sddc-integrity.patch"] * 2 + ["sddc-kunit-config.patch"] * 2)
-    ok("e511 intermediate to fe72 installed", hashlib.sha256(intermediate).hexdigest() ==
+    ok("integrity intermediate to test overlay installed", hashlib.sha256(intermediate).hexdigest() ==
        test_policy["base_after_integrity_sha256"] and hashlib.sha256(final).hexdigest() == test_policy["patched_sha256"])
     state_names = re.findall(r"\bKUNIT_CASE\((\w+)\)", intermediate.decode())
     ok("state 26 declarations and order unchanged", len(state_names) == 26 and
@@ -89,7 +89,8 @@ def run(args):
     modes = []
     for enabled in (0, 1):
         body = "\n".join(helpers.extract(final.decode(), name) for name in (
-            "crystal_sddc_snapshot_locked", "crystal_sddc_snapshot_matches_locked", test_policy["only_changed_case"]))
+            "crystal_sddc_snapshot_locked", "crystal_sddc_snapshot_matches_locked",
+            "crystal_sddc_wb_sparse_state_test"))
         source = args.output / f"exact-case-native-{enabled}.c"
         library = args.output / f"exact-case-native-{enabled}.dll"
         write(source, helpers.PREFIX + body + helpers.SUFFIX)
@@ -133,7 +134,7 @@ def run(args):
     report = crystal.integrate(kernel, kernel / "integration.json", profile)
     ok("test report has exact dedicated overlay record", report["sddc_kunit_config_patch"] == test_policy)
     ok("test preserves immutable import inventory", report["source_sha256"] == crystal.source_manifest(profile)["files"])
-    ok("test installs fe72 source", report["installed_sha256"][target] == test_policy["patched_sha256"] == sha(kernel / target))
+    ok("test installs reviewed source", report["installed_sha256"][target] == test_policy["patched_sha256"] == sha(kernel / target))
     config = (old / profile / "evidence/kernel.config").read_text(encoding="utf-8")
     config = re.sub(r'^(CONFIG_CMDLINE=".*)"$', r'\1 kunit.enable=1 kunit.filter_glob=crystal-sddc-*"', config, flags=re.M)
     write(kernel / "out/.config", config)
@@ -179,7 +180,8 @@ def run(args):
     package = args.output / "package-without-test-overlay"
     shutil.copytree(original_package / "source", package / "source")
     for rel in ("source-manifest.json", "sddc-source-manifest.json", "sddc-integrity.patch", "sddc-integrity-stats.patch",
-                "review/sddc-integrity.json", "review/sddc-integrity-stats.json"):
+                "review/sddc-integrity.json", "review/sddc-integrity-stats.json",
+                "zms-exact-stats.patch", "review/zms-exact-stats.json"):
         cp(original_package / rel, package / rel)
     with patch.object(crystal, "HERE", package):
         reject("test rejects absent overlay package", lambda: crystal.integrity_installed_hashes(profile))
@@ -192,11 +194,13 @@ def run(args):
             actual = crystal.integrate(other, other / "integration.json", variant)
             historic = load(previous / "integration.json")
             ok(variant + " source inventory unchanged", actual["source_sha256"] == historic["source_sha256"])
-            ok(variant + " installed hashes unchanged", actual["installed_sha256"] == historic["installed_sha256"])
+            zms = crystal.zms_stats_patch_policy()
+            expected = {**historic["installed_sha256"], zms["source_file"]: zms["patched_sha256"]}
+            ok(variant + " changes only ZMS stats source", actual["installed_sha256"] == expected)
             ok(variant + " does not introduce test stage", "sddc_kunit_config_patch" not in actual)
             old_evidence = previous / "evidence"
-            ok(variant + " historical metadata accepted without test package",
-               prepare_boot.validate_profile_evidence(old_evidence, patches(variant), variant) == variant)
+            reject(variant + " historical build lacks the ZMS stats fix",
+                   lambda: prepare_boot.validate_profile_evidence(old_evidence, patches(variant), variant))
         cp(original_package / "sddc-kunit-config.patch", package / "sddc-kunit-config.patch")
         cp(original_package / "review/sddc-kunit-config.json", package / "review/sddc-kunit-config.json")
         (package / "sddc-kunit-config.patch").write_bytes(b"altered patch\n")
@@ -212,7 +216,11 @@ def run(args):
         previous = args.audit / ("run-" + run_id) / "preflash-verification_6.6.89"
         old_patches = load(previous / "efficiency/efficiency-patches.json")
         variant = old_patches.get("profile", "baseline")
-        ok("historical non-test " + run_id, prepare_boot.validate_profile_evidence(previous, old_patches, variant) == variant)
+        if variant in crystal.CRYSTAL_PROFILES:
+            reject("historical Crystal build lacks the ZMS stats fix " + run_id,
+                   lambda: prepare_boot.validate_profile_evidence(previous, old_patches, variant))
+        else:
+            ok("historical non-Crystal " + run_id, prepare_boot.validate_profile_evidence(previous, old_patches, variant) == variant)
         historical_runs[run_id] = variant
 
     spec = importlib.util.spec_from_file_location("verify_kunit_overlay_declarations", original_package / "verify_kunit.py")
