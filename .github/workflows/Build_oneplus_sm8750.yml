@@ -115,8 +115,59 @@ on:
         default: true
         type: boolean
 
+      enable_honk:
+        description: "并行构建带补丁的 Honk Android ARM64"
+        required: false
+        default: false
+        type: boolean
+
+      enable_oxidns:
+        description: "并行构建带补丁的 OxiDNS Android ARM64"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
+  honk:
+    name: Build Honk Android ARM64
+    if: ${{ inputs.enable_honk }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Apply Honk patches and build
+        run: bash ci/ace6-android/build.sh honk
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: Honk-Android-arm64
+          path: ${{ runner.temp }}/ace6-android/honk.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+
+  oxidns:
+    name: Build OxiDNS Android ARM64
+    if: ${{ inputs.enable_oxidns }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Apply OxiDNS patches and build
+        run: bash ci/ace6-android/build.sh oxidns
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: OxiDNS-Android-arm64
+          path: ${{ runner.temp }}/ace6-android/oxidns.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+
   build:
     name: Build_${{ github.event.inputs.device_name }}
     runs-on: ubuntu-latest
@@ -1354,10 +1405,10 @@ jobs:
       contents: write
       actions: read
     steps:
-      - name: 📥 Download all artifacts (下载所有构建产物)
+      - name: 📥 Download kernel release artifacts (下载内核发布产物)
         uses: actions/download-artifact@v5
         with:
-          pattern: "*"
+          pattern: "{AK3_*,Re-Kernel-v*}"
           path: ./release_assets
 
       - name: 📦 Prepare release files (准备发布文件)
