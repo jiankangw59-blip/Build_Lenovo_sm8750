@@ -33,10 +33,12 @@ def apply(kernel, report, profile="baseline"):
     version = kernel_version(kernel)
     source_commit = manifest["base_commit"]
     replacements = {}
+    additional_patches = []
     if version == "6.6.118" and profile == IDLE_PROFILE:
         port = load_118_port()
         source_commit = port["base_commit"]
         replacements = port["replacement_patches"]
+        additional_patches = port.get("additional_patches", [])
     elif version != manifest["base_kernel_version"]:
         raise RuntimeError("Unreviewed efficiency profile and kernel version: " + profile + " " + version)
     report.mkdir(parents=True, exist_ok=True)
@@ -58,7 +60,7 @@ def apply(kernel, report, profile="baseline"):
     if idle and (patches[-1]["file"] != idle["patch_file"] or
                  patches[-1]["sha256"] != idle["patch_sha256"]):
         raise RuntimeError("Idle refinement patch differs from its source policy")
-    for item in patches:
+    for item in [*patches, *additional_patches]:
         path = HERE / item["file"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
             raise RuntimeError("Patch checksum mismatch: " + item["file"])

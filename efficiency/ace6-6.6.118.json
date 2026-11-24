@@ -56,5 +56,13 @@
     "global_kmi_layout_changed": false,
     "runtime_governor_changed": false,
     "fuzz": 0
-  }
+  },
+  "additional_patches": [
+    {
+      "commit": "310b5a537a78c358a4cd244bd767c1a517a05459",
+      "file": "patches/psi-cgroup-rtpoll-6.6.152.patch",
+      "sha256": "2baa036c3a4fe095761b8e7e2cd4b4f3bd8acbc5cfb30c93edb75fdaee64c07d",
+      "source": "https://git.kernel.org/stable/c/310b5a537a78c358a4cd244bd767c1a517a05459"
+    }
+  ]
 }
