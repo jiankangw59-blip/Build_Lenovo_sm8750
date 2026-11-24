@@ -1,5 +1,6 @@
 """Read-only runtime gates; never infer boot success from a CI build alone."""
 import argparse
+import hashlib
 import json
 import pathlib
 import re
@@ -7,36 +8,131 @@ import shlex
 import subprocess
 
 
+def capture_lines(raw):
+    # Match the strict KTAP verifier's line numbering, including older captures
+    # containing CRCRLF. Never strip printk timestamps or caller fields.
+    return raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+def memory_error_reasons(line):
+    """Recognize data-path failures, preserving genuine errors beside zero stats."""
+    context = re.search(r"zram|lz4kd|crystal|zms|sddc", line, re.I)
+    cleaned = line
+    reasons = []
+    numeric = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*[=:]\s*([+-]?(?:0[xX][0-9a-fA-F]+|[0-9]+))(?![\w.])")
+    spans = []
+    hashes = {}
+    for match in numeric.finditer(line):
+        key, value = match[1].lower(), match[2]
+        integer = int(value, 16 if value.lstrip("+-").lower().startswith("0x") else 10)
+        if key in ("expected_hash", "actual_hash"):
+            hashes[key] = integer
+        error_key = bool(re.search(r"fail|error|corrupt|mismatch|errno", key) or key == "err")
+        return_key = key in ("ret", "rc") or key.endswith(("_ret", "_rc"))
+        if error_key or return_key:
+            if integer == 0:
+                spans.append(match.span())
+            elif context and (error_key or integer < 0):
+                reasons.append("nonzero_error_stat_or_status:" + key)
+    for first, last in reversed(spans):
+        cleaned = cleaned[:first] + " " + cleaned[last:]
+    if re.search(r"\bBUG:|\bOops:|\bI/O errors?\b", cleaned, re.I):
+        reasons.append("kernel_or_io_error")
+    if context:
+        if re.search(r"fail|error|corrupt|mismatch|bad[ _-]+(?:hash|checksum|header|payload)|\bnot ok\b", cleaned, re.I):
+            reasons.append("memory_data_path_error")
+        if len(hashes) == 2 and hashes["expected_hash"] != hashes["actual_hash"]:
+            reasons.append("page_hash_differs")
+    return reasons
+
+
+def review_memory_logs(live_raw, startup_raw, notes, boot_id):
+    """Only exact timestamped startup fixture records can gain an exemption."""
+    startup_lines = capture_lines(startup_raw) if startup_raw is not None else []
+    approved = {}
+    proof = {"attempted": False, "passed": False, "errors": []}
+    if startup_raw is not None and b"sddc_integrity mismatch" in startup_raw:
+        try:
+            from crystal.verify_kunit import strip_prefix, verify_log
+            verified = verify_log(startup_raw, notes, boot_id)
+            proof = {"attempted": True, "passed": verified["passed"],
+                     "target_case_count": verified["target_case_count"], "log_sha256": verified["log_sha256"],
+                     "verifier_sha256": verified["verifier_sha256"], "declarations": verified["declarations"],
+                     "errors": verified["errors"], "controlled_selftest_logs": verified["controlled_selftest_logs"]}
+            if verified["passed"] and verified["target_case_count"] == 32:
+                for record in verified["controlled_selftest_logs"]["controlled"]:
+                    number = record["line"]
+                    raw_line = startup_lines[number - 1]
+                    if (re.match(r"^(?:<\d+>)?\[\s*\d+(?:\.\d+)?\]", raw_line) and
+                            strip_prefix(raw_line) == record["message"]):
+                        approved[raw_line] = {"startup_line": number, "raw_line": raw_line,
+                                              "fixture_path": record["fields"]["path"]}
+        except (RuntimeError, ValueError, OSError, IndexError, KeyError) as error:
+            proof = {"attempted": True, "passed": False, "errors": [str(error)]}
+    # Deduplicate exact raw records across the two sources while retaining every
+    # source/line reference. A later timestamp is a different record and fails.
+    records = {}
+    for source, lines in (("live_dmesg", capture_lines(live_raw)), ("startup", startup_lines)):
+        for number, line in enumerate(lines, 1):
+            reasons = memory_error_reasons(line)
+            if not reasons:
+                continue
+            record = records.setdefault(line, {"raw_line": line, "reasons": reasons, "origins": []})
+            record["origins"].append({"source": source, "line": number})
+    errors, exemptions = [], []
+    for line, record in records.items():
+        if line in approved:
+            exemptions.append({**record, **approved[line]})
+        else:
+            errors.append(record)
+    return {"errors": [row["raw_line"] for row in errors], "error_records": errors,
+            "controlled_selftest_exemptions": exemptions, "kunit_startup_proof": proof,
+            "scope": "Exact timestamped controlled fixture lines only; no blanket KUnit/SDDC exemption"}
+
+
 def inspect(args):
-    def root(code):
+    def root(code, raw=False):
         result = subprocess.run(
-            ["adb", "-s", args.serial, "shell", "su -c " + shlex.quote(code)],
+            ["adb", "-s", args.serial, "exec-out", "su -c " + shlex.quote(code)],
             capture_output=True, timeout=45, check=True)
+        if raw:
+            return result.stdout
         return result.stdout.decode("utf-8", "replace").replace("\r", "").strip()
+
+    def current_notes():
+        fields = root("sha256sum /sys/kernel/notes").split()
+        if len(fields) != 2 or not re.fullmatch(r"[0-9a-f]{64}", fields[0]) or fields[1] != "/sys/kernel/notes":
+            raise RuntimeError("Unexpected kernel-notes identity response")
+        return fields[0]
 
     if root("getprop ro.product.model") != "PLQ110":
         raise RuntimeError("Runtime baseline applies only to PLQ110")
     result = {"serial": args.serial, "boot_id": root("cat /proc/sys/kernel/random/boot_id"),
               "kernel_version": root("cat /proc/version"), "gates": {}}
-    notes = root("sha256sum /sys/kernel/notes").split()[0]
+    notes = current_notes()
     result["kernel_notes_sha256"] = notes
     result["expected_kernel_notes_match"] = (
         notes == args.expected_notes_sha256 if args.expected_notes_sha256 else None)
     startup = ""
+    raw_startup = None
     if args.startup_snapshot:
         raw_startup = args.startup_snapshot.read_bytes()
-        startup = raw_startup.decode("utf-8", "replace")
+        startup = "\n".join(capture_lines(raw_startup))
         if result["boot_id"] not in startup.splitlines() or not any(
                 line.split() == [notes, "/sys/kernel/notes"] for line in startup.splitlines()):
             raise RuntimeError("Startup snapshot belongs to a different boot or kernel")
-        import hashlib
         result["startup_snapshot"] = {"path": str(args.startup_snapshot),
                                        "sha256": hashlib.sha256(raw_startup).hexdigest()}
 
     modules = {line.split()[0] for line in root("cat /proc/modules").splitlines() if line}
     critical = {"sched_walt", "qti_thermal_vendor_hooks", "qcom_cpufreq_thermal",
                 "thermal_config", "oplus_charger_present", "oplus_network_tuning"}
-    log = root("dmesg") + "\n" + startup
+    live_raw = root("dmesg", raw=True)
+    log = "\n".join(capture_lines(live_raw)) + "\n" + startup
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    live_path = args.output.with_suffix(".dmesg.raw")
+    live_path.write_bytes(live_raw)
+    result["live_dmesg_capture"] = {"path": str(live_path), "sha256": hashlib.sha256(live_raw).hexdigest()}
     candidates = [line for line in log.splitlines() if re.search(
         r"disagrees about version|unknown symbol|failed to load", line, re.I)]
     firmware = [line for line in candidates if re.search(
@@ -86,14 +182,15 @@ def inspect(args):
     backing = root("cat /sys/block/zram0/backing_dev 2>/dev/null || true")
     bd = root("cat /sys/block/zram0/bd_stat 2>/dev/null || true")
     counts = list(map(int, bd.split())) if re.fullmatch(r"\d+\s+\d+\s+\d+", bd) else []
-    memory_errors = [line for line in log.splitlines() if re.search(
-        r"(?:zram|lz4kd).*(?:fail|error|corrupt)|(?:\bBUG:|\bOops:|I/O error)", line, re.I)]
+    memory_review = review_memory_logs(live_raw, raw_startup, args.expected_notes_sha256 or notes, result["boot_id"])
+    memory_errors = memory_review["errors"]
     result["gates"]["zram_writeback"] = {
         "passed": f"[{args.expected_compressor}]" in algorithm and bool(counts)
                   and counts[1] > 0 and counts[2] > 0 and not memory_errors,
         "algorithm": algorithm, "expected_compressor": args.expected_compressor,
         "backing_device": backing, "bd_stat": bd,
         "errors": memory_errors,
+        "log_review": memory_review,
         "scope": "Counters require backing reads and writes; data integrity needs the separate isolated readback probe."}
 
     probe = root("/data/local/tmp/ace6-rekernel-probe 2>&1 || true")
@@ -121,7 +218,12 @@ def inspect(args):
         printf '%s=' "$n"; cat /sys/class/power_supply/battery/$n 2>/dev/null
     done
     true''')
-    result["all_runtime_gates_passed"] = all(g["passed"] for g in result["gates"].values())
+    end_boot = root("cat /proc/sys/kernel/random/boot_id")
+    end_notes = current_notes()
+    result["identity_recheck"] = {"boot_id": end_boot, "kernel_notes_sha256": end_notes,
+                                  "same_boot": end_boot == result["boot_id"], "same_notes": end_notes == notes}
+    result["identity_guard_passed"] = result["identity_recheck"]["same_boot"] and result["identity_recheck"]["same_notes"]
+    result["all_runtime_gates_passed"] = result["identity_guard_passed"] and all(g["passed"] for g in result["gates"].values())
     if result["expected_kernel_notes_match"] is False:
         result["all_runtime_gates_passed"] = False
     args.output.parent.mkdir(parents=True, exist_ok=True)

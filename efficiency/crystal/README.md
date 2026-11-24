@@ -74,7 +74,11 @@ test profile preserves the OEM command line and appends exactly one
 `kunit.enable=1 kunit.filter_glob=crystal-sddc-*`, replacing duplicate values of
 those two parameters. Precompile and boot preparation reject missing, repeated
 or different values, including the earlier test build without these parameters.
-The filter selects the two Crystal suites even when `KUNIT_DEFAULT_ENABLED=n`.
+The test profile also enables `KUNIT_DEFAULT_ENABLED` because this device's
+bootloader may omit the KUnit command-line parameters from the effective
+`/proc/cmdline`. The command-line values remain pinned for source and boot
+evidence, while the build-time default makes suite execution independent of
+that bootloader behavior.
 Other profiles do not append these parameters. Final-profile KUnit is
 disabled. The source-level experiment in `../lz4kds_lab` is host-only and is not
 copied into the kernel. It has not identified or repaired a demonstrated kernel

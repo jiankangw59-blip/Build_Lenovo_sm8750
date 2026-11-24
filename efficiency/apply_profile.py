@@ -113,6 +113,12 @@ def configure(kernel, profile="baseline"):
         else:
             m = re.fullmatch(r"# CONFIG_([A-Z0-9_]+) is not set", line)
             if m: run(["scripts/config", "--file", str(defconfig), "--disable", m.group(1)], kernel)
+    if profile == "crystal-lz4kds-test":
+        # Android bootloader cmdline handling on this device drops the KUnit
+        # parameters even though CONFIG_CMDLINE contains them.  Make the
+        # test suite opt-in at build time so the compiled Crystal suites run
+        # without depending on a bootloader argument.
+        run(["scripts/config", "--file", str(defconfig), "--enable", "KUNIT_DEFAULT_ENABLED"], kernel)
     if "le9uo" in stage2_profiles(profile):
         # A soft 5% clean-cache floor; avoid upstream's two hard 15% floors.
         for name, value in [("ANON_MIN_RATIO", 0), ("CLEAN_LOW_RATIO", 5), ("CLEAN_MIN_RATIO", 0)]:

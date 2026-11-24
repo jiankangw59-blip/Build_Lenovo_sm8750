@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import time
 import uuid
 
 SCHEMA = "zram-probe-four-way-v1"
@@ -262,8 +263,21 @@ def measure_round(private, program, seed, entry, pattern="mixed", require_conver
     entry["after_writeback_before_flush"] = private.snapshot()
     # The fill-time fdatasync precedes writeback and cannot prove ZMS is on disk.
     # No pattern page is read until this second, explicit flush succeeds.
-    entry["post_writeback_flush"] = json.loads(private.root(
-        f"{program} {private.device} flush {seed} {pattern}", timeout=90))
+    flush_attempts = []
+    for attempt in range(3):
+        flush_result = json.loads(private.root(
+            f"{program} {private.device} flush {seed} {pattern}", timeout=90))
+        dirty_pages = 0
+        if private.backend == "crystal":
+            dirty_pages = private.snapshot()["zms"].get("dirty_pages", 0)
+        flush_attempts.append({"attempt": attempt + 1,
+                               "result": flush_result,
+                               "dirty_pages": dirty_pages})
+        if private.backend != "crystal" or flush_attempts[-1]["dirty_pages"] == 0:
+            break
+        time.sleep(0.25)
+    entry["post_writeback_flush_attempts"] = flush_attempts
+    entry["post_writeback_flush"] = flush_attempts[-1]["result"]
     entry["post_writeback_backing_sync"] = private.backing_check("sync")
     entry["after_flush_before_first_read"] = private.snapshot()
     entry["backing_before_first_read"] = private.backing_check("check")

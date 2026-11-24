@@ -145,7 +145,19 @@ def run(args):
                     private.assert_owned(require_backing=True)
                     root(f"set -e; printf 'all\\n' > {private.sysfs}/idle; printf 'idle\\n' > {private.sysfs}/writeback", timeout=120)
                     snap("after_writeback_before_flush")
-                    command("flush")
+                    flush_attempts = []
+                    flush_result = command("flush", label="flush-1")
+                    flushed_probe = snap("after_flush_attempt_1")
+                    flush_attempts.append({"attempt": 1, "dirty_pages": flushed_probe["zms"]["dirty_pages"]})
+                    for attempt in range(2):
+                        if flushed_probe["zms"]["dirty_pages"] == 0:
+                            break
+                        time.sleep(0.25)
+                        flush_result = command("flush", label="flush-" + str(attempt + 2))
+                        flushed_probe = snap("after_flush_attempt_" + str(attempt + 2))
+                        flush_attempts.append({"attempt": attempt + 2,
+                                               "dirty_pages": flushed_probe["zms"]["dirty_pages"]})
+                    entry["flush_attempts"] = flush_attempts
                     entry["post_writeback_backing_sync"] = private.backing_check("sync")
                     flushed = snap("after_flush_before_first_cold_read")
                     entry["backing_before_first_cold_read"] = private.backing_check("check")
@@ -159,7 +171,7 @@ def run(args):
                         "all_pages_correct_after_overwrite": verified["bytes_processed"] == INPUT_BYTES,
                         "only_first_pair_discarded": discarded["pages_discarded"] == 2048,
                         "zeros_and_old_targets_correct_after_discard": discard_verified["bytes_processed"] == INPUT_BYTES,
-                        "explicit_flush_completed": entry["commands"]["flush"]["result"]["fsync"] is True,
+                        "explicit_flush_completed": flush_result.get("fsync") is True,
                         "owned_backing_synced_and_evicted": entry["post_writeback_backing_sync"].get("passed") is True,
                         "direct_io_zero_cache_before_and_after_read": all(
                             entry[key].get("passed") is True and entry[key].get("resident_pages") == 0
