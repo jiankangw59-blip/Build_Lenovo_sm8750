@@ -77,6 +77,36 @@ ZMS_STATS = {
 }
 
 
+ZMS_BIO_PATCH = "zms-flush-worker.patch"
+ZMS_BIO_PATCH_SHA256 = "ed8a6b757a4d57516447ca62cdc07174bfa51f63da9309c89160835e2572af50"
+ZMS_BIO_SOURCES = {
+    DRIVER + "/zms.c": (ZMS_STATS["patched_sha256"],
+                        "fe5b0aff43571edd912f83d08f827079a3841296fcb02e1e10ba43dae66cbb86"),
+    DRIVER + "/zms.h": ("1f86113461f73d69444e0e60a77186e1cb97c7b6a606c09166536a53fcfd50f5",
+                        "f847d0b69ffd15caf5b80ad6633c38fa3696313407286072c0432051ae3d0546"),
+}
+ZMS_BIO_BASE_DRIVER = ("fc8aee06660e3203c7bbc4bb8cf9e917613b72bf76889e64f4d5fd34345954a3",
+                       "cfee97447ff5aadc555ab60e032973f8784029bd774979c3fb340369d34f3eef")
+ZMS_BIO_COMBINED_DRIVER = (STATS_PLATFORM_DRIVER_SHA256,
+                           "eb42023c35777cfc7921a2da824073d67311f31d92e51c3bd05b8db2678dc19e")
+
+
+def zms_bio_patch_policy(profile):
+    driver = ZMS_BIO_COMBINED_DRIVER if profile in COMBINED_PROFILES else ZMS_BIO_BASE_DRIVER
+    sources = {DRIVER + "/zram_drv.c": driver, **ZMS_BIO_SOURCES}
+    raw = (HERE / ZMS_BIO_PATCH).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != ZMS_BIO_PATCH_SHA256:
+        raise RuntimeError("ZMS backing BIO patch digest differs")
+    text = raw.decode("utf-8")
+    old = re.findall(r"^--- a/(.+)$", text, re.M)
+    new = re.findall(r"^\+\+\+ b/(.+)$", text, re.M)
+    if old != list(sources) or new != old:
+        raise RuntimeError("ZMS backing BIO patch destinations differ")
+    return {"patch_file": ZMS_BIO_PATCH, "patch_sha256": ZMS_BIO_PATCH_SHA256, "fuzz": 0,
+            "files": {name: {"before_sha256": before, "patched_sha256": after}
+                      for name, (before, after) in sources.items()}}
+
+
 def integrity_patch_policy():
     """Check the reviewed overlay independently of the immutable upstream manifest."""
     review = json.loads((HERE / "review/sddc-integrity.json").read_text(encoding="utf-8"))
@@ -227,19 +257,19 @@ def apply_kunit_config_patch(raw, scratch_parent):
 
 
 def integrity_installed_hashes(profile):
-    integrity = integrity_patch_policy()
-    zms = zms_stats_patch_policy()
-    zms_hash = {zms["source_file"]: zms["patched_sha256"]}
+    zms = zms_bio_patch_policy(profile)
+    hashes = {name: values["patched_sha256"] for name, values in zms["files"].items()}
+    if not CRYSTAL_PROFILES[profile]["sddc"]:
+        return hashes
     if profile == "crystal-lz4kds-test":
         test = kunit_config_patch_policy()
-        return {test["target"]: test["patched_sha256"], **zms_hash}
+        return {**hashes, test["target"]: test["patched_sha256"]}
     if profile not in COMBINED_PROFILES:
-        return {integrity["source_file"]: integrity["patched_sha256"], **zms_hash}
+        integrity = integrity_patch_policy()
+        return {**hashes, integrity["source_file"]: integrity["patched_sha256"]}
     stats = stats_patch_policy()
-    hashes = {name: values["after_stats_sha256"] for name, values in stats["files"].items()}
-    hashes[DRIVER + "/zram_drv.c"] = stats["platform_driver_sha256"]
-    hashes.update(zms_hash)
-    return hashes
+    return {**{name: values["after_stats_sha256"] for name, values in stats["files"].items()},
+            **hashes}
 
 
 def stage2_profiles(profile):
@@ -414,6 +444,17 @@ def integrate(kernel, report, profile="crystal"):
     if stats and hashlib.sha256(pending[name]).hexdigest() != stats["platform_driver_sha256"]:
         raise RuntimeError("Combined Crystal driver platform-adaptation digest differs")
 
+    bio_policy = zms_bio_patch_policy(profile)
+    bio_sources = {name: pending[name] for name in bio_policy["files"]}
+    for name, raw in bio_sources.items():
+        if hashlib.sha256(raw).hexdigest() != bio_policy["files"][name]["before_sha256"]:
+            raise RuntimeError("Unreviewed ZMS backing BIO input: " + name)
+    bio_patched = apply_reviewed_overlay(bio_sources, bio_policy, kernel)
+    for name, raw in bio_patched.items():
+        if hashlib.sha256(raw).hexdigest() != bio_policy["files"][name]["patched_sha256"]:
+            raise RuntimeError("ZMS backing BIO result differs: " + name)
+    pending.update(bio_patched)
+
     # Keep the native comparison and the two explicit SDDC variants distinct,
     # including after a later config merge. No host reconstruction is imported.
     name = DRIVER + "/zcomp.c"
@@ -480,6 +521,7 @@ def integrate(kernel, report, profile="crystal"):
         "native_sddc_zms": False, "sddc_kunit_requested": settings["kunit"],
         "sddc_integrity_patch": integrity,
         "zms_exact_stats_patch": zms_policy,
+        "zms_bio_patch": bio_policy,
         "excluded": ["proprietary framework", "hardware overrides", "module overlay", "sidecar allocator",
                      "native SDDC-to-ZMS"] + ([] if settings["sddc"] else
                                                ["SDDC implementation objects", "private delta codec objects"]),

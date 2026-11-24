@@ -92,9 +92,11 @@ def run(args):
     integrated = crystal.integrate(kernel, kernel / "integration.json", crystal.IDLE_PROFILE)
     historical = read(old_fixture / "integration.json")
     ok("all 30 immutable Crystal import digests equal combined", integrated["source_sha256"] == historical["source_sha256"] and len(integrated["source_sha256"]) == 30)
-    zms = crystal.zms_stats_patch_policy()
-    expected_installed = {**historical["installed_sha256"], zms["source_file"]: zms["patched_sha256"]}
-    ok("only ZMS stats source differs from historical combined", integrated["installed_sha256"] == expected_installed)
+    bio = crystal.zms_bio_patch_policy(crystal.IDLE_PROFILE)
+    expected_installed = {**historical["installed_sha256"],
+                          **{name: item["patched_sha256"] for name, item in bio["files"].items()}}
+    ok("only ZMS stats and backing BIO sources differ from historical combined",
+       integrated["installed_sha256"] == expected_installed)
     ok("same integrity and read-only stats stages", integrated["sddc_integrity_patch"] == historical["sddc_integrity_patch"] and integrated["sddc_stats_patch"] == historical["sddc_stats_patch"])
     ok("same default lock native and KUnit configuration", crystal.crystal_configuration(crystal.IDLE_PROFILE) == crystal.crystal_configuration(crystal.COMBINED_PROFILE))
     for name in ("mm/page_io.c", "Makefile", "kernel/module/main.c", "lib/lz4kd/Makefile", "fs/erofs/zdata.c", "net/ipv4/tcp_bbr.c"):
@@ -103,9 +105,9 @@ def run(args):
         cp(before / name, kernel / name)
     old_evidence = args.audit / "run-45268976269/preflash-verification_6.6.89"
     actual_old_integration = read(old_evidence / "efficiency/crystal-integration.json")
-    ok("installed source hashes except ZMS equal actual db79 artifact", all(
+    ok("other installed source hashes equal actual db79 artifact", all(
         integrated["installed_sha256"][name] == actual_old_integration["installed_sha256"][name]
-        for name in integrated["source_sha256"] if name != zms["source_file"]))
+        for name in integrated["source_sha256"] if name not in bio["files"]))
     config = (old_evidence / "kernel.config").read_text(encoding="utf-8")
     write(kernel / "out/.config", config)
     evidence = kernel / "evidence"

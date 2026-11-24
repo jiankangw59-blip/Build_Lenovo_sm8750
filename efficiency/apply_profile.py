@@ -170,11 +170,10 @@ def verify(kernel, report, profile="baseline"):
         source = kernel / "drivers/crystalfrostwork/crystal_hybridswap"
         if not all((source / name).is_file() for name in ["zms.c", "zram_drv.c", "zcomp.c"]):
             missing.append("Crystal/ZMS source is missing")
-        if CRYSTAL_PROFILES[profile]["sddc"]:
-            for name, expected in integrity_installed_hashes(profile).items():
-                path = kernel / name
-                if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
-                    missing.append("Actual Crystal source lacks the reviewed overlay chain: " + name)
+        for name, expected in integrity_installed_hashes(profile).items():
+            path = kernel / name
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                missing.append("Actual Crystal source lacks the reviewed overlay chain: " + name)
     cmdline = next((line for line in actual if line.startswith('CONFIG_CMDLINE="')), "")
     if "workqueue.unbound_cpus=0-5" not in cmdline:
         missing.append("Native early workqueue CPU mask boot parameter")

@@ -181,7 +181,7 @@ def run(args):
     shutil.copytree(original_package / "source", package / "source")
     for rel in ("source-manifest.json", "sddc-source-manifest.json", "sddc-integrity.patch", "sddc-integrity-stats.patch",
                 "review/sddc-integrity.json", "review/sddc-integrity-stats.json",
-                "zms-exact-stats.patch", "review/zms-exact-stats.json"):
+                "zms-exact-stats.patch", "review/zms-exact-stats.json", "zms-flush-worker.patch"):
         cp(original_package / rel, package / rel)
     with patch.object(crystal, "HERE", package):
         reject("test rejects absent overlay package", lambda: crystal.integrity_installed_hashes(profile))
@@ -194,9 +194,10 @@ def run(args):
             actual = crystal.integrate(other, other / "integration.json", variant)
             historic = load(previous / "integration.json")
             ok(variant + " source inventory unchanged", actual["source_sha256"] == historic["source_sha256"])
-            zms = crystal.zms_stats_patch_policy()
-            expected = {**historic["installed_sha256"], zms["source_file"]: zms["patched_sha256"]}
-            ok(variant + " changes only ZMS stats source", actual["installed_sha256"] == expected)
+            bio = crystal.zms_bio_patch_policy(variant)
+            expected = {**historic["installed_sha256"],
+                        **{name: item["patched_sha256"] for name, item in bio["files"].items()}}
+            ok(variant + " changes only reviewed ZMS sources", actual["installed_sha256"] == expected)
             ok(variant + " does not introduce test stage", "sddc_kunit_config_patch" not in actual)
             old_evidence = previous / "evidence"
             reject(variant + " historical build lacks the ZMS stats fix",

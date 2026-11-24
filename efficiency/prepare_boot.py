@@ -14,7 +14,7 @@ from integrate_crystal import (COMBINED_PROFILE, COMBINED_PROFILES, CRYSTAL_PROF
                                integrity_installed_hashes, integrity_patch_policy, kunit_boot_errors,
                                kunit_config_patch_policy,
                                source_manifest, stage2_profiles, stats_patch_policy,
-                               zms_stats_patch_policy)
+                               zms_bio_patch_policy, zms_stats_patch_policy)
 from idle_refinement import (PROFILE as IDLE_PROFILE, check_source_hashes as check_idle_hashes,
                              refinement_policy as idle_policy)
 
@@ -125,19 +125,22 @@ def validate_profile_evidence(evidence, patches, expected_profile):
             raise RuntimeError("Candidate LZ4KDS integration policy differs")
         zms = zms_stats_patch_policy()
         zms_source = zms["source_file"]
+        bio = zms_bio_patch_policy(profile)
         if (crystal.get("zms_exact_stats_patch") != zms or
                 imported.get(zms_source) != zms["source_sha256"] or
-                installed.get(zms_source) != zms["patched_sha256"]):
+                bio["files"][zms_source]["before_sha256"] != zms["patched_sha256"]):
             raise RuntimeError("Candidate lacks the reviewed exact ZMS statistics overlay")
+        if crystal.get("zms_bio_patch") != bio:
+            raise RuntimeError("Candidate lacks the reviewed ZMS backing BIO overlay")
+        for name, expected in integrity_installed_hashes(profile).items():
+            if installed.get(name) != expected:
+                raise RuntimeError("Candidate installed overlay digest differs: " + name)
         if CRYSTAL_PROFILES[profile]["sddc"]:
             integrity = integrity_patch_policy()
             if crystal.get("sddc_integrity_patch") != integrity:
                 raise RuntimeError("Candidate lacks the reviewed SDDC integrity overlay")
             if imported.get(integrity["source_file"]) != integrity["source_sha256"]:
                 raise RuntimeError("Candidate SDDC integrity base source differs")
-            for name, expected in integrity_installed_hashes(profile).items():
-                if installed.get(name) != expected:
-                    raise RuntimeError("Candidate installed overlay digest differs: " + name)
             if CRYSTAL_PROFILES[profile]["kunit"]:
                 test = kunit_config_patch_policy()
                 if (crystal.get("sddc_kunit_config_patch") != test or
