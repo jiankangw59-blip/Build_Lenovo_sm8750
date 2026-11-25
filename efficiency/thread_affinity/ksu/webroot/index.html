@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">
+  <title>Ace 6 内核线程分配</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>内核线程分配</h1>
+      <button id="refresh" type="button">刷新</button>
+    </header>
+    <dl class="state" aria-label="内核状态">
+      <div><dt>生效规则</dt><dd id="rules">—</dd></div>
+      <div id="load-card" hidden><dt>载入配置行</dt><dd id="wire-lines">—</dd></div>
+      <div id="storage-card" hidden><dt>规则定义</dt><dd id="stored-rules">—</dd></div>
+      <div><dt>前台应用</dt><dd id="foreground">—</dd></div>
+    </dl>
+    <section class="editor">
+      <div class="editor-title">
+        <label for="rules-editor">手写规则</label>
+        <span id="line-count"></span>
+      </div>
+      <p id="syntax">每行一条，例如 <code>com.example.app{RenderThread}=0-4</code>。省略线程名可配置整个进程。</p>
+      <textarea id="rules-editor" spellcheck="false" autocapitalize="none" autocomplete="off" aria-describedby="syntax" disabled></textarea>
+      <div class="actions">
+        <button id="import" type="button">读取 AppOpt</button>
+        <button id="previous" type="button">读取上次备份</button>
+        <button id="save" type="button" class="primary" disabled>保存并应用</button>
+      </div>
+      <p id="feedback" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,1775 @@
+diff --git a/src/crates/honk-config/src/parser/routing.rs b/src/crates/honk-config/src/parser/routing.rs
+index 98214c61762cd298d7ae8e914a1d7e698368c72a..2053fcbf06563bc169acc080f4bb4b08a6303930 100644
+--- a/src/crates/honk-config/src/parser/routing.rs
++++ b/src/crates/honk-config/src/parser/routing.rs
+@@ -386,6 +386,7 @@ fn parse_route_matcher(
+     };
+     for name in [
+         "pname",
++        "android_package",
+         "dip",
+         "sip",
+         "domain",
+@@ -403,6 +404,7 @@ fn parse_route_matcher(
+                 _ => {
+                     let field = match name {
+                         "pname" => target.process_name,
++                        "android_package" => target.android_package,
+                         "sip" => target.source_ip,
+                         "dport" => target.port,
+                         "sport" => target.source_port,
+diff --git a/src/crates/honk-config/src/parser/tests.rs b/src/crates/honk-config/src/parser/tests.rs
+index c833714827360e1ab504803d2b48c4368665ac40..d4c62c77c908912a4c0f968b359a5c0bd3054c85 100644
+--- a/src/crates/honk-config/src/parser/tests.rs
++++ b/src/crates/honk-config/src/parser/tests.rs
+@@ -2365,6 +2365,26 @@ fn max_concurrent_dials_defaults_and_parses() {
+     assert!(matches!(err, crate::ConfigError::Parse(_)));
+ }
+ 
++#[test]
++fn android_package_keeps_long_names_and_negation() {
++    let cfg = parse_dae_config(
++        r#"
++routing {
++    android_package("com.example.long.reader") && !android_package("com.example.long.reader.test") -> direct
++    fallback: block
++}
++"#,
++    )
++    .unwrap();
++    let condition = &cfg.routing.rules[0].condition;
++    assert_eq!(condition.android_package, ["com.example.long.reader"]);
++    assert_eq!(
++        condition.not.android_package,
++        ["com.example.long.reader.test"]
++    );
++    assert!(condition.process_name.is_empty());
++}
++
+ #[test]
+ fn test_parse_route_negation_matrix() {
+     let input = r#"
+diff --git a/src/crates/honk-config/src/routing.rs b/src/crates/honk-config/src/routing.rs
+index f541967d788d7b3c0c55b71a5996ef45b1e1d3f8..b55e6f2274aae528e4f9b2b3cc2d6861c7f0659e 100644
+--- a/src/crates/honk-config/src/routing.rs
++++ b/src/crates/honk-config/src/routing.rs
+@@ -49,6 +49,8 @@ pub struct RoutingCondition {
+     pub protocol: Vec<String>,
+     #[serde(default)]
+     pub process_name: Vec<String>,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub android_package: Vec<String>,
+     #[serde(default)]
+     pub mac: Vec<String>,
+     #[serde(default)]
+@@ -90,6 +92,8 @@ pub struct RoutingNotCondition {
+     pub protocol: Vec<String>,
+     #[serde(default)]
+     pub process_name: Vec<String>,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub android_package: Vec<String>,
+     #[serde(default)]
+     pub mac: Vec<String>,
+     #[serde(default)]
+@@ -115,6 +119,7 @@ pub(crate) struct ConditionFields<'a> {
+     pub source_port: &'a mut Vec<String>,
+     pub protocol: &'a mut Vec<String>,
+     pub process_name: &'a mut Vec<String>,
++    pub android_package: &'a mut Vec<String>,
+     pub mac: &'a mut Vec<String>,
+     pub geo_ip: &'a mut Vec<String>,
+     pub geosite: &'a mut Vec<String>,
+@@ -135,6 +140,7 @@ macro_rules! fields_mut {
+             source_port: &mut $self.source_port,
+             protocol: &mut $self.protocol,
+             process_name: &mut $self.process_name,
++            android_package: &mut $self.android_package,
+             mac: &mut $self.mac,
+             geo_ip: &mut $self.geo_ip,
+             geosite: &mut $self.geosite,
+@@ -171,6 +177,7 @@ impl RoutingCondition {
+             ("sport", self.source_port.as_slice()),
+             ("protocol", self.protocol.as_slice()),
+             ("process", self.process_name.as_slice()),
++            ("process", self.android_package.as_slice()),
+             ("smac", self.mac.as_slice()),
+             ("ip_version", self.ip_version.as_slice()),
+             ("dscp", self.dscp.as_slice()),
+@@ -204,6 +211,7 @@ impl RoutingNotCondition {
+             self.source_port.as_slice(),
+             self.protocol.as_slice(),
+             self.process_name.as_slice(),
++            self.android_package.as_slice(),
+             self.mac.as_slice(),
+             self.geo_ip.as_slice(),
+             self.geosite.as_slice(),
+diff --git a/src/crates/honk-core/src/control/connection/handoff.rs b/src/crates/honk-core/src/control/connection/handoff.rs
+index d253b1de18c70856f47839c5f1ade9cfc54d001a..22ee433abffe567301a1d51cf1582e4ca92a11af 100644
+--- a/src/crates/honk-core/src/control/connection/handoff.rs
++++ b/src/crates/honk-core/src/control/connection/handoff.rs
+@@ -50,6 +50,7 @@ pub(in crate::control) struct HandoffResult {
+     pub(super) mac: [u8; 6],
+     pub(super) pname: [u8; 16],
+     pub(super) pid: u32,
++    pub(super) android_app_id: Option<u32>,
+     #[cfg(feature = "native-api")]
+     pub(super) trace_id: u32,
+     #[cfg(feature = "native-api")]
+@@ -70,6 +71,7 @@ impl From<RoutingHandoffEntry> for HandoffResult {
+             mac: entry.result.mac,
+             pname: entry.result.pname,
+             pid: entry.result.pid,
++            android_app_id: entry.result.android_app_id(),
+             #[cfg(feature = "native-api")]
+             trace_id: entry.trace_id,
+             #[cfg(feature = "native-api")]
+diff --git a/src/crates/honk-core/src/control/connection/routing.rs b/src/crates/honk-core/src/control/connection/routing.rs
+index 7397dd797db4fec48a3fba04f0a380bb82d649e2..e03b5204b5238ffc9a1bb993e1606351fca76b98 100644
+--- a/src/crates/honk-core/src/control/connection/routing.rs
++++ b/src/crates/honk-core/src/control/connection/routing.rs
+@@ -235,6 +235,7 @@ impl ControlPlaneHandle {
+         .then(super::observation::RouteObservation::kernel);
+         let (userspace_outbound, userspace_must, userspace_mark, matched_rule) = {
+             let router = self.router.read().await;
++            let android_app_id = handoff.and_then(|ho| ho.android_app_id);
+             #[cfg(feature = "native-api")]
+             let matched = if record_route
+                 && native_route.is_none()
+@@ -242,10 +243,11 @@ impl ControlPlaneHandle {
+             {
+                 let _config = self.config.read().await;
+                 let generation = self.diagnostics.read().generation;
+-                let observed = router.route_full_observed(
++                let observed = router.route_full_observed_with_android_app_id(
+                     &routing_conn_info,
+                     None,
+                     crate::observe::flows::MAX_RULE_VALUES,
++                    android_app_id,
+                 );
+                 let rules = crate::observe::rules::observed_rule_evaluations(
+                     &native.instance_id,
+@@ -264,10 +266,10 @@ impl ControlPlaneHandle {
+                 ));
+                 observed.matched
+             } else {
+-                router.route_full(&routing_conn_info)
++                router.route_full_with_android_app_id(&routing_conn_info, android_app_id)
+             };
+             #[cfg(not(feature = "native-api"))]
+-            let matched = router.route_full(&routing_conn_info);
++            let matched = router.route_full_with_android_app_id(&routing_conn_info, android_app_id);
+             // First matching rule's action, else the configured fallback action.
+             let action = matched.as_ref().map_or(router.fallback(), |hit| hit.action);
+             (
+diff --git a/src/crates/honk-core/src/control/connection/sniffed_domain_routing_tests.rs b/src/crates/honk-core/src/control/connection/sniffed_domain_routing_tests.rs
+index a6af0df9cbb6565994ac96bd08f259254830b5ff..59281e66e1b4c19c12f216d71935854e0257d82e 100644
+--- a/src/crates/honk-core/src/control/connection/sniffed_domain_routing_tests.rs
++++ b/src/crates/honk-core/src/control/connection/sniffed_domain_routing_tests.rs
+@@ -10,6 +10,7 @@ fn handoff(outbound: u8, must: u8) -> HandoffResult {
+         dscp: 0,
+         mac: [0; 6],
+         pname: [0; 16],
++        android_app_id: None,
+         pid: 0,
+         #[cfg(feature = "native-api")]
+         trace_id: 0,
+diff --git a/src/crates/honk-core/src/control/lifecycle.rs b/src/crates/honk-core/src/control/lifecycle.rs
+index c0e4e9f86ac1aa474c2084d1f21da943b6e0b5da..cce6d5c4b963ec83efc9236579756e7b8273b106 100644
+--- a/src/crates/honk-core/src/control/lifecycle.rs
++++ b/src/crates/honk-core/src/control/lifecycle.rs
+@@ -533,13 +533,24 @@ impl ControlPlane {
+                 dns.current().reap_idle_resources();
+             }
+         }));
++        let quality_changed = groups.read().score_state().transport_quality_changed();
+         tasks.push(tokio::spawn(async move {
+-            let mut tick = tokio::time::interval(Duration::from_secs(5));
+-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+             loop {
+-                tick.tick().await;
+-                let manager = groups.read().clone();
+-                manager.observe_transport_quality();
++                quality_changed.notified().await;
++                loop {
++                    // Hold the read lock through observation so publication
++                    // cannot replace the Score authority mid-sample.
++                    let fresh = groups.read().observe_transport_quality();
++                    if !fresh {
++                        break;
++                    }
++                    // A fresh episode may predate the first aggregate cell.
++                    // Resample only until the published episode expires.
++                    tokio::select! {
++                        () = quality_changed.notified() => {}
++                        () = tokio::time::sleep(Duration::from_secs(5)) => {}
++                    }
++                }
+             }
+         }));
+         self.start_preconnect().await;
+diff --git a/src/crates/honk-core/src/control/routing_matcher.rs b/src/crates/honk-core/src/control/routing_matcher.rs
+index f93db8453de6df0c2b75e86a47d891a7254a7a5e..0897a488ffdaa16d6f26652b079f19b72be215c2 100644
+--- a/src/crates/honk-core/src/control/routing_matcher.rs
++++ b/src/crates/honk-core/src/control/routing_matcher.rs
+@@ -6,6 +6,7 @@
+ use crate::ebpf::maps;
+ use crate::routing::{CompiledPredicate, CompiledRoute, RouteAction, Router};
+ use honk_config::types::DialMode;
++use honk_ebpf_common::routing_policy::ROUTING_FEATURE_ANDROID_PACKAGE;
+ use honk_ebpf_common::{
+     DomainRouting, LpmKey, OutboundIndex, ROUTE_TRACE_VALUES, ROUTING_FACT_CAPACITY,
+     ROUTING_FEATURE_DOMAIN, ROUTING_FEATURE_DOMAIN_REROUTE, ROUTING_FEATURE_PROCESS,
+@@ -43,6 +44,7 @@ pub enum KernelPredicate {
+     Dscp(Vec<u8>),
+     /// Canonical process-name bytes, without a trailing NUL.
+     ProcessName(Vec<Vec<u8>>),
++    AndroidPackage(Vec<u32>),
+ }
+ 
+ impl KernelPredicate {
+@@ -52,6 +54,7 @@ impl KernelPredicate {
+             Self::Protocol(mask) | Self::IpVersion(mask) => *mask == 0,
+             Self::Dscp(values) => values.is_empty(),
+             Self::ProcessName(names) => names.is_empty(),
++            Self::AndroidPackage(app_ids) => app_ids.is_empty(),
+             Self::Domain(_) | Self::DestinationIp(_) | Self::SourceIp(_) | Self::Mac(_) => false,
+         }
+     }
+@@ -299,6 +302,7 @@ impl RoutingPushPlan {
+         let mut mac_fact = FactAllocator::default();
+         let mut rules = Vec::with_capacity(router.compiled_routes().len());
+         let mut has_process = false;
++        let mut has_android_package = false;
+         let has_domain = domain_predicate_count != 0;
+ 
+         for route in router.compiled_routes() {
+@@ -375,6 +379,10 @@ impl RoutingPushPlan {
+                             names.iter().map(|name| name.as_bytes().to_vec()).collect(),
+                         )
+                     }
++                    CompiledPredicate::AndroidPackage(app_ids) => {
++                        has_android_package |= !app_ids.is_empty();
++                        KernelPredicate::AndroidPackage(app_ids.clone())
++                    }
+                 };
+                 conditions.push(KernelCondition {
+                     not: condition.not,
+@@ -413,6 +421,9 @@ impl RoutingPushPlan {
+         if has_process {
+             features |= ROUTING_FEATURE_PROCESS;
+         }
++        if has_android_package {
++            features |= ROUTING_FEATURE_ANDROID_PACKAGE;
++        }
+ 
+         let mut hash = Sha256::new();
+         hash.update(b"honk.routing.plan.v2\0");
+@@ -507,6 +518,7 @@ fn is_generic_port_rule(conditions: &[KernelCondition]) -> bool {
+             &condition.predicate,
+             KernelPredicate::Domain(_)
+                 | KernelPredicate::ProcessName(_)
++                | KernelPredicate::AndroidPackage(_)
+                 | KernelPredicate::Mac(_)
+                 | KernelPredicate::Dscp(_)
+         )
+diff --git a/src/crates/honk-core/src/control/routing_matcher/codegen.rs b/src/crates/honk-core/src/control/routing_matcher/codegen.rs
+index 1e65a3c9f98bf24955d41e668804702c1da74d01..30434c1942f19cdbda9eacae9b751ae2cdf72d20 100644
+--- a/src/crates/honk-core/src/control/routing_matcher/codegen.rs
++++ b/src/crates/honk-core/src/control/routing_matcher/codegen.rs
+@@ -11,6 +11,10 @@ use aya_obj::generated::{
+     BPF_JGT, BPF_JMP, BPF_JNE, BPF_JSET, BPF_K, BPF_LD, BPF_LDX, BPF_MEM, BPF_MOV, BPF_OR, BPF_ST,
+     BPF_STX, BPF_W, BPF_X, bpf_insn,
+ };
++use honk_ebpf_common::routing_policy::{
++    ANDROID_UID_RANGE, ROUTING_FEATURE_ANDROID_PACKAGE, ROUTING_INPUT_ANDROID_APP_MASK,
++    ROUTING_INPUT_ANDROID_APP_SHIFT,
++};
+ use honk_ebpf_common::{
+     KernelRouteOutput, ROUTE_FACT_PRESENT_SHIFT, ROUTE_TRACE_COMPLETE, ROUTE_TRACE_ENABLED,
+     ROUTE_TRACE_MATCHED, ROUTE_TRACE_NOT_MATCHED, ROUTE_TRACE_OVERFLOW, ROUTE_TRACE_VALUES,
+@@ -444,6 +448,15 @@ fn validate_plan(plan: &RoutingPushPlan) -> anyhow::Result<()> {
+         (plan.features & ROUTING_FEATURE_PROCESS != 0) == has_process,
+         "inconsistent process feature metadata"
+     );
++    let has_android_package = plan.rules.iter().any(|rule| {
++        rule.conditions.iter().any(|condition| {
++            matches!(&condition.predicate, KernelPredicate::AndroidPackage(ids) if !ids.is_empty())
++        })
++    });
++    ensure!(
++        (plan.features & ROUTING_FEATURE_ANDROID_PACKAGE != 0) == has_android_package,
++        "inconsistent Android package feature metadata"
++    );
+     for rule in &plan.rules {
+         ensure!(
+             rule.id < (1 << 22) - 1,
+@@ -477,6 +490,10 @@ fn validate_plan(plan: &RoutingPushPlan) -> anyhow::Result<()> {
+                         .all(|name| name.len() <= ROUTING_PROCESS_MAX_LEN),
+                     "emitted process matcher exceeds {ROUTING_PROCESS_MAX_LEN} bytes"
+                 ),
++                KernelPredicate::AndroidPackage(ids) => ensure!(
++                    ids.iter().all(|id| *id < ANDROID_UID_RANGE),
++                    "invalid emitted Android app ID"
++                ),
+                 KernelPredicate::Dscp(_) => {}
+             }
+         }
+@@ -668,6 +685,15 @@ fn emit_predicate(
+         KernelPredicate::ProcessName(names) => {
+             emit_process_names(asm, names, on_true, on_false)?;
+         }
++        KernelPredicate::AndroidPackage(app_ids) => {
++            asm.ldx_w(R0, R6, INPUT_FLAGS)?;
++            asm.and_imm(R0, ROUTING_INPUT_ANDROID_APP_MASK as i32)?;
++            for id in app_ids {
++                let encoded = ((id + 1) << ROUTING_INPUT_ANDROID_APP_SHIFT) as i32;
++                asm.jump(BPF_JEQ, R0, encoded, on_true)?;
++            }
++            asm.ja(on_false)?;
++        }
+     }
+     Ok(())
+ }
+diff --git a/src/crates/honk-core/src/ebpf/real/layout.rs b/src/crates/honk-core/src/ebpf/real/layout.rs
+index d9d9b70c605301eee86209b2925e69e1c09711d5..83caff4d98341d9ae9c0e451f6e3cf9fc8dcd16c 100644
+--- a/src/crates/honk-core/src/ebpf/real/layout.rs
++++ b/src/crates/honk-core/src/ebpf/real/layout.rs
+@@ -126,7 +126,11 @@ fn validate_flow_lifetime_btf(data: &[u8]) -> anyhow::Result<()> {
+                 ("trace_id", 4, offset_of!(ConnState, trace_id)),
+                 ("incarnation", 8, offset_of!(ConnState, incarnation)),
+                 ("tcp_syn_isn", 4, offset_of!(ConnState, tcp_syn_isn)),
+-                ("reserved", 4, offset_of!(ConnState, reserved)),
++                (
++                    "android_app_id_encoded",
++                    4,
++                    offset_of!(ConnState, android_app_id_encoded),
++                ),
+             ][..],
+         ),
+         (
+@@ -168,7 +172,11 @@ fn validate_flow_lifetime_btf(data: &[u8]) -> anyhow::Result<()> {
+                 ("pname", 16, offset_of!(RoutingResult, pname)),
+                 ("pid", 4, offset_of!(RoutingResult, pid)),
+                 ("dscp", 1, offset_of!(RoutingResult, dscp)),
+-                ("padding", 3, offset_of!(RoutingResult, padding)),
++                (
++                    "android_app_id",
++                    3,
++                    offset_of!(RoutingResult, android_app_id),
++                ),
+                 (
+                     "decision_token",
+                     4,
+diff --git a/src/crates/honk-core/src/native_api/routing.rs b/src/crates/honk-core/src/native_api/routing.rs
+index d4d07febb733a1f5dad22b1b678fb62df00d39ef..dad0feb1e15e3a5921947134727da8ffcb2520cd 100644
+--- a/src/crates/honk-core/src/native_api/routing.rs
++++ b/src/crates/honk-core/src/native_api/routing.rs
+@@ -85,6 +85,7 @@ struct TraceInput {
+     src_ip: Option<IpAddr>,
+     src_port: Option<u16>,
+     pname: Option<String>,
++    android_app_id: Option<u32>,
+     dscp: Option<u8>,
+     #[serde(rename = "mark")]
+     _mark: Option<u32>,
+@@ -95,6 +96,9 @@ impl TraceInput {
+         if self.dst_port == 0
+             || self.src_port == Some(0)
+             || self.dscp.is_some_and(|v| v > 63)
++            || self
++                .android_app_id
++                .is_some_and(|id| id >= honk_ebpf_common::routing_policy::ANDROID_UID_RANGE)
+             || self
+                 .domain
+                 .as_deref()
+@@ -118,6 +122,7 @@ impl TraceInput {
+                 Network::Udp => "udp",
+             },
+             process_name: self.pname.as_deref(),
++            android_app_id: self.android_app_id,
+             mac: None,
+             dscp: self.dscp,
+         }
+diff --git a/src/crates/honk-core/src/routing/android_packages.rs b/src/crates/honk-core/src/routing/android_packages.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e4b9a418c4fd57e46db9d155f921d67dbee9988f
+--- /dev/null
++++ b/src/crates/honk-core/src/routing/android_packages.rs
+@@ -0,0 +1,122 @@
++//! Resolve immutable package ownership for one routing generation.
++
++use std::{collections::HashMap, io, path::Path};
++
++use anyhow::Context;
++use honk_ebpf_common::routing_policy::ANDROID_UID_RANGE;
++
++const PACKAGES_LIST: &str = "/data/system/packages.list";
++
++#[derive(Default)]
++pub(super) struct AndroidPackages {
++    by_name: HashMap<String, Option<u32>>,
++}
++
++impl AndroidPackages {
++    pub(super) fn load() -> anyhow::Result<Self> {
++        match std::fs::read_to_string(PACKAGES_LIST) {
++            Ok(data) => Self::parse(&data),
++            // A desktop can validate the configuration without Android's package table.
++            Err(error)
++                if error.kind() == io::ErrorKind::NotFound
++                    && !Path::new("/system/bin/getprop").exists() =>
++            {
++                Ok(Self::default())
++            }
++            Err(error) => Err(error).context("read Android package ownership"),
++        }
++    }
++
++    fn parse(data: &str) -> anyhow::Result<Self> {
++        let mut owners = HashMap::new();
++        let mut rows = Vec::new();
++        for (idx, line) in data.lines().enumerate() {
++            if line.is_empty() {
++                continue;
++            }
++            let mut fields = line.split_ascii_whitespace();
++            let (Some(name), Some(uid)) = (fields.next(), fields.next()) else {
++                anyhow::bail!("Android package ownership row {} is incomplete", idx + 1);
++            };
++            let uid = uid.parse::<u32>().with_context(|| {
++                format!(
++                    "invalid app ID in Android package ownership row {}",
++                    idx + 1
++                )
++            })?;
++            anyhow::ensure!(
++                uid < ANDROID_UID_RANGE,
++                "Android package ownership contains a non-base UID"
++            );
++            *owners.entry(uid).or_insert(0usize) += 1;
++            rows.push((name, uid));
++        }
++        let mut by_name = HashMap::new();
++        for (name, uid) in rows {
++            let owner = (owners[&uid] == 1).then_some(uid);
++            by_name
++                .entry(name.to_ascii_lowercase())
++                .and_modify(|entry| *entry = None)
++                .or_insert(owner);
++        }
++        Ok(Self { by_name })
++    }
++
++    pub(super) fn resolve(&self, names: &[String]) -> anyhow::Result<Vec<u32>> {
++        let mut app_ids = Vec::new();
++        for name in names {
++            anyhow::ensure!(
++                !name.is_empty()
++                    && name
++                        .bytes()
++                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')),
++                "android_package() requires literal Android package identifiers"
++            );
++            if let Some(owner) = self.by_name.get(&name.to_ascii_lowercase()) {
++                let Some(id) = owner else {
++                    anyhow::bail!("android_package() requires an unambiguous package owner");
++                };
++                app_ids.push(*id);
++            }
++        }
++        app_ids.sort_unstable();
++        app_ids.dedup();
++        Ok(app_ids)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn exact_packages_resolve_without_prefix_or_shared_uid_matches() {
++        let list = "com.example.long.alpha 10123 0\n\
++                    com.example.long.alphabet 10124 0\n\
++                    com.example.shared.first 10125 0\n\
++                    com.example.shared.second 10125 0\n";
++        let names = |s: &str| [s.to_owned()];
++        let packages = AndroidPackages::parse(list).unwrap();
++        assert_eq!(
++            packages.resolve(&names("COM.EXAMPLE.LONG.ALPHA")).unwrap(),
++            [10123]
++        );
++        assert_eq!(
++            packages
++                .resolve(&names("com.example.long.alphabet"))
++                .unwrap(),
++            [10124]
++        );
++        assert!(
++            packages
++                .resolve(&names("com.example.long"))
++                .unwrap()
++                .is_empty()
++        );
++        assert!(
++            packages
++                .resolve(&names("com.example.shared.first"))
++                .is_err()
++        );
++    }
++}
+diff --git a/src/crates/honk-core/src/routing/fingerprint.rs b/src/crates/honk-core/src/routing/fingerprint.rs
+index 60a0967740899e7a398f0f852977f408ce56c0dd..4b409d5c49de0fd901560b2e65e8a741b0964ebd 100644
+--- a/src/crates/honk-core/src/routing/fingerprint.rs
++++ b/src/crates/honk-core/src/routing/fingerprint.rs
+@@ -132,6 +132,10 @@ fn encode_condition(encoder: &mut Encoder<'_>, condition: &CompiledCondition) {
+             encoder.tag(9);
+             encoder.list(macs, |encoder, mac| encoder.fixed(mac));
+         }
++        CompiledPredicate::AndroidPackage(app_ids) => {
++            encoder.tag(10);
++            encoder.list(app_ids, |encoder, id| encoder.u32(*id));
++        }
+     }
+ }
+ 
+diff --git a/src/crates/honk-core/src/routing/ir.rs b/src/crates/honk-core/src/routing/ir.rs
+index aed1f60b196e3b54c32040667f4b6612fad30270..6e34ab814d1482d333f8336a7c2b4a62294ba025 100644
+--- a/src/crates/honk-core/src/routing/ir.rs
++++ b/src/crates/honk-core/src/routing/ir.rs
+@@ -28,6 +28,7 @@ pub enum CompiledPredicate {
+     IpVersion(u8),
+     Dscp(Vec<u8>),
+     ProcessName(Vec<String>),
++    AndroidPackage(Vec<u32>),
+     Mac(Vec<[u8; 6]>),
+ }
+ 
+diff --git a/src/crates/honk-core/src/routing/lan_protection.rs b/src/crates/honk-core/src/routing/lan_protection.rs
+index e5c815516e8e77fc4532bc7677beeaeb1d85312e..417292d3dbf47d60a46f845522d83a8851351180 100644
+--- a/src/crates/honk-core/src/routing/lan_protection.rs
++++ b/src/crates/honk-core/src/routing/lan_protection.rs
+@@ -27,6 +27,7 @@ impl Router {
+                         | CompiledPredicate::SourcePort(_)
+                         | CompiledPredicate::Dscp(_)
+                         | CompiledPredicate::ProcessName(_)
++                        | CompiledPredicate::AndroidPackage(_)
+                         | CompiledPredicate::Mac(_) => None,
+                     };
+                     match matched.map(|matched| matched != condition.not) {
+diff --git a/src/crates/honk-core/src/routing/mod.rs b/src/crates/honk-core/src/routing/mod.rs
+index 989ca9d47147b7e069d13a2d0f3b1314513fc9f9..c7f4988291194c60ad5a6fdb9ec35c758bd30508 100644
+--- a/src/crates/honk-core/src/routing/mod.rs
++++ b/src/crates/honk-core/src/routing/mod.rs
+@@ -6,6 +6,7 @@ use honk_outbound::proxy::DirectMark;
+ use regex::Regex;
+ use std::{net::IpAddr, sync::Arc};
+ 
++mod android_packages;
+ mod domain;
+ mod fingerprint;
+ mod geo;
+@@ -16,6 +17,7 @@ mod lpm;
+ 
+ #[cfg(feature = "native-api")]
+ pub(crate) mod native;
++use android_packages::AndroidPackages;
+ pub(crate) use domain::GeositeMatcher;
+ use domain::{DomainMatcher, DomainRegistry};
+ #[cfg(feature = "native-api")]
+@@ -114,6 +116,7 @@ pub(crate) struct PredicateInput<'a> {
+     pub(crate) src_port: Option<u16>,
+     pub(crate) protocol: &'a str,
+     pub(crate) process_name: Option<&'a str>,
++    pub(crate) android_app_id: Option<u32>,
+     pub(crate) mac: Option<&'a str>,
+     pub(crate) dscp: Option<u8>,
+ }
+@@ -251,11 +254,27 @@ impl Router {
+         let geo_fingerprint = geo_sources.fingerprint_for(&requirements);
+         let mut registry = DomainRegistry::default();
+         let mut compiled = Vec::with_capacity(rules.len());
++        let packages = if rules.iter().any(|rule| {
++            !rule.condition.android_package.is_empty()
++                || !rule.condition.not.android_package.is_empty()
++        }) {
++            AndroidPackages::load()?
++        } else {
++            AndroidPackages::default()
++        };
+ 
+         for (source_index, rule) in rules.iter().enumerate() {
+             let mut conditions = Vec::new();
+             for not in [false, true] {
+-                append_conditions(&mut conditions, not, rule, &assets, &mut registry, shared)?;
++                append_conditions(
++                    &mut conditions,
++                    not,
++                    rule,
++                    &assets,
++                    &mut registry,
++                    shared,
++                    &packages,
++                )?;
+             }
+ 
+             let outbound = rule.outbound.as_str().to_owned();
+@@ -448,7 +467,15 @@ impl Router {
+         conn: &ConnectionInfo,
+         domain_bitmap: Option<&DomainRouting>,
+     ) -> Option<RouteMatch<'a>> {
+-        self.route_full_with_observer(conn, domain_bitmap, |_, _, _| {})
++        self.route_full_with_observer(conn, domain_bitmap, None, |_, _, _| {})
++    }
++
++    pub(crate) fn route_full_with_android_app_id<'a>(
++        &'a self,
++        conn: &ConnectionInfo,
++        app_id: Option<u32>,
++    ) -> Option<RouteMatch<'a>> {
++        self.route_full_with_observer(conn, None, app_id, |_, _, _| {})
+     }
+ 
+     #[inline]
+@@ -456,12 +483,14 @@ impl Router {
+         &'a self,
+         conn: &ConnectionInfo,
+         domain_bitmap: Option<&DomainRouting>,
++        app_id: Option<u32>,
+         mut observe: impl FnMut(usize, Option<usize>, bool),
+     ) -> Option<RouteMatch<'a>> {
+         self.routes.iter().enumerate().find_map(|(index, route)| {
+-            let matched = self.matches_route(route, conn, domain_bitmap, |condition, matched| {
+-                observe(index, Some(condition), matched);
+-            });
++            let matched =
++                self.matches_route(route, conn, domain_bitmap, app_id, |condition, matched| {
++                    observe(index, Some(condition), matched);
++                });
+             observe(index, None, matched);
+             if !matched {
+                 return None;
+@@ -489,6 +518,7 @@ impl Router {
+         route: &CompiledRoute,
+         conn: &ConnectionInfo,
+         domain_bitmap: Option<&DomainRouting>,
++        app_id: Option<u32>,
+         mut observe: impl FnMut(usize, bool),
+     ) -> bool {
+         let input = PredicateInput {
+@@ -499,6 +529,7 @@ impl Router {
+             src_port: Some(conn.src_port),
+             protocol: conn.protocol,
+             process_name: conn.process_name.as_deref(),
++            android_app_id: app_id,
+             mac: conn.mac.as_deref(),
+             dscp: conn.dscp,
+         };
+@@ -566,6 +597,9 @@ impl Router {
+             CompiledPredicate::ProcessName(patterns) => input.process_name.map(|name| {
+                 bounded_any::<BOUNDED, _>(patterns, deadline, |pattern| name.contains(pattern))
+             }),
++            CompiledPredicate::AndroidPackage(ids) => input
++                .android_app_id
++                .map(|id| bounded_any::<BOUNDED, _>(ids, deadline, |owner| *owner == id)),
+             CompiledPredicate::Mac(macs) => input.mac.map(|mac| {
+                 normalize_mac_bytes(mac).is_some_and(|mac| {
+                     bounded_any::<BOUNDED, _>(macs, deadline, |value| *value == mac)
+@@ -610,6 +644,7 @@ fn append_conditions(
+     assets: &GeoAssets,
+     registry: &mut DomainRegistry,
+     shared: &mut SharedMatchers,
++    packages: &AndroidPackages,
+ ) -> anyhow::Result<()> {
+     macro_rules! field {
+         ($name:ident) => {
+@@ -630,6 +665,7 @@ fn append_conditions(
+     let source_ports = field!(source_port);
+     let protocols = field!(protocol);
+     let process_names = field!(process_name);
++    let package_names = field!(android_package);
+     let macs = field!(mac);
+     let geo_ips = field!(geo_ip);
+     let geosites = field!(geosite);
+@@ -710,6 +746,12 @@ fn append_conditions(
+             ),
+         });
+     }
++    if !package_names.is_empty() {
++        conditions.push(CompiledCondition {
++            not,
++            predicate: CompiledPredicate::AndroidPackage(packages.resolve(package_names)?),
++        });
++    }
+     if !macs.is_empty() {
+         conditions.push(CompiledCondition {
+             not,
+diff --git a/src/crates/honk-core/src/routing/native.rs b/src/crates/honk-core/src/routing/native.rs
+index 2077a9f1d70ef69e063c23a7be2f29945521577d..16a081f1ed9726f142a493dd4c0a8ed6237f0da1 100644
+--- a/src/crates/honk-core/src/routing/native.rs
++++ b/src/crates/honk-core/src/routing/native.rs
+@@ -45,6 +45,16 @@ impl Router {
+         conn: &ConnectionInfo,
+         bitmap: Option<&DomainRouting>,
+         max_steps: usize,
++    ) -> ObservedRoute<'_> {
++        self.route_full_observed_with_android_app_id(conn, bitmap, max_steps, None)
++    }
++
++    pub(crate) fn route_full_observed_with_android_app_id(
++        &self,
++        conn: &ConnectionInfo,
++        bitmap: Option<&DomainRouting>,
++        max_steps: usize,
++        app_id: Option<u32>,
+     ) -> ObservedRoute<'_> {
+         // Reserve only evidence slots, never evaluate predicates here. Budget exhaustion
+         // omits a suffix but cannot short-circuit the production decision below.
+@@ -79,23 +89,24 @@ impl Router {
+             }
+         }
+ 
+-        let matched = self.route_full_with_observer(conn, bitmap, |rule, condition, matched| {
+-            let Some(evaluated) = rules.get_mut(rule) else {
+-                return;
+-            };
+-            let result = if matched {
+-                MatchResult::Matched
+-            } else {
+-                MatchResult::NotMatched
+-            };
+-            if let Some(condition) = condition {
+-                if let Some(recorded) = evaluated.conditions.get_mut(condition) {
+-                    *recorded = result;
++        let matched =
++            self.route_full_with_observer(conn, bitmap, app_id, |rule, condition, matched| {
++                let Some(evaluated) = rules.get_mut(rule) else {
++                    return;
++                };
++                let result = if matched {
++                    MatchResult::Matched
++                } else {
++                    MatchResult::NotMatched
++                };
++                if let Some(condition) = condition {
++                    if let Some(recorded) = evaluated.conditions.get_mut(condition) {
++                        *recorded = result;
++                    }
++                } else {
++                    evaluated.result = result;
+                 }
+-            } else {
+-                evaluated.result = result;
+-            }
+-        });
++            });
+         if matched.is_none()
+             && let Some(fallback) = rules.get_mut(self.routes.len())
+         {
+@@ -163,6 +174,9 @@ pub(super) fn condition_display(
+             CompiledPredicate::IpVersion(_) => ("ipversion", &[("", field!(ip_version))]),
+             CompiledPredicate::Dscp(_) => ("dscp", &[("", field!(dscp))]),
+             CompiledPredicate::ProcessName(_) => ("pname", &[("", field!(process_name))]),
++            CompiledPredicate::AndroidPackage(_) => {
++                ("android_package", &[("", field!(android_package))])
++            }
+             CompiledPredicate::Mac(_) => ("mac", &[("", field!(mac))]),
+         };
+         let mut display = String::new();
+@@ -305,6 +319,7 @@ pub(crate) fn missing_input(predicate: &CompiledPredicate) -> &'static str {
+         CompiledPredicate::Protocol(_) => "network",
+         CompiledPredicate::Dscp(_) => "dscp",
+         CompiledPredicate::ProcessName(_) => "pname",
++        CompiledPredicate::AndroidPackage(_) => "android_app_id",
+         CompiledPredicate::Mac(_) => "src_mac",
+     }
+ }
+diff --git a/src/crates/honk-core/src/routing/tests.rs b/src/crates/honk-core/src/routing/tests.rs
+index b6f59e37becd754374adf949a39a566f876e0115..15f3eca244de5df4710f827e5af04f831d782152 100644
+--- a/src/crates/honk-core/src/routing/tests.rs
++++ b/src/crates/honk-core/src/routing/tests.rs
+@@ -2,6 +2,42 @@ use super::domain::{GeositeDomain, glob_to_regex, lowercase};
+ use super::*;
+ use honk_config::routing::{RoutingCondition, RoutingOutbound};
+ 
++#[test]
++fn android_package_uses_the_owner_carried_by_handoff() {
++    let config = honk_config::parser::parse_dae_config(
++        "routing {\n android_package(com.example.long.reader) -> proxy\n fallback: direct\n}",
++    )
++    .unwrap();
++    let mut router = Router::from_config(&config.routing).unwrap();
++    let compiled = &mut Arc::make_mut(&mut router.routes.routes)[0].conditions[0];
++    compiled.predicate = CompiledPredicate::AndroidPackage(vec![10123]);
++    let conn = ConnectionInfo {
++        domain: Some("example.test".into()),
++        src_ip: "192.0.2.1".parse().unwrap(),
++        src_port: 30000,
++        dst_ip: "192.0.2.2".parse().unwrap(),
++        dst_port: 443,
++        protocol: "tcp",
++        process_name: Some("com.example.lon".into()),
++        mac: None,
++        dscp: None,
++    };
++    let owner = honk_ebpf_common::RoutingResult {
++        android_app_id: [0x8c, 0x27, 0], // 10123 + 1
++        ..Default::default()
++    };
++    let hit = router
++        .route_full_with_android_app_id(&conn, owner.android_app_id())
++        .unwrap();
++    assert_eq!(hit.action.outbound, "proxy");
++    assert!(
++        router
++            .route_full_with_android_app_id(&conn, Some(10124))
++            .is_none()
++    );
++    assert!(router.route_full_with_android_app_id(&conn, None).is_none());
++}
++
+ #[test]
+ fn test_trie_empty() {
+     let trie = BinaryLpmTrie::from_nets(&[]);
+diff --git a/src/crates/honk-ebpf-common/src/conn.rs b/src/crates/honk-ebpf-common/src/conn.rs
+index d6598eaef29e070e37eff41d07a6323a258d0358..a326b7a7ce71a3628fa1b7a031634e62deceef60 100644
+--- a/src/crates/honk-ebpf-common/src/conn.rs
++++ b/src/crates/honk-ebpf-common/src/conn.rs
+@@ -60,7 +60,7 @@ unsafe impl aya::Pod for FlowMapValue<crate::RoutingHandoffEntry> {}
+ ///   offset 52: trace_id: u32 (immutable route witness, independent of decision_token)
+ ///   offset 56: incarnation: u64 (generation-owned identity, independent of UDP tokens)
+ ///   offset 64: tcp_syn_isn: u32 (host-order original sequence, including zero)
+-///   offset 68: reserved: u32 (always zero)
++///   offset 68: android_app_id_encoded: u32 (app ID + 1, zero when absent)
+ #[repr(C)]
+ #[derive(Clone, Copy, Debug, Default)]
+ pub struct ConnState {
+@@ -77,7 +77,7 @@ pub struct ConnState {
+     pub trace_id: u32,
+     pub incarnation: u64,
+     pub tcp_syn_isn: u32,
+-    pub reserved: u32,
++    pub android_app_id_encoded: u32,
+ }
+ 
+ const _CONN_STATE_SIZE: () = assert!(core::mem::size_of::<ConnState>() == 72);
+@@ -97,7 +97,7 @@ const _CONN_STATE_PID_OFFSET: () = assert!(core::mem::offset_of!(ConnState, pid)
+ const _: () = assert!(core::mem::offset_of!(ConnState, trace_id) == 52);
+ const _: () = assert!(core::mem::offset_of!(ConnState, incarnation) == 56);
+ const _: () = assert!(core::mem::offset_of!(ConnState, tcp_syn_isn) == 64);
+-const _: () = assert!(core::mem::offset_of!(ConnState, reserved) == 68);
++const _: () = assert!(core::mem::offset_of!(ConnState, android_app_id_encoded) == 68);
+ 
+ /// The original forward SYN committed both handoff and redirect before delivery.
+ /// Native/direct and failed/incomplete publications never set this eligibility bit.
+diff --git a/src/crates/honk-ebpf-common/src/redirect_need.rs b/src/crates/honk-ebpf-common/src/redirect_need.rs
+index 78d3655195ee1314c587c3f1288a5c148af2f007..91ff3eae3254d95eee97c0ce5f6071f69e59fa99 100644
+--- a/src/crates/honk-ebpf-common/src/redirect_need.rs
++++ b/src/crates/honk-ebpf-common/src/redirect_need.rs
+@@ -12,7 +12,8 @@ pub struct RoutingResult {
+     pub pname: [u8; 16],
+     pub pid: u32,
+     pub dscp: u8,
+-    pub padding: [u8; 3],
++    /// Little-endian app ID + 1, or zero when socket identity is unavailable.
++    pub android_app_id: [u8; 3],
+     pub decision_token: u32,
+ }
+ 
+@@ -26,10 +27,19 @@ const _ROUTING_RESULT_OUTBOUND_OFFSET: () =
+ const _ROUTING_RESULT_PNAME_OFFSET: () = assert!(core::mem::offset_of!(RoutingResult, pname) == 12);
+ const _ROUTING_RESULT_PID_OFFSET: () = assert!(core::mem::offset_of!(RoutingResult, pid) == 28);
+ const _ROUTING_RESULT_DSCP_OFFSET: () = assert!(core::mem::offset_of!(RoutingResult, dscp) == 32);
+-const _: () = assert!(core::mem::offset_of!(RoutingResult, padding) == 33);
++const _: () = assert!(core::mem::offset_of!(RoutingResult, android_app_id) == 33);
+ const _ROUTING_RESULT_TOKEN_OFFSET: () =
+     assert!(core::mem::offset_of!(RoutingResult, decision_token) == 36);
+ 
++impl RoutingResult {
++    pub fn android_app_id(&self) -> Option<u32> {
++        let [a, b, c] = self.android_app_id;
++        u32::from_le_bytes([a, b, c, 0])
++            .checked_sub(1)
++            .filter(|id| *id < crate::routing_policy::ANDROID_UID_RANGE)
++    }
++}
++
+ #[derive(Debug, Clone, Copy, Default)]
+ #[repr(C)]
+ pub struct TuplesKey {
+diff --git a/src/crates/honk-ebpf-common/src/routing_policy.rs b/src/crates/honk-ebpf-common/src/routing_policy.rs
+index f18945bb7b15a8303a75c5e0015e258756db39a8..951e17fc2c670605bd53228d052a41ca25a20f6f 100644
+--- a/src/crates/honk-ebpf-common/src/routing_policy.rs
++++ b/src/crates/honk-ebpf-common/src/routing_policy.rs
+@@ -5,6 +5,7 @@ pub const ROUTING_SLOT_NAMES: [&str; 2] = ["honk_route_slot0", "honk_route_slot1
+ pub const ROUTING_FEATURE_DOMAIN: u32 = 1;
+ pub const ROUTING_FEATURE_DOMAIN_REROUTE: u32 = 1 << 1;
+ pub const ROUTING_FEATURE_PROCESS: u32 = 1 << 2;
++pub const ROUTING_FEATURE_ANDROID_PACKAGE: u32 = 1 << 3;
+ pub const ROUTING_PROCESS_MAX_LEN: usize = 48;
+ pub const ROUTING_FACT_CAPACITY: usize = 256;
+ 
+@@ -34,6 +35,11 @@ pub const ROUTE_FACT_PRESENT_SHIFT: u32 = 16;
+ pub const ROUTING_INPUT_MAC_PRESENT: u32 = 1;
+ /// Rule-mode permission captured by the static caller, never a second map read.
+ pub const ROUTING_INPUT_ALLOW_DIRECT_FINALITY: u32 = 1 << 1;
++/// Android app IDs repeat every 100,000 UIDs for separate users.
++pub const ANDROID_UID_RANGE: u32 = 100_000;
++/// Encoded as app ID + 1. Zero means no local socket identity.
++pub const ROUTING_INPUT_ANDROID_APP_SHIFT: u32 = 8;
++pub const ROUTING_INPUT_ANDROID_APP_MASK: u32 = 0x1ffff << ROUTING_INPUT_ANDROID_APP_SHIFT;
+ 
+ #[repr(C)]
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -53,6 +59,19 @@ pub struct RoutingInput {
+     pub flags: u32,
+ }
+ 
++impl RoutingInput {
++    #[inline(always)]
++    pub fn android_app_id_encoded(&self) -> u32 {
++        (self.flags & ROUTING_INPUT_ANDROID_APP_MASK) >> ROUTING_INPUT_ANDROID_APP_SHIFT
++    }
++
++    #[inline(always)]
++    pub fn set_android_app_id(&mut self, id: u32) {
++        self.flags = (self.flags & !ROUTING_INPUT_ANDROID_APP_MASK)
++            | ((id + 1) << ROUTING_INPUT_ANDROID_APP_SHIFT);
++    }
++}
++
+ impl Default for RoutingInput {
+     fn default() -> Self {
+         // All fields admit every bit pattern; zero also initializes ABI padding.
+diff --git a/src/crates/honk-ebpf/src/contrack.rs b/src/crates/honk-ebpf/src/contrack.rs
+index 156808f1f3ef6876f03b3f21e2d8544fb3bb54b4..e2a5103921fd1088726d277cead2ad19cefb4eb4 100644
+--- a/src/crates/honk-ebpf/src/contrack.rs
++++ b/src/crates/honk-ebpf/src/contrack.rs
+@@ -46,7 +46,7 @@ pub struct ConntrackArgs {
+     trace_id: u32,
+     incarnation: u64,
+     tcp_syn_isn: u32,
+-    tcp_padding: [u8; 4],
++    android_app_id_encoded: u32,
+ }
+ 
+ impl ConntrackArgs {
+diff --git a/src/crates/honk-ebpf/src/contrack/udp.rs b/src/crates/honk-ebpf/src/contrack/udp.rs
+index fbca5e40917423e94be9a8166624e0a7ec3d8bcc..58ea6ce6a4821a85fb16ae5e15b50eda49a70c6a 100644
+--- a/src/crates/honk-ebpf/src/contrack/udp.rs
++++ b/src/crates/honk-ebpf/src/contrack/udp.rs
+@@ -341,6 +341,7 @@ fn __mark_udp_seen(
+     new_state.incarnation = incarnation;
+     new_state.last_seen_ns = now;
+     new_state.pid = args.pid;
++    new_state.android_app_id_encoded = args.android_app_id_encoded;
+     new_state.trace_id = args.trace_id;
+ 
+     if has_rt {
+@@ -375,6 +376,7 @@ pub fn mark_udp_seen(
+     pname: Option<&[u8; 16]>,
+     pid: u32,
+     trace_id: u32,
++    android_app_id_encoded: u32,
+     routing_meta_flags: u64,
+ ) -> Option<&'static mut ConnState> {
+     let zero: u32 = 0;
+@@ -388,6 +390,7 @@ pub fn mark_udp_seen(
+ 
+     args.set(dscp, pid, routing, mac, pname);
+     args.trace_id = trace_id;
++    args.android_app_id_encoded = android_app_id_encoded;
+     let key_ptr: *const TuplesKey = key;
+     let args_ptr: *const ConntrackArgs = args;
+     let result = __mark_udp_seen(
+@@ -415,7 +418,7 @@ pub fn observe_reverse_udp(key: &TuplesKey) {
+             crate::maps::increment_bpf_stat(BpfStatsKey::UdpReverseLearningSuspended);
+         }
+     } else {
+-        let _ = mark_udp_seen(key, 1, None, None, None, None, 0, None, 0, 0, 0);
++        let _ = mark_udp_seen(key, 1, None, None, None, None, 0, None, 0, 0, 0, 0);
+     }
+ }
+ 
+diff --git a/src/crates/honk-ebpf/src/egress.rs b/src/crates/honk-ebpf/src/egress.rs
+index ff202ee4616117ea4555d2f6a6f6fdda603de71c..95289ec77369de5fdc84dceafefe0beb9d6a06b8 100644
+--- a/src/crates/honk-ebpf/src/egress.rs
++++ b/src/crates/honk-ebpf/src/egress.rs
+@@ -152,7 +152,7 @@ pub fn do_tproxy_lan_egress(ctx: &TcContext, link_h_len: u32) -> Verdict {
+         None => return Err(TC_ACT_SHOT),
+     };
+ 
+-    let ret = parse_packet(ctx, link_h_len, pkt);
++    let ret = parse_packet::<false>(ctx, link_h_len, pkt);
+     if ret != 0 {
+         if ret < 0 || local_ndp_redirect(ctx, ret) {
+             return Err(TC_ACT_SHOT);
+@@ -215,7 +215,6 @@ pub fn do_tproxy_lan_egress(ctx: &TcContext, link_h_len: u32) -> Verdict {
+     Ok(TC_ACT_UNSPEC)
+ }
+ 
+-
+ /// [honk-android] 把 handoff 条目写成"全新快照"，全程逐字段 volatile 直写。
+ ///
+ /// 为什么不用 `write_bytes` / 结构体整体赋值：
+@@ -238,6 +237,7 @@ fn fill_handoff_fresh(
+     pid: u32,
+     dscp: u8,
+     decision_token: u32,
++    android_app_id_encoded: u32,
+     pname: Option<&[u8; TASK_COMM_LEN]>,
+ ) {
+     let h = handoff as *mut RoutingHandoffEntry;
+@@ -257,11 +257,9 @@ fn fill_handoff_fresh(
+         core::ptr::write_volatile(core::ptr::addr_of_mut!((*r).outbound), outbound);
+         core::ptr::write_volatile(core::ptr::addr_of_mut!((*r).pid), pid);
+         core::ptr::write_volatile(core::ptr::addr_of_mut!((*r).dscp), dscp);
+-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*r).padding), [0u8; 3]);
+-        core::ptr::write_volatile(
+-            core::ptr::addr_of_mut!((*r).decision_token),
+-            decision_token,
+-        );
++        let [a, b, c, _] = android_app_id_encoded.to_le_bytes();
++        core::ptr::write_volatile(core::ptr::addr_of_mut!((*r).android_app_id), [a, b, c]);
++        core::ptr::write_volatile(core::ptr::addr_of_mut!((*r).decision_token), decision_token);
+         // [u8;6] / [u8;16]：展开成定长 store，不调 memcpy
+         let mac_ptr = core::ptr::addr_of_mut!((*r).mac) as *mut u8;
+         for i in 0..6 {
+@@ -348,6 +346,7 @@ fn do_tproxy_wan_egress_tcp(
+         let (mut decision, generation) = match crate::route::route(
+             &mut pkt.routing_input,
+             pname,
++            Some(ctx),
+             flags,
+             &mut pkt.route_witness.output,
+         ) {
+@@ -527,6 +526,7 @@ fn do_tproxy_wan_egress_tcp(
+             handoff_pid,
+             tuples.dscp,
+             0,
++            pkt.routing_input.android_app_id_encoded(),
+             handoff_pname,
+         );
+         crate::auxiliary::publish_handoff(&tuples.five, unsafe { &mut *scratch }, true)
+@@ -562,6 +562,7 @@ fn fast_path_decision(
+     trace_id: u32,
+     direct_mark_index: u32,
+     incarnation: u64,
++    android_app_id_encoded: u32,
+ ) -> Verdict {
+     let dns = tuples.five.dst_port == 53;
+     if outbound == OUTBOUND_DIRECT && mark == 0 && (!dns || must) {
+@@ -647,6 +648,7 @@ fn fast_path_decision(
+                 handoff_pid,
+                 tuples.dscp,
+                 decision_token,
++                android_app_id_encoded,
+                 handoff_pname,
+             );
+             if let Err(error) =
+@@ -736,6 +738,7 @@ fn do_tproxy_wan_egress_udp(
+                 conn_state.trace_id,
+                 u32::MAX,
+                 conn_state.incarnation,
++                conn_state.android_app_id_encoded,
+             );
+         }
+     }
+@@ -764,6 +767,7 @@ fn do_tproxy_wan_egress_udp(
+     let (mut decision, generation) = match crate::route::route(
+         &mut pkt.routing_input,
+         pname,
++        Some(ctx),
+         flags,
+         &mut pkt.route_witness.output,
+     ) {
+@@ -771,6 +775,7 @@ fn do_tproxy_wan_egress_udp(
+         Err(_) => return Err(TC_ACT_SHOT),
+     };
+     let routing_generation = generation;
++    let android_app_id_encoded = pkt.routing_input.android_app_id_encoded();
+ 
+     decision.apply_mode_flags(flags, tuples.five.dst_port);
+     outbound = decision.handoff_outbound();
+@@ -806,6 +811,7 @@ fn do_tproxy_wan_egress_udp(
+             pname,
+             pid,
+             trace_id,
++            android_app_id_encoded,
+             routing_meta_flags,
+         );
+         if state.is_none() {
+@@ -838,6 +844,7 @@ fn do_tproxy_wan_egress_udp(
+         trace_id,
+         decision.direct_mark_index,
+         pkt.incarnation,
++        android_app_id_encoded,
+     )
+ }
+ 
+@@ -857,7 +864,7 @@ fn do_tproxy_wan_egress(ctx: &TcContext, link_h_len: u32) -> Verdict {
+ 
+     // Parse before reading __sk_buff fields: ctx.load() proves to the verifier
+     // that raw_skb(ctx) is a valid non-null pointer.
+-    let ret = parse_packet(ctx, link_h_len, pkt);
++    let ret = parse_packet::<false>(ctx, link_h_len, pkt);
+     if ret != 0 {
+         if ret == PARSE_FRAGMENT as c_long && crate::fragment::condemned(pkt) {
+             return Err(TC_ACT_SHOT);
+diff --git a/src/crates/honk-ebpf/src/ingress.rs b/src/crates/honk-ebpf/src/ingress.rs
+index e69fb5ceb3d0f86807db0423ae35b0c301a32cb9..c450840a0d3aac3e71e3ee5ed96584c1960a9c1f 100644
+--- a/src/crates/honk-ebpf/src/ingress.rs
++++ b/src/crates/honk-ebpf/src/ingress.rs
+@@ -519,7 +519,7 @@ fn lan_ingress_prelude_body(ctx: &TcContext, link_h_len: u32) -> Verdict {
+         return Err(TC_ACT_OK);
+     }
+ 
+-    let ret = parse_packet(ctx, link_h_len, pkt);
++    let ret = parse_packet::<true>(ctx, link_h_len, pkt);
+     if ret != 0 {
+         if ret == PARSE_FRAGMENT as c_long && crate::fragment::condemned(pkt) {
+             return Err(TC_ACT_SHOT);
+@@ -691,6 +691,7 @@ fn do_tproxy_lan_ingress_tcp(ctx: &TcContext, link_h_len: u32) -> Verdict {
+     let (mut decision, routing_generation) = match crate::route::route(
+         &mut pkt.routing_input,
+         None,
++        None,
+         flags,
+         &mut pkt.route_witness.output,
+     ) {
+@@ -932,6 +933,7 @@ fn do_tproxy_lan_ingress_udp_route(ctx: &TcContext, link_h_len: u32) -> Verdict
+     let (mut decision, routing_generation) = match crate::route::route(
+         &mut pkt.routing_input,
+         None,
++        None,
+         flags,
+         &mut pkt.route_witness.output,
+     ) {
+@@ -982,9 +984,7 @@ fn do_tproxy_lan_ingress_udp_route(ctx: &TcContext, link_h_len: u32) -> Verdict
+             && outbound != OUTBOUND_BLOCK
+             && (unresolved_direct
+                 || control_plane_routing
+-                || (preliminary_proxy
+-                    && domain_can_change
+-                    && udp_has_quic_long_header(ctx, link_h_len, pkt)));
++                || (preliminary_proxy && domain_can_change && udp_has_quic_long_header(ctx, pkt)));
+ 
+         if stage_required && flags & DATAPATH_FLAG_NFQ_ENABLED != 0 {
+             let current_nfq_flags = crate::maps::datapath_flags();
+@@ -1109,7 +1109,7 @@ fn do_tproxy_wan_ingress(ctx: &TcContext, link_h_len: u32) -> Verdict {
+         None => return Err(TC_ACT_SHOT),
+     };
+ 
+-    let ret = parse_packet(ctx, link_h_len, pkt);
++    let ret = parse_packet::<false>(ctx, link_h_len, pkt);
+     if ret != 0 {
+         if ret < 0 {
+             error!(ctx, target: "honk", "parse_transport error: {}, dropping", ret);
+@@ -1242,7 +1242,7 @@ fn do_tproxy_dae0_ingress(ctx: &TcContext) -> Verdict {
+         Some(ptr) => unsafe { &mut *ptr },
+         None => return Err(TC_ACT_SHOT),
+     };
+-    if parse_packet(ctx, ETH_HLEN, pkt) != 0 {
++    if parse_packet::<false>(ctx, ETH_HLEN, pkt) != 0 {
+         return Err(TC_ACT_UNSPEC);
+     }
+     let mut canonical: TuplesKey = unsafe { mem::zeroed() };
+diff --git a/src/crates/honk-ebpf/src/route.rs b/src/crates/honk-ebpf/src/route.rs
+index 2c1eab24338230d0f284af1eb016bbd1f7d08ca2..9aaa66d8d45f50ce141ac583a8ce72df8b900108 100644
+--- a/src/crates/honk-ebpf/src/route.rs
++++ b/src/crates/honk-ebpf/src/route.rs
+@@ -7,7 +7,12 @@
+ #[cfg(feature = "routing-test")]
+ use aya_ebpf::bindings::__sk_buff;
+ 
++use aya_ebpf::programs::TcContext;
++use aya_ebpf_bindings::helpers::bpf_get_socket_uid;
+ use aya_ebpf_cty::c_long;
++use honk_ebpf_common::routing_policy::{
++    ANDROID_UID_RANGE, ROUTING_FEATURE_ANDROID_PACKAGE, ROUTING_INPUT_ANDROID_APP_MASK,
++};
+ use honk_ebpf_common::{
+     DATAPATH_FLAG_OFFLOAD_RULE_DIRECT, DATAPATH_FLAG_TRACE_ENABLED, L4ProtoType,
+     ROUTE_TRACE_AMBIGUOUS, ROUTE_TRACE_DNS_OVERRIDE, ROUTE_TRACE_ENABLED, ROUTE_TRACE_LOST,
+@@ -142,6 +147,7 @@ pub unsafe extern "C" fn honk_normalize_process_name(
+ fn evaluate_policy(
+     input: &mut RoutingInput,
+     pname: Option<&[u8; 16]>,
++    local_socket: Option<&TcContext>,
+     input_is_canonical: bool,
+     flags: u32,
+     output: &mut KernelRouteOutput,
+@@ -164,11 +170,26 @@ fn evaluate_policy(
+             unsafe { honk_ebpf_common::conn::zero_in_place_volatile(&mut input.pname as *mut _) };
+             input.pname_len = 0;
+         }
++        input.flags &= !ROUTING_INPUT_ANDROID_APP_MASK;
++        if descriptor.features & ROUTING_FEATURE_ANDROID_PACKAGE != 0
++            && let Some(ctx) = local_socket
++        {
++            // Only WAN egress supplies a local socket. Ingress packets can
++            // carry an attached receiving socket and must not inherit its UID.
++            let skb = crate::ctx::raw_skb(ctx);
++            if !unsafe { (*skb).__bindgen_anon_2.sk }.is_null() {
++                let uid = unsafe { bpf_get_socket_uid(skb.cast()) };
++                // The helper returns Linux's overflow UID for missing ownership.
++                if uid != 65_534 {
++                    input.set_android_app_id(uid % ANDROID_UID_RANGE);
++                }
++            }
++        }
+     }
+     if trace_enabled {
+         output.flags = ROUTE_TRACE_VERSION | ROUTE_TRACE_ENABLED;
+     }
+-    input.flags = (input.flags & ROUTING_INPUT_MAC_PRESENT)
++    input.flags = (input.flags & (ROUTING_INPUT_MAC_PRESENT | ROUTING_INPUT_ANDROID_APP_MASK))
+         | if flags & DATAPATH_FLAG_OFFLOAD_RULE_DIRECT != 0 {
+             ROUTING_INPUT_ALLOW_DIRECT_FINALITY
+         } else {
+@@ -215,10 +236,12 @@ fn evaluate_policy(
+ pub fn route(
+     input: &mut RoutingInput,
+     pname: Option<&[u8; 16]>,
++    local_socket: Option<&TcContext>,
+     flags: u32,
+     output: &mut KernelRouteOutput,
+ ) -> Result<(RoutingDecision, u64), c_long> {
+-    let (status, decision, generation) = evaluate_policy(input, pname, false, flags, output);
++    let (status, decision, generation) =
++        evaluate_policy(input, pname, local_socket, false, flags, output);
+     if status == 0 {
+         Ok((decision, generation))
+     } else if status < 0 {
+@@ -244,6 +267,7 @@ pub fn routing_test(_ctx: *mut __sk_buff) -> c_long {
+     let (status, decision, _) = evaluate_policy(
+         unsafe { &mut *input },
+         None,
++        None,
+         true,
+         crate::maps::datapath_flags(),
+         &mut result.trace,
+diff --git a/src/crates/honk-ebpf/src/transport.rs b/src/crates/honk-ebpf/src/transport.rs
+index ecb1991e914c58faa17a174d18718737ac3c15b1..60d1208518cc6f6cc8dc224a910ba50347ca13ad 100644
+--- a/src/crates/honk-ebpf/src/transport.rs
++++ b/src/crates/honk-ebpf/src/transport.rs
+@@ -34,6 +34,10 @@ pub const IPPROTO_ROUTING: u8 = 43;
+ pub const IPPROTO_FRAGMENT: u8 = 44;
+ pub const IPPROTO_DSTOPTS: u8 = 60;
+ pub const IPV6_MAX_EXTENSIONS: usize = 8;
++const _: () = assert!(
++    ETH_HLEN + mem::size_of::<Ipv6Hdr>() as u32 + IPV6_MAX_EXTENSIONS as u32 * ipv6_optlen(u8::MAX)
++        <= u16::MAX as u32
++);
+ 
+ /// True for IPv6 extension headers (hop-by-hop, routing, fragment, destination options).
+ #[inline(always)]
+@@ -45,7 +49,7 @@ pub fn is_extension_header(nexthdr: u8) -> bool {
+ }
+ 
+ #[inline(always)]
+-pub fn ipv6_optlen(hdr_ext_len: u8) -> u32 {
++pub const fn ipv6_optlen(hdr_ext_len: u8) -> u32 {
+     (hdr_ext_len as u32 + 1) * 8
+ }
+ 
+@@ -62,6 +66,7 @@ pub struct FragHdr {
+ #[derive(Clone, Copy)]
+ pub struct ParsedPacket {
+     pub ethh: EthHdr,
++    pub udp_offset: u16,
+     pub tuples: Tuples,
+     pub tcph: TcpHdr,
+     pub udph: UdpHdr,
+@@ -168,84 +173,16 @@ pub fn dst_is_special(pkt: &ParsedPacket, link_h_len: u32) -> bool {
+ 
+ /// Proxy preliminaries need a userspace domain decision only for QUIC long headers.
+ #[inline(always)]
+-pub fn udp_has_quic_long_header(ctx: &TcContext, link_h_len: u32, pkt: &ParsedPacket) -> bool {
++pub fn udp_has_quic_long_header(ctx: &TcContext, pkt: &ParsedPacket) -> bool {
+     if pkt.l4proto != IPPROTO_UDP {
+         return false;
+     }
+-
+-    let skb = raw_skb(ctx) as *mut _;
+-    let mut offset = link_h_len;
+-    let mut nexthdr = IPPROTO_UDP;
+-
+-    if pkt.ethh.ether_type == ETH_P_IP.to_be() {
+-        let mut version_ihl = 0u8;
+-        if unsafe { bpf_skb_load_bytes(skb, offset, &mut version_ihl as *mut u8 as *mut _, 1) } != 0
+-        {
+-            return false;
+-        }
+-        let ihl = ((version_ihl & 0x0f) as u32) * 4;
+-        if ihl < 20 {
+-            return false;
+-        }
+-        offset += ihl;
+-    } else if pkt.ethh.ether_type == ETH_P_IPV6.to_be() {
+-        if unsafe { bpf_skb_load_bytes(skb, offset + 6, &mut nexthdr as *mut u8 as *mut _, 1) } != 0
+-        {
+-            return false;
+-        }
+-        offset += mem::size_of::<Ipv6Hdr>() as u32;
+-
+-        for _ in 0..IPV6_MAX_EXTENSIONS {
+-            if nexthdr == IPPROTO_UDP {
+-                break;
+-            }
+-            if nexthdr == IPPROTO_FRAGMENT {
+-                let mut fragment: FragHdr = unsafe { mem::zeroed() };
+-                if unsafe {
+-                    bpf_skb_load_bytes(
+-                        skb,
+-                        offset,
+-                        &mut fragment as *mut FragHdr as *mut _,
+-                        mem::size_of::<FragHdr>() as u32,
+-                    )
+-                } != 0
+-                {
+-                    return false;
+-                }
+-                nexthdr = fragment.nexthdr;
+-                offset += mem::size_of::<FragHdr>() as u32;
+-                continue;
+-            }
+-            if !is_extension_header(nexthdr) {
+-                return false;
+-            }
+-            let mut extension = [0u8; 2];
+-            if unsafe {
+-                bpf_skb_load_bytes(
+-                    skb,
+-                    offset,
+-                    extension.as_mut_ptr() as *mut _,
+-                    extension.len() as u32,
+-                )
+-            } != 0
+-            {
+-                return false;
+-            }
+-            nexthdr = extension[0];
+-            offset += ipv6_optlen(extension[1]);
+-        }
+-        if nexthdr != IPPROTO_UDP {
+-            return false;
+-        }
+-    } else {
+-        return false;
+-    }
+-
++    let payload_offset = u32::from(pkt.udp_offset) + mem::size_of::<UdpHdr>() as u32;
+     let mut first = 0u8;
+     if unsafe {
+         bpf_skb_load_bytes(
+-            skb,
+-            offset + mem::size_of::<UdpHdr>() as u32,
++            raw_skb(ctx) as *mut _,
++            payload_offset,
+             &mut first as *mut u8 as *mut _,
+             1,
+         )
+@@ -257,15 +194,15 @@ pub fn udp_has_quic_long_header(ctx: &TcContext, link_h_len: u32, pkt: &ParsedPa
+ }
+ 
+ trait ParseTransportExt {
+-    fn parse_fast(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<(), c_long>;
+-    fn parse_slow(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<(), c_long>;
+-    fn parse(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<(), c_long>;
++    fn parse_fast(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<u16, c_long>;
++    fn parse_slow(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<u16, c_long>;
++    fn parse(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<u16, c_long>;
+     fn fill_tuples(&self, tuples: &mut Tuples);
+ }
+ 
+ impl ParseTransportExt for ParseTransportCtx {
+     #[inline(always)]
+-    fn parse_slow(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<(), c_long> {
++    fn parse_slow(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<u16, c_long> {
+         let skb_ptr = raw_skb(ctx) as *mut _;
+         let mut offset = 0u32;
+         let mut ret: c_long;
+@@ -345,7 +282,7 @@ impl ParseTransportExt for ParseTransportCtx {
+                 }
+                 _ => return Err(PASS_UNSUPPORTED),
+             }
+-            return Ok(());
++            return Ok(offset as u16);
+         }
+ 
+         if self.ethh.ether_type == ETH_P_IPV6.to_be() {
+@@ -472,14 +409,14 @@ impl ParseTransportExt for ParseTransportCtx {
+                 }
+                 _ => return Err(PASS_UNSUPPORTED),
+             }
+-            return Ok(());
++            return Ok(offset as u16);
+         }
+ 
+         Err(PASS_UNSUPPORTED)
+     }
+ 
+     #[inline(always)]
+-    fn parse_fast(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<(), c_long> {
++    fn parse_fast(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<u16, c_long> {
+         if ctx.pull_data(HEADER_PULL_SIZE).is_err() {
+             return Err(ERR_FALLBACK);
+         }
+@@ -541,7 +478,7 @@ impl ParseTransportExt for ParseTransportCtx {
+                         return Err(ERR_FALLBACK);
+                     }
+                     unsafe { ptr::copy_nonoverlapping(tcph_ptr, &mut self.tcph, 1) };
+-                    return Ok(());
++                    return Ok(l4_offset as u16);
+                 }
+                 IPPROTO_UDP => {
+                     let udph_ptr = unsafe { data.add(l4_offset) as *const UdpHdr };
+@@ -550,7 +487,7 @@ impl ParseTransportExt for ParseTransportCtx {
+                     }
+                     unsafe { ptr::copy_nonoverlapping(udph_ptr, &mut self.udph, 1) };
+                     self.listener_l4proto = IPPROTO_UDP;
+-                    return Ok(());
++                    return Ok(l4_offset as u16);
+                 }
+                 _ => return Err(PASS_UNSUPPORTED),
+             }
+@@ -616,7 +553,7 @@ impl ParseTransportExt for ParseTransportCtx {
+                         return Err(ERR_FALLBACK);
+                     }
+                     unsafe { ptr::copy_nonoverlapping(tcph_ptr, &mut self.tcph, 1) };
+-                    return Ok(());
++                    return Ok(offset as u16);
+                 }
+                 IPPROTO_UDP => {
+                     let udph_ptr = unsafe { data.add(offset as usize) as *const UdpHdr };
+@@ -625,7 +562,7 @@ impl ParseTransportExt for ParseTransportCtx {
+                     }
+                     unsafe { ptr::copy_nonoverlapping(udph_ptr, &mut self.udph, 1) };
+                     self.listener_l4proto = IPPROTO_UDP;
+-                    return Ok(());
++                    return Ok(offset as u16);
+                 }
+                 IPPROTO_ICMPV6 => {
+                     let icmp6h_ptr = unsafe { data.add(offset as usize) as *const Icmpv6Hdr };
+@@ -634,7 +571,7 @@ impl ParseTransportExt for ParseTransportCtx {
+                         return Err(ERR_FALLBACK);
+                     }
+                     unsafe { ptr::copy_nonoverlapping(icmp6h_ptr, &mut self.icmp6h, 1) };
+-                    return Ok(());
++                    return Ok(offset as u16);
+                 }
+                 _ => return Err(PASS_UNSUPPORTED),
+             }
+@@ -644,7 +581,7 @@ impl ParseTransportExt for ParseTransportCtx {
+     }
+ 
+     #[inline(always)]
+-    fn parse(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<(), c_long> {
++    fn parse(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<u16, c_long> {
+         match self.parse_fast(ctx, link_h_len) {
+             Err(ERR_FALLBACK) => self.parse_slow(ctx, link_h_len),
+             other => other,
+@@ -687,7 +624,11 @@ impl ParseTransportExt for ParseTransportCtx {
+ ///   2. Call `parse_transport` (fast → fallback to slow)
+ ///   3. Copy headers + compute 5-tuple into `ParsedPacket`
+ #[inline(always)]
+-pub fn parse_packet(ctx: &TcContext, link_h_len: u32, out: &mut ParsedPacket) -> c_long {
++pub fn parse_packet<const SAVE_UDP_OFFSET: bool>(
++    ctx: &TcContext,
++    link_h_len: u32,
++    out: &mut ParsedPacket,
++) -> c_long {
+     let scratch_key: u32 = 0;
+     let tctx = match PARSE_CTX_MAP.get_ptr_mut(scratch_key) {
+         Some(ptr) => unsafe { &mut *ptr },
+@@ -697,14 +638,17 @@ pub fn parse_packet(ctx: &TcContext, link_h_len: u32, out: &mut ParsedPacket) ->
+     // Wrappers read this after the program body; a packet that never reaches the
+     // parse must not inherit the previous packet's fragmentation.
+     out.is_fragmented = 0;
+-    if let Err(e) = tctx.parse(ctx, link_h_len) {
+-        if e == PARSE_FRAGMENT as c_long {
+-            // Later fragments match on address pair and ID, plus the protocol for IPv4.
+-            out.frag_id = tctx.frag_id;
+-            tctx.fill_tuples(&mut out.tuples);
++    let transport_offset = match tctx.parse(ctx, link_h_len) {
++        Ok(offset) => offset,
++        Err(e) => {
++            if e == PARSE_FRAGMENT as c_long {
++                // Later fragments match on address pair and ID, plus the protocol for IPv4.
++                out.frag_id = tctx.frag_id;
++                tctx.fill_tuples(&mut out.tuples);
++            }
++            return e;
+         }
+-        return e;
+-    }
++    };
+     if tctx.l4proto == IPPROTO_ICMPV6 {
+         return if tctx.icmp6h.type_ == 137 {
+             PASS_NDP_REDIRECT
+@@ -715,6 +659,9 @@ pub fn parse_packet(ctx: &TcContext, link_h_len: u32, out: &mut ParsedPacket) ->
+ 
+     // Miss-only routing scratch must not add clearing work to cached packets.
+     out.ethh = tctx.ethh;
++    if SAVE_UDP_OFFSET {
++        out.udp_offset = transport_offset;
++    }
+     out.tcph = tctx.tcph;
+     out.udph = tctx.udph;
+     out.l4proto = tctx.l4proto;
+diff --git a/src/crates/honk-outbound/src/group/score.rs b/src/crates/honk-outbound/src/group/score.rs
+index b0430a108ec080cb9515427310e81aeeb84e3bd7..24c7ae9dc058547b10290c13e14bea0f31b173bd 100644
+--- a/src/crates/honk-outbound/src/group/score.rs
++++ b/src/crates/honk-outbound/src/group/score.rs
+@@ -484,9 +484,14 @@ impl StateInner {
+ #[derive(Default)]
+ pub struct ScorePolicyState {
+     inner: Mutex<StateInner>,
++    transport_quality_changed: Arc<tokio::sync::Notify>,
+ }
+ 
+ impl ScorePolicyState {
++    pub fn transport_quality_changed(&self) -> Arc<tokio::sync::Notify> {
++        Arc::clone(&self.transport_quality_changed)
++    }
++
+     pub(super) fn reason_snapshot(
+         &self,
+         group_names: Vec<String>,
+diff --git a/src/crates/honk-outbound/src/group/score/pressure.rs b/src/crates/honk-outbound/src/group/score/pressure.rs
+index 504c388abf6c1b42285cae21b8ef230ea81c4e97..978e7ff2ddc52efa34430e889ea6ae7ae4662f63 100644
+--- a/src/crates/honk-outbound/src/group/score/pressure.rs
++++ b/src/crates/honk-outbound/src/group/score/pressure.rs
+@@ -29,7 +29,7 @@ impl GroupManager {
+                     return None;
+                 }
+                 let quality = runtime.transport_quality();
+-                quality.enable();
++                quality.enable_with_notification(&self.score_state.transport_quality_changed);
+                 Some(TransportQualitySource {
+                     node_id: runtime.node.id,
+                     groups,
+@@ -50,15 +50,16 @@ impl GroupManager {
+         *self.transport_quality.write() = sources;
+     }
+ 
+-    /// Consume advisory carrier episodes without crediting or failing a flow.
+-    pub fn observe_transport_quality(&self) {
++    /// Apply advisory episodes and report whether any is still fresh.
++    pub fn observe_transport_quality(&self) -> bool {
+         let now = Instant::now();
++        let mut fresh = false;
+         for source in self.transport_quality.read().iter() {
+             let Some(quality) = source.quality.upgrade() else {
+                 continue;
+             };
+             let observations = quality.snapshot();
+-            self.score_state.observe_carrier_pressure(
++            fresh |= self.score_state.observe_carrier_pressure(
+                 &self.score_authority,
+                 source.node_id,
+                 &source.groups,
+@@ -67,6 +68,7 @@ impl GroupManager {
+                 now,
+             );
+         }
++        fresh
+     }
+ }
+ 
+@@ -79,12 +81,14 @@ impl ScorePolicyState {
+         udp_carried: bool,
+         observations: [Option<TransportPressure>; 2],
+         now: Instant,
+-    ) {
+-        if !observations.iter().flatten().any(|pressure| {
+-            pressure.observed_at <= now
+-                && now.duration_since(pressure.observed_at) < CARRIER_PRESSURE_TTL
+-        }) {
+-            return;
++    ) -> bool {
++        let is_recent = |at| at <= now && now.duration_since(at) < CARRIER_PRESSURE_TTL;
++        if !observations
++            .iter()
++            .flatten()
++            .any(|event| is_recent(event.observed_at))
++        {
++            return false;
+         }
+         let mut inner = self.inner.lock();
+         if !inner
+@@ -92,11 +96,18 @@ impl ScorePolicyState {
+             .as_ref()
+             .is_some_and(|active| Arc::ptr_eq(active, authority))
+         {
+-            return;
++            return false;
+         }
+         let Some(published_at) = inner.published_at else {
+-            return;
++            return false;
+         };
++        if !observations
++            .iter()
++            .flatten()
++            .any(|event| event.observed_at > published_at && is_recent(event.observed_at))
++        {
++            return false;
++        }
+         for group in groups {
+             if !inner.valid.contains(&(group.clone(), node_id)) {
+                 continue;
+@@ -123,8 +134,7 @@ impl ScorePolicyState {
+                     };
+                     let at = observation.observed_at;
+                     if at <= published_at
+-                        || at > now
+-                        || now.duration_since(at) >= CARRIER_PRESSURE_TTL
++                        || !is_recent(at)
+                         || stats.carrier_pressure[family]
+                             .is_some_and(|previous| previous.observed_at >= at)
+                     {
+@@ -154,5 +164,6 @@ impl ScorePolicyState {
+                 }
+             }
+         }
++        true
+     }
+ }
+diff --git a/src/crates/honk-outbound/src/group/score/tests/pressure.rs b/src/crates/honk-outbound/src/group/score/tests/pressure.rs
+index 355457cb5db9ac6922af12744dead00c9c9b8b3c..bd1d19ab5e50a0e6df620c0fefe2d4671f2baa5b 100644
+--- a/src/crates/honk-outbound/src/group/score/tests/pressure.rs
++++ b/src/crates/honk-outbound/src/group/score/tests/pressure.rs
+@@ -404,8 +404,8 @@ fn replaced_runtime_and_retired_manager_cannot_publish_carrier_pressure() {
+     replacement.publish_score_membership();
+     let old_quality = old_runtimes.get(&leaf.id).unwrap().transport_quality();
+     old_quality.report(false, PressureReason::Loss, Instant::now());
+-    old.observe_transport_quality();
+-    replacement.observe_transport_quality();
++    assert!(!old.observe_transport_quality());
++    assert!(!replacement.observe_transport_quality());
+     assert_eq!(
+         replacement
+             .score_state
+@@ -418,7 +418,7 @@ fn replaced_runtime_and_retired_manager_cannot_publish_carrier_pressure() {
+         .unwrap()
+         .transport_quality()
+         .report(false, PressureReason::Loss, Instant::now());
+-    replacement.observe_transport_quality();
++    assert!(replacement.observe_transport_quality());
+     assert_eq!(
+         replacement
+             .score_state
+@@ -434,7 +434,7 @@ fn replaced_runtime_and_retired_manager_cannot_publish_carrier_pressure() {
+     );
+     successor.bind_transport_quality(&new_runtimes);
+     successor.publish_score_membership();
+-    successor.observe_transport_quality();
++    assert!(!successor.observe_transport_quality());
+     assert_eq!(
+         successor
+             .score_state
+diff --git a/src/crates/honk-outbound/src/transport_quality.rs b/src/crates/honk-outbound/src/transport_quality.rs
+index babb11f1accb07d5a07d24412f49103cbe9fbf1f..20776a0c436f1c95c3d98f00e40c51b28790fd38 100644
+--- a/src/crates/honk-outbound/src/transport_quality.rs
++++ b/src/crates/honk-outbound/src/transport_quality.rs
+@@ -1,10 +1,11 @@
+ //! Advisory pressure on one node-to-proxy carrier, never business-flow outcomes.
+ 
+-use std::sync::Arc;
+ use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{Arc, Weak};
+ use std::time::{Duration, Instant};
+ 
+ use parking_lot::Mutex;
++use tokio::sync::Notify;
+ 
+ pub(crate) mod tcp;
+ 
+@@ -27,7 +28,13 @@ pub struct TransportPressure {
+ #[derive(Debug, Default)]
+ pub struct TransportQuality {
+     enabled: AtomicBool,
+-    pressure: Mutex<[Option<TransportPressure>; 2]>,
++    observations: Mutex<TransportObservations>,
++}
++
++#[derive(Debug, Default)]
++struct TransportObservations {
++    pressure: [Option<TransportPressure>; 2],
++    changed: Weak<Notify>,
+ }
+ 
+ tokio::task_local! {
+@@ -40,12 +47,17 @@ impl TransportQuality {
+         self.enabled.store(true, Ordering::Relaxed);
+     }
+ 
++    pub(crate) fn enable_with_notification(&self, changed: &Arc<Notify>) {
++        self.observations.lock().changed = Arc::downgrade(changed);
++        self.enable();
++    }
++
+     pub(crate) fn is_enabled(&self) -> bool {
+         self.enabled.load(Ordering::Relaxed)
+     }
+ 
+     pub fn snapshot(&self) -> [Option<TransportPressure>; 2] {
+-        *self.pressure.lock()
++        self.observations.lock().pressure
+     }
+ 
+     /// Bind physical construction, not a logical stream's later I/O polls.
+@@ -63,8 +75,8 @@ impl TransportQuality {
+         if !self.is_enabled() {
+             return;
+         }
+-        let mut slots = self.pressure.lock();
+-        let slot = &mut slots[usize::from(ipv6)];
++        let mut observations = self.observations.lock();
++        let slot = &mut observations.pressure[usize::from(ipv6)];
+         if slot.is_some_and(|previous| {
+             now.saturating_duration_since(previous.observed_at) < Duration::from_secs(30)
+         }) {
+@@ -74,6 +86,11 @@ impl TransportQuality {
+             observed_at: now,
+             reason,
+         });
++        let changed = observations.changed.upgrade();
++        drop(observations);
++        if let Some(changed) = changed {
++            changed.notify_one();
++        }
+     }
+ }
+ 
+diff --git a/src/crates/honk-outbound/src/transport_quality/tests.rs b/src/crates/honk-outbound/src/transport_quality/tests.rs
+index fa7b514cf996dfc196675844598c2f8f89433076..2804bb5fd0ebb37d365aac4e097ad7e2ffbdd40d 100644
+--- a/src/crates/honk-outbound/src/transport_quality/tests.rs
++++ b/src/crates/honk-outbound/src/transport_quality/tests.rs
+@@ -1,5 +1,24 @@
+ use super::*;
+ 
++#[test]
++fn only_accepted_pressure_reports_signal_the_observer() {
++    use futures_util::FutureExt;
++
++    let changed = Arc::new(Notify::new());
++    let quality = TransportQuality::default();
++    quality.enable_with_notification(&changed);
++    let now = Instant::now();
++
++    assert!(changed.notified().now_or_never().is_none());
++    quality.report(false, PressureReason::Rtt, now);
++    assert_eq!(changed.notified().now_or_never(), Some(()));
++    assert!(changed.notified().now_or_never().is_none());
++    quality.report(false, PressureReason::Loss, now + Duration::from_secs(1));
++    assert!(changed.notified().now_or_never().is_none());
++    quality.report(true, PressureReason::Loss, now + Duration::from_secs(1));
++    assert_eq!(changed.notified().now_or_never(), Some(()));
++}
++
+ fn fixture() -> (Arc<TransportQuality>, CarrierSampler, CarrierSample) {
+     let quality = Arc::new(TransportQuality::default());
+     quality.enable();

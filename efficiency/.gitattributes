@@ -1,0 +1,7 @@
+patches/*.patch -text
+rekernel/builtin.patch -text
+rekernel/LKM-Source/* -text
+*.py text eol=lf
+*.c text eol=lf
+*.config text eol=lf
+runtime/*.sh text eol=lf

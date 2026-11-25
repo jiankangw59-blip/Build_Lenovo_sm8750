@@ -1,0 +1,126 @@
+diff --git a/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c b/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c
+--- a/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c
++++ b/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c
+@@ -56,6 +56,7 @@
+ static const char *default_compressor = CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP;
+ #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+ static struct workqueue_struct *zram_read_wq;
++static struct workqueue_struct *zms_bio_wq;
+ #endif
+ 
+ /* Module params (documentation at end) */
+@@ -2789,6 +2790,38 @@
+ 				       sddc_wb_ref);
+ }
+ 
++struct zms_bio_work {
++	struct work_struct work;
++	struct bio *bio;
++	int error;
++};
++
++static void zms_bio_workfn(struct work_struct *work)
++{
++	struct zms_bio_work *io = container_of(work, struct zms_bio_work, work);
++
++	io->error = submit_bio_wait(io->bio);
++}
++
++int crystal_zms_submit_bio_wait(struct bio *bio)
++{
++	struct zms_bio_work io = { .bio = bio };
++
++	if (!current->bio_list)
++		return submit_bio_wait(bio);
++
++	/*
++	 * A nested backing bio submitted from ->submit_bio would wait
++	 * on the parent's bio_list until the parent returns. Submit it
++	 * from a separate worker, which must not take any ZMS locks.
++	 */
++	INIT_WORK_ONSTACK(&io.work, zms_bio_workfn);
++	queue_work(zms_bio_wq, &io.work);
++	flush_work(&io.work);
++	destroy_work_on_stack(&io.work);
++	return io.error;
++}
++
+ static void zram_zms_sync_read(struct work_struct *work)
+ {
+ 	struct zram_work *zw = container_of(work, struct zram_work, work);
+@@ -2833,6 +2866,11 @@
+ }
+ 
+ #else
++int crystal_zms_submit_bio_wait(struct bio *bio)
++{
++	return submit_bio_wait(bio);
++}
++
+ static inline void reset_bdev(struct zram *zram) {};
+ static int read_from_zms_sync(struct zram *zram, struct page *page,
+ 			      unsigned long handle, size_t size, u32 prio,
+@@ -6087,6 +6125,7 @@
+ 	unregister_blkdev(zram_major, "zram");
+ 	cpuhp_remove_multi_state(zcomp_cpuhp_state);
+ #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
++	destroy_workqueue(zms_bio_wq);
+ 	if (zram_read_wq) {
+ 		destroy_workqueue(zram_read_wq);
+ 		zram_read_wq = NULL;
+@@ -6117,12 +6156,20 @@
+ 		cpuhp_remove_multi_state(zcomp_cpuhp_state);
+ 		return -ENOMEM;
+ 	}
++	zms_bio_wq = alloc_workqueue("zram-zms-bio", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
++	if (!zms_bio_wq) {
++		destroy_workqueue(zram_read_wq);
++		zram_read_wq = NULL;
++		cpuhp_remove_multi_state(zcomp_cpuhp_state);
++		return -ENOMEM;
++	}
+ #endif
+ 
+ 	ret = class_register(&zram_control_class);
+ 	if (ret) {
+ 		pr_err("Unable to register zram-control class\n");
+ #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
++		destroy_workqueue(zms_bio_wq);
+ 		destroy_workqueue(zram_read_wq);
+ 		zram_read_wq = NULL;
+ #endif
+@@ -6137,6 +6184,7 @@
+ 		zram_debugfs_destroy();
+ 		class_unregister(&zram_control_class);
+ #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
++		destroy_workqueue(zms_bio_wq);
+ 		destroy_workqueue(zram_read_wq);
+ 		zram_read_wq = NULL;
+ #endif
+diff --git a/drivers/crystalfrostwork/crystal_hybridswap/zms.c b/drivers/crystalfrostwork/crystal_hybridswap/zms.c
+--- a/drivers/crystalfrostwork/crystal_hybridswap/zms.c
++++ b/drivers/crystalfrostwork/crystal_hybridswap/zms.c
+@@ -833,7 +833,7 @@
+ 		}
+ 
+ 		start = ktime_get_ns();
+-		ret = submit_bio_wait(&bio);
++		ret = crystal_zms_submit_bio_wait(&bio);
+ 		zms_io_record(zms, io, op, block->blocks[page_idx + done],
+ 			      submitted, account_bd_stat,
+ 			      ktime_get_ns() - start, ret);
+diff --git a/drivers/crystalfrostwork/crystal_hybridswap/zms.h b/drivers/crystalfrostwork/crystal_hybridswap/zms.h
+--- a/drivers/crystalfrostwork/crystal_hybridswap/zms.h
++++ b/drivers/crystalfrostwork/crystal_hybridswap/zms.h
+@@ -7,8 +7,11 @@
+ #include <linux/mm.h>
+ #include <linux/types.h>
+ 
++struct bio;
+ struct block_device;
+ struct zms;
++
++int crystal_zms_submit_bio_wait(struct bio *bio);
+ 
+ #define ZMS_MAX_PAGES_PER_ZSPAGE 8U
+ #define ZMS_ALIGN_SHIFT 4

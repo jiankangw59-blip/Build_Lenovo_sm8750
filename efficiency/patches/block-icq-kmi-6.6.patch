@@ -1,0 +1,18 @@
+From: Local integration <local@localhost>
+Subject: [PATCH] block: preserve the OEM io_context ABI without enabling BFQ
+
+The shipped modules were built with BLK_ICQ enabled. Disabling BFQ must not
+remove the ICQ fields from io_context and change transitive symbol CRCs.
+This profile retains the existing block-layer infrastructure only; BFQ and
+BFQ_GROUP_IOSCHED remain disabled.
+
+--- a/block/Kconfig
++++ b/block/Kconfig
+@@ -50,6 +50,7 @@
+ 
+ config BLK_ICQ
+ 	bool
++	default y
+ 
+ config BLK_DEV_BSGLIB
+ 	bool "Block layer SG support v4 helper lib"

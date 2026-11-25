@@ -1,0 +1,41 @@
+From e0291b601733f5c4532502fa146aa333b3d5f209 Mon Sep 17 00:00:00 2001
+From: brokestar233 <3765589194@qq.com>
+Date: Sat, 6 Sep 2025 02:35:11 +0800
+Subject: [PATCH] f2fs: Demote GC thread to idle scheduler class
+
+We don't want the background GC work causing UI jitter should it ever
+collide with periods of user activity.
+
+Change-Id: I6e7af55fcd62daf27f9ae7d6c7213adb991b73fb
+Signed-off-by: brokestar233 <3765589194@qq.com>
+---
+ fs/f2fs/gc.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/fs/f2fs/gc.c b/fs/f2fs/gc.c
+--- a/fs/f2fs/gc.c
++++ b/fs/f2fs/gc.c
+@@ -14,6 +14,7 @@
+ #include <linux/ioprio.h>
+ #include <linux/freezer.h>
+ #include <linux/sched/signal.h>
++#include <uapi/linux/sched/types.h>
+ #include <linux/random.h>
+ #include <linux/sched/mm.h>
+ 
+@@ -192,6 +193,7 @@
+ 
+ int f2fs_start_gc_thread(struct f2fs_sb_info *sbi)
+ {
++	const struct sched_param param = { .sched_priority = 0 };
+ 	struct f2fs_gc_kthread *gc_th;
+ 	dev_t dev = sbi->sb->s_bdev->bd_dev;
+ 
+@@ -231,6 +233,7 @@
+ 		return err;
+ 	}
+ 
++	sched_setscheduler(gc_th->f2fs_gc_task, SCHED_IDLE, &param);
+ 	set_task_ioprio(gc_th->f2fs_gc_task,
+ 		IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0));
+ 	return 0;

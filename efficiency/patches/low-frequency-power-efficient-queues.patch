@@ -1,0 +1,39 @@
+From: Local integration <local@localhost>
+Subject: [PATCH] power: use efficient queues for vmstat shepherd and supply notifications
+
+Keep CPU-local vmstat refresh on mm_percpu_wq. Only the shepherd and
+power-supply change notifications move to the existing power-efficient
+queue. Thermal polling already uses its freezable power-efficient queue.
+No input, display, render or low-level charger-control path is changed.
+
+--- a/mm/vmstat.c
++++ b/mm/vmstat.c
+@@ -2055,7 +2055,7 @@
+ 	}
+ 	cpus_read_unlock();
+ 
+-	schedule_delayed_work(&shepherd,
++	queue_delayed_work(system_power_efficient_wq, &shepherd,
+ 		round_jiffies_relative(sysctl_stat_interval));
+ }
+ 
+@@ -2067,7 +2067,7 @@
+ 		INIT_DEFERRABLE_WORK(per_cpu_ptr(&vmstat_work, cpu),
+ 			vmstat_update);
+ 
+-	schedule_delayed_work(&shepherd,
++	queue_delayed_work(system_power_efficient_wq, &shepherd,
+ 		round_jiffies_relative(sysctl_stat_interval));
+ }
+ 
+--- a/drivers/power/supply/power_supply_core.c
++++ b/drivers/power/supply/power_supply_core.c
+@@ -130,7 +130,7 @@
+ 	psy->changed = true;
+ 	pm_stay_awake(&psy->dev);
+ 	spin_unlock_irqrestore(&psy->changed_lock, flags);
+-	schedule_work(&psy->changed_work);
++	queue_work(system_power_efficient_wq, &psy->changed_work);
+ }
+ EXPORT_SYMBOL_GPL(power_supply_changed);
+ 

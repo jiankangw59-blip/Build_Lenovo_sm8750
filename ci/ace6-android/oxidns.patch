@@ -1,0 +1,4368 @@
+diff --git a/src/infra/cache/ttl.rs b/src/infra/cache/ttl.rs
+index 482a57e01dd786196fff04c9479e82a61fe5a917..d08ce2c8d39c6b33b58f07a208f16b049a4e21a5 100644
+--- a/src/infra/cache/ttl.rs
++++ b/src/infra/cache/ttl.rs
+@@ -6,7 +6,7 @@
+ //! This module provides a reusable concurrent cache with:
+ //! - per-entry expiration timestamp
+ //! - last-access timestamp for sampled LRU eviction
+-//! - lightweight helpers for periodic cleanup tasks
++//! - optional deadline notifications for background cleanup
+ //!
+ //! It is designed for plugin-level caches where each plugin keeps its own key
+ //! and value types but shares the same cache behavior.
+@@ -17,6 +17,9 @@ use std::sync::Arc;
+ use ahash::RandomState as AHashBuilder;
+ use dashmap::{DashMap, Entry};
+ 
++use crate::infra::clock::AppClock;
++use crate::infra::deadline_alarm::DeadlineAlarm;
++
+ /// Snapshot of one cached entry with metadata.
+ #[derive(Debug, Clone)]
+ pub struct TtlCacheEntry<V> {
+@@ -46,6 +49,24 @@ where
+     K: Eq + Hash,
+ {
+     map: Arc<DashMap<K, TtlCacheEntry<V>, AHashBuilder>>,
++    expiry: Option<Arc<Expiry>>,
++}
++
++#[derive(Debug)]
++struct Expiry {
++    alarm: DeadlineAlarm,
++    coalesce_ms: u64,
++}
++
++impl Expiry {
++    fn coalesced_deadline(&self, expire_at_ms: u64) -> u64 {
++        let remainder = expire_at_ms % self.coalesce_ms;
++        if remainder == 0 {
++            expire_at_ms
++        } else {
++            expire_at_ms.saturating_add(self.coalesce_ms - remainder)
++        }
++    }
+ }
+ 
+ impl<K, V> Clone for TtlCache<K, V>
+@@ -55,6 +76,7 @@ where
+     fn clone(&self) -> Self {
+         Self {
+             map: self.map.clone(),
++            expiry: self.expiry.clone(),
+         }
+     }
+ }
+@@ -72,9 +94,54 @@ where
+                 capacity,
+                 AHashBuilder::default(),
+             )),
++            expiry: None,
+         }
+     }
+ 
++    pub(crate) fn with_expiry(capacity: usize, coalesce_ms: u64) -> Self {
++        let mut cache = Self::with_capacity(capacity);
++        cache.expiry = Some(Arc::new(Expiry {
++            alarm: DeadlineAlarm::new(),
++            coalesce_ms: coalesce_ms.max(1),
++        }));
++        cache
++    }
++
++    /// Wait for the next posted expiry or capacity cleanup deadline.
++    pub(crate) async fn wait_for_expiry(&self) {
++        self.expiry
++            .as_ref()
++            .expect("expiry is enabled")
++            .alarm
++            .wait()
++            .await;
++    }
++
++    /// Re-arm from the entries still present after cleanup.
++    pub(crate) fn schedule_next_expiry(&self) {
++        let expiry = self.expiry.as_ref().expect("expiry is enabled");
++        if let Some(next_ms) = self
++            .map
++            .iter()
++            .map(|entry| entry.value().expire_at_ms)
++            .min()
++        {
++            expiry.alarm.schedule(
++                expiry
++                    .coalesced_deadline(next_ms)
++                    .max(AppClock::elapsed_millis().saturating_add(1)),
++            );
++        }
++    }
++
++    pub(crate) fn schedule_cleanup_at(&self, at_ms: u64) {
++        self.expiry
++            .as_ref()
++            .expect("expiry is enabled")
++            .alarm
++            .schedule(at_ms);
++    }
++
+     /// Current number of cached entries.
+     #[inline]
+     pub fn len(&self) -> usize {
+@@ -92,10 +159,10 @@ impl<K, V> TtlCache<K, V>
+ where
+     K: Eq + Hash,
+ {
+-    /// Insert or update one entry using "now" for cache and access timestamps.
++    /// Insert or update one entry. Returns true when the key was new.
+     #[inline]
+-    pub fn insert_or_update(&self, key: K, value: V, now_ms: u64, expire_at_ms: u64) {
+-        self.insert_or_update_with_meta(key, value, now_ms, expire_at_ms, now_ms);
++    pub fn insert_or_update(&self, key: K, value: V, now_ms: u64, expire_at_ms: u64) -> bool {
++        self.insert_or_update_with_meta(key, value, now_ms, expire_at_ms, now_ms)
+     }
+ 
+     /// Insert or update one entry with explicit metadata.
+@@ -106,14 +173,15 @@ where
+         cache_time_ms: u64,
+         expire_at_ms: u64,
+         last_access_ms: u64,
+-    ) {
+-        match self.map.entry(key) {
++    ) -> bool {
++        let inserted = match self.map.entry(key) {
+             Entry::Occupied(mut e) => {
+                 let existing = e.get_mut();
+                 existing.value = value;
+                 existing.cache_time_ms = cache_time_ms;
+                 existing.expire_at_ms = expire_at_ms;
+                 existing.last_access_ms = last_access_ms;
++                false
+             }
+             Entry::Vacant(e) => {
+                 e.insert(TtlCacheEntry {
+@@ -122,8 +190,15 @@ where
+                     expire_at_ms,
+                     last_access_ms,
+                 });
++                true
+             }
++        };
++        if let Some(expiry) = &self.expiry {
++            expiry
++                .alarm
++                .schedule(expiry.coalesced_deadline(expire_at_ms));
+         }
++        inserted
+     }
+ 
+     /// Get one retained, non-expired entry and optionally refresh its access
+@@ -291,6 +366,33 @@ where
+ mod tests {
+     use super::*;
+ 
++    #[tokio::test]
++    async fn expiry_timer_is_armed_only_by_entries() {
++        use std::time::Duration;
++
++        AppClock::start();
++        let cache = TtlCache::with_expiry(4, 1);
++        let quiet = Duration::from_millis(20);
++        assert!(
++            tokio::time::timeout(quiet, cache.wait_for_expiry())
++                .await
++                .is_err()
++        );
++
++        let now = AppClock::elapsed_millis();
++        assert!(cache.insert_or_update("entry", 1, now, now + 20));
++        tokio::time::timeout(Duration::from_secs(2), cache.wait_for_expiry())
++            .await
++            .expect("the inserted entry should schedule expiry");
++        assert_eq!(cache.remove_expired_batch(AppClock::elapsed_millis(), 4), 1);
++        cache.schedule_next_expiry();
++        assert!(
++            tokio::time::timeout(quiet, cache.wait_for_expiry())
++                .await
++                .is_err()
++        );
++    }
++
+     #[test]
+     fn test_insert_get_and_remove_if_expired() {
+         let cache = TtlCache::with_capacity(4);
+diff --git a/src/infra/mod.rs b/src/infra/mod.rs
+index a9be28cd9c5bf4a03f7da82ef2402c227ee83d05..f77a890c0ea3b27cfacd3f35f4d5c0f22cc6de8d 100644
+--- a/src/infra/mod.rs
++++ b/src/infra/mod.rs
+@@ -8,6 +8,7 @@ pub use crate::build_info;
+ pub mod cache;
+ pub mod clock;
+ pub mod control;
++pub(crate) mod deadline_alarm;
+ pub mod env;
+ pub mod error;
+ pub(crate) mod io;
+diff --git a/src/infra/network/dial.rs b/src/infra/network/dial.rs
+index 778ff287bc04bdac9b0d9c0d2b053135c15ff472..1b6bd974b55c77b17f477bf9d648f7803029fe23 100644
+--- a/src/infra/network/dial.rs
++++ b/src/infra/network/dial.rs
+@@ -389,8 +389,8 @@ pub fn try_lookup_server_name(server_name: &str) -> Result<IpAddr> {
+ /// - `Err(DnsError)` if socket creation, configuration, or connection fails
+ ///
+ /// # Platform-Specific Features
+-/// - **Linux**: Supports SO_MARK (for netfilter/policy routing) and
+-///   SO_BINDTODEVICE
++/// - **Linux and Android**: Support SO_MARK for netfilter and policy routing.
++/// - **Linux**: Also supports SO_BINDTODEVICE.
+ /// - **Other platforms**: SO_MARK and bind_to_device options are ignored
+ ///
+ /// # Notes
+@@ -441,7 +441,7 @@ fn configure_common_socket(socket: &Socket, options: &SocketOptions) -> Result<(
+     let _ = socket.set_nonblocking(true);
+     let _ = socket.set_reuse_address(true);
+ 
+-    #[cfg(target_os = "linux")]
++    #[cfg(any(target_os = "linux", target_os = "android"))]
+     if let Some(so_mark) = options.so_mark {
+         socket.set_mark(so_mark)?;
+     }
+@@ -514,7 +514,8 @@ fn is_connect_in_progress(err: &std::io::Error) -> bool {
+ /// - **Non-blocking**: Set for async I/O compatibility
+ ///
+ /// # Platform-Specific Features
+-/// - **Linux**: Supports SO_MARK and SO_BINDTODEVICE for advanced routing
++/// - **Linux and Android**: Support SO_MARK for advanced routing.
++/// - **Linux**: Also supports SO_BINDTODEVICE.
+ /// - **Other platforms**: These options are silently ignored
+ ///
+ /// # Performance
+diff --git a/src/infra/network/udp_socket/mod.rs b/src/infra/network/udp_socket/mod.rs
+index 5ffc477580c804e48ac26d938e12a28a5afe416a..4891f8e6d5cdfd5193afc7da2b6e949413e3e4fe 100644
+--- a/src/infra/network/udp_socket/mod.rs
++++ b/src/infra/network/udp_socket/mod.rs
+@@ -18,12 +18,18 @@ use crate::infra::network::ip::normalize_ipv4_mapped_ip;
+ 
+ #[cfg(any(
+     target_os = "linux",
++    target_os = "android",
+     target_os = "macos",
+     target_os = "freebsd",
+     windows
+ ))]
+ mod control;
+-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
++#[cfg(any(
++    target_os = "linux",
++    target_os = "android",
++    target_os = "macos",
++    target_os = "freebsd"
++))]
+ #[path = "unix.rs"]
+ mod platform;
+ #[cfg(windows)]
+@@ -31,6 +37,7 @@ mod platform;
+ mod platform;
+ #[cfg(not(any(
+     target_os = "linux",
++    target_os = "android",
+     target_os = "macos",
+     target_os = "freebsd",
+     windows
+diff --git a/src/infra/network/udp_socket/tests.rs b/src/infra/network/udp_socket/tests.rs
+index 3e0bb44f0caf42c15a9c7dacb08ed9cef39904b1..cf63096414a4ccc3c441905c962587510a5f4fbc 100644
+--- a/src/infra/network/udp_socket/tests.rs
++++ b/src/infra/network/udp_socket/tests.rs
+@@ -45,7 +45,7 @@ fn reply_targets_preserve_peers_and_only_scope_link_local_replies() {
+     assert_eq!(scoped_peer.outgoing_interface(), 7);
+ }
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "android"))]
+ #[tokio::test]
+ async fn reply_addresses_survive_reordered_concurrent_sends() {
+     let raw = listen::build_udp_socket("[::]:0".parse().unwrap(), |_| {}).unwrap();
+diff --git a/src/infra/network/udp_socket/unix.rs b/src/infra/network/udp_socket/unix.rs
+index 2564c8d7c3490b01e3e745232d50eb2b61838c6d..b2b3c26053a9d3752353f9b62db8606ec8a13aa7 100644
+--- a/src/infra/network/udp_socket/unix.rs
++++ b/src/infra/network/udp_socket/unix.rs
+@@ -25,7 +25,7 @@ pub(super) struct State;
+ impl State {
+     pub fn new(socket: &UdpSocket) -> io::Result<Self> {
+         let (level, option) = if socket.local_addr()?.is_ipv4() {
+-            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+             let option = libc::IP_PKTINFO;
+             #[cfg(target_os = "freebsd")]
+             let option = libc::IP_RECVDSTADDR;
+@@ -112,7 +112,7 @@ fn packet_info(control: &Control, len: usize, truncated: bool) -> io::Result<(Ip
+     for message in control.messages(len, truncated)? {
+         let (level, kind, bytes) = message?;
+         match (level, kind) {
+-            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+             (libc::IPPROTO_IP, libc::IP_PKTINFO) => {
+                 // SAFETY: in_pktinfo contains only integers and IPv4 addresses.
+                 let info = unsafe { decode::<libc::in_pktinfo>(bytes) }?;
+@@ -130,9 +130,14 @@ fn packet_info(control: &Control, len: usize, truncated: bool) -> io::Result<(Ip
+             (libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) => {
+                 // SAFETY: in6_pktinfo contains only integer fields.
+                 let info = unsafe { decode::<libc::in6_pktinfo>(bytes) }?;
++                #[cfg(target_os = "android")]
++                let interface = u32::try_from(info.ipi6_ifindex)
++                    .map_err(|_| invalid_data("Invalid UDP interface index"))?;
++                #[cfg(not(target_os = "android"))]
++                let interface = info.ipi6_ifindex;
+                 destination = Some((
+                     IpAddr::V6(Ipv6Addr::from(info.ipi6_addr.s6_addr)),
+-                    info.ipi6_ifindex,
++                    interface,
+                 ));
+             }
+             _ => {}
+@@ -151,7 +156,7 @@ fn reply_control(target: UdpReplyTarget) -> Control {
+                 let addr = libc::in_addr {
+                     s_addr: u32::from_ne_bytes(ip.octets()),
+                 };
+-                #[cfg(any(target_os = "linux", target_os = "macos"))]
++                #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+                 control.push(
+                     libc::IPPROTO_IP,
+                     libc::IP_PKTINFO,
+@@ -171,7 +176,8 @@ fn reply_control(target: UdpReplyTarget) -> Control {
+                     ipi6_addr: libc::in6_addr {
+                         s6_addr: ip.octets(),
+                     },
+-                    ipi6_ifindex: target.outgoing_interface(),
++                    // Android uses a signed field for the kernel interface index.
++                    ipi6_ifindex: target.outgoing_interface() as _,
+                 },
+             ),
+         }
+@@ -193,7 +199,7 @@ mod tests {
+         // SAFETY: all fields are initialized and these native types have no
+         // padding.
+         unsafe {
+-            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+             received.push(
+                 libc::IPPROTO_IP,
+                 libc::IP_PKTINFO,
+@@ -223,7 +229,7 @@ mod tests {
+             .unwrap()
+             .unwrap();
+         assert_eq!(level, libc::IPPROTO_IP);
+-        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+         {
+             assert_eq!(kind, libc::IP_PKTINFO);
+             let info = unsafe { decode::<libc::in_pktinfo>(bytes) }.unwrap();
+diff --git a/src/infra/network/upstream/config.rs b/src/infra/network/upstream/config.rs
+index 51bc796e772656e5d181fd16f6e8222efc50dc7c..85d43d90b36487b5a46357920b74c7e56c561492 100644
+--- a/src/infra/network/upstream/config.rs
++++ b/src/infra/network/upstream/config.rs
+@@ -222,11 +222,11 @@ pub struct UpstreamConfig {
+     /// Requires the upstream server to support HTTP/3.
+     pub enable_http3: Option<bool>,
+ 
+-    /// Linux SO_MARK socket option for policy routing
++    /// Linux and Android SO_MARK socket option for policy routing
+     ///
+     /// Sets the mark on outgoing packets, which can be used with
+     /// iptables/nftables for advanced routing policies.
+-    /// **Linux only** - ignored on other platforms.
++    /// Ignored on other platforms.
+     pub so_mark: Option<u32>,
+ 
+     /// Linux SO_BINDTODEVICE - bind socket to specific network interface
+diff --git a/src/infra/network/upstream/pool/mod.rs b/src/infra/network/upstream/pool/mod.rs
+index 1f8dd970acb8e46651a333862a53657607544ed1..d83f1a626168418f2b4f45fe86efe5ec6eb761de 100644
+--- a/src/infra/network/upstream/pool/mod.rs
++++ b/src/infra/network/upstream/pool/mod.rs
+@@ -29,22 +29,21 @@
+ //!
+ //! # Performance Features
+ //! - Lock-free connection selection with atomic operations
+-//! - Background maintenance tasks for idle connection cleanup
++//! - Idle cleanup scheduled from connection activity
+ //! - Request/response matching via lock-free request map
+ //! - Zero-copy message passing where possible
+ //! - Connection reuse to amortize handshake costs
+ 
+ use std::fmt::Debug;
+-use std::sync::{Arc, Mutex, Weak};
+-use std::time::Duration;
++use std::sync::{Arc, OnceLock};
+ 
+ use async_trait::async_trait;
+-use tokio::task::yield_now;
++use tokio::task::AbortHandle;
+ 
++use crate::infra::deadline_alarm::{DeadlineAlarm, NO_DEADLINE as NO_MAINTENANCE_DEADLINE};
+ use crate::infra::error::Result;
+ pub use crate::infra::network::deadline::{DeadlineOutcome, QueryDeadline};
+ use crate::infra::network::upstream::config::ConnectionInfo;
+-use crate::infra::task as task_center;
+ use crate::proto::Message;
+ 
+ pub(crate) mod pipeline;
+@@ -145,7 +144,7 @@ pub trait ConnectionPool<C: Connection>: Send + Sync + Debug + 'static {
+ 
+     /// Perform maintenance on the pool
+     ///
+-    /// Called periodically by background task to:
++    /// Called when idle connections expire or a connection is lost to:
+     /// - Remove idle connections
+     /// - Drop failed connections
+     /// - Ensure minimum pool size
+@@ -155,52 +154,58 @@ pub trait ConnectionPool<C: Connection>: Send + Sync + Debug + 'static {
+     fn configured_min_size(&self) -> usize;
+ }
+ 
+-/// Pools that own a periodic maintenance task managed by the global task
+-/// center.
+-pub trait ManagedMaintenanceTask {
+-    fn maintenance_task_handle(&self) -> &Mutex<Option<task_center::ManagedTaskHandle>>;
+-    fn maintenance_task_name(&self) -> String;
++trait ManagedMaintenanceTask {
++    fn maintenance(&self) -> &PoolMaintenance;
+ }
+ 
+-/// Maintenance interval for pool cleanup
+-const MAINTENANCE_DURATION: Duration = Duration::from_secs(10);
++#[derive(Debug)]
++struct PoolMaintenance {
++    signal: Arc<DeadlineAlarm>,
++    task: OnceLock<AbortHandle>,
++}
++
++impl PoolMaintenance {
++    fn new() -> Self {
++        Self {
++            signal: Arc::new(DeadlineAlarm::new()),
++            task: OnceLock::new(),
++        }
++    }
++
++    fn schedule(&self, deadline_ms: u64) {
++        self.signal.schedule(deadline_ms);
++    }
++}
++
++impl Drop for PoolMaintenance {
++    fn drop(&mut self) {
++        if let Some(task) = self.task.get() {
++            task.abort();
++        }
++    }
++}
+ 
+ /// Start background maintenance task for a connection pool
+-///
+-/// Periodically calls `maintain()` to clean up idle/dead connections.
+-/// The task runs for the lifetime of the pool.
+-#[inline]
+ fn start_maintenance<C, P>(pool: &Arc<P>)
+ where
+     C: Connection,
+     P: ConnectionPool<C> + ManagedMaintenanceTask + 'static,
+ {
+-    let weak_pool: Weak<P> = Arc::downgrade(pool);
+-    let task_name = pool.maintenance_task_name();
+-    let task_handle = task_center::spawn_fixed(
+-        task_name,
+-        MAINTENANCE_DURATION,
+-        task_center::TaskOptions::default(),
+-        move |_| {
+-            let weak_pool = weak_pool.clone();
+-            async move {
+-                let Some(pool) = weak_pool.upgrade() else {
+-                    return;
+-                };
+-
+-                // Perform maintenance (awaiting ensures fairness and proper
+-                // error handling)
+-                pool.maintain().await;
+-                // Yield to allow other tasks to run
+-                yield_now().await;
+-            }
+-        },
+-    )
+-    .expect("global task center must accept pool maintenance task");
+-    *pool
+-        .maintenance_task_handle()
+-        .lock()
+-        .expect("maintenance_task_handle poisoned") = Some(task_handle);
++    let weak_pool = Arc::downgrade(pool);
++    let signal = pool.maintenance().signal.clone();
++    let task = tokio::spawn(async move {
++        loop {
++            signal.wait().await;
++            let Some(pool) = weak_pool.upgrade() else {
++                return;
++            };
++            pool.maintain().await;
++        }
++    });
++    pool.maintenance()
++        .task
++        .set(task.abort_handle())
++        .expect("pool maintenance must start once");
+ }
+ 
+ #[cfg(test)]
+diff --git a/src/infra/network/upstream/pool/pipeline.rs b/src/infra/network/upstream/pool/pipeline.rs
+index 19caa20f7166b6889bf3531497d6fcf0174081d2..152bd248e902cf75d47ce4b18111f755fa522e52 100644
+--- a/src/infra/network/upstream/pool/pipeline.rs
++++ b/src/infra/network/upstream/pool/pipeline.rs
+@@ -2,8 +2,8 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
+ use std::fmt::Debug;
++use std::sync::Arc;
+ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicUsize, Ordering};
+-use std::sync::{Arc, Mutex};
+ use std::time::Duration;
+ 
+ use arc_swap::ArcSwap;
+@@ -16,9 +16,9 @@ use crate::infra::error::Result;
+ use crate::infra::network::upstream::config::ConnectionInfo;
+ use crate::infra::network::upstream::pool::{
+     Connection, ConnectionBuilder, ConnectionPool, DeadlineOutcome, ManagedMaintenanceTask,
+-    PoolSize, QueryDeadline, QueryTimeoutPolicy, start_maintenance,
++    NO_MAINTENANCE_DEADLINE, PoolMaintenance, PoolSize, QueryDeadline, QueryTimeoutPolicy,
++    start_maintenance,
+ };
+-use crate::infra::task as task_center;
+ use crate::proto::Message;
+ 
+ const POOL_RETRY_BACKOFF: Duration = Duration::from_millis(10);
+@@ -54,8 +54,7 @@ pub struct PipelinePool<C: Connection> {
+     next_id: AtomicU16,
+     /// Notify waiters when a slot is released, inserted, retired, or closed.
+     release_notified: Notify,
+-    /// Background maintenance task registered in task center.
+-    maintenance_task_handle: Mutex<Option<task_center::ManagedTaskHandle>>,
++    maintenance: PoolMaintenance,
+ }
+ 
+ #[async_trait]
+@@ -98,15 +97,22 @@ impl<C: Connection> ConnectionPool<C> for PipelinePool<C> {
+         let mut keep = Vec::with_capacity(slots.len());
+         let mut idle_candidates = Vec::new();
+         let mut close_after_swap = Vec::new();
++        let mut next_idle_at_ms = NO_MAINTENANCE_DEADLINE;
+ 
+         for slot in slots.iter() {
+             let state = slot.state();
+             let inflight = slot.inflight();
+             if state == SLOT_ACTIVE && slot.connection().available() {
+-                let idle = now.saturating_sub(slot.connection().last_used());
+-                if inflight == 0 && idle >= self.max_idle.as_millis() as u64 {
++                let idle_at_ms = slot
++                    .connection()
++                    .last_used()
++                    .saturating_add(self.max_idle.as_millis() as u64);
++                if inflight == 0 && now >= idle_at_ms {
+                     idle_candidates.push(slot.clone());
+                 } else {
++                    if inflight == 0 {
++                        next_idle_at_ms = next_idle_at_ms.min(idle_at_ms);
++                    }
+                     keep.push(slot.clone());
+                 }
+             } else if state == SLOT_RETIRING && inflight > 0 {
+@@ -140,6 +146,8 @@ impl<C: Connection> ConnectionPool<C> for PipelinePool<C> {
+                 slot.close();
+             }
+             self.release_notified.notify_waiters();
++            self.maintenance
++                .schedule(AppClock::elapsed_millis().saturating_add(1));
+             return;
+         }
+ 
+@@ -162,6 +170,8 @@ impl<C: Connection> ConnectionPool<C> for PipelinePool<C> {
+ 
+         if new_len < self.min_size {
+             let _ = self.expand(QueryDeadline::new(self.connect_timeout)).await;
++        } else if new_len > self.min_size {
++            self.maintenance.schedule(next_idle_at_ms);
+         }
+     }
+ 
+@@ -208,7 +218,7 @@ impl<C: Connection> PipelinePool<C> {
+             connect_timeout,
+             next_id: AtomicU16::new(1),
+             release_notified: Notify::new(),
+-            maintenance_task_handle: Mutex::new(None),
++            maintenance: PoolMaintenance::new(),
+         });
+         start_maintenance(&pool);
+         if min_size > 0 {
+@@ -225,14 +235,14 @@ impl<C: Connection> PipelinePool<C> {
+     async fn acquire(&self, deadline: QueryDeadline) -> Result<PipelineLease<'_, C>> {
+         loop {
+             if let Some(slot) = self.try_acquire_existing() {
+-                return Ok(PipelineLease::new(slot, &self.release_notified));
++                return Ok(PipelineLease::new(slot, self));
+             }
+ 
+             if let Some(reservation) = self.try_reserve_slot() {
+                 match self.expand_one(reservation, deadline).await {
+                     Ok(Some(slot)) => {
+                         if slot.try_acquire(self.max_load) {
+-                            return Ok(PipelineLease::new(slot, &self.release_notified));
++                            return Ok(PipelineLease::new(slot, self));
+                         }
+                         self.release_notified.notify_waiters();
+                     }
+@@ -257,13 +267,13 @@ impl<C: Connection> PipelinePool<C> {
+                 tokio::pin!(notified);
+                 notified.as_mut().enable();
+                 if let Some(slot) = self.try_acquire_existing() {
+-                    return Ok(PipelineLease::new(slot, &self.release_notified));
++                    return Ok(PipelineLease::new(slot, self));
+                 }
+                 if let Some(reservation) = self.try_reserve_slot() {
+                     match self.expand_one(reservation, deadline).await {
+                         Ok(Some(slot)) => {
+                             if slot.try_acquire(self.max_load) {
+-                                return Ok(PipelineLease::new(slot, &self.release_notified));
++                                return Ok(PipelineLease::new(slot, self));
+                             }
+                             self.release_notified.notify_waiters();
+                         }
+@@ -349,10 +359,17 @@ impl<C: Connection> PipelinePool<C> {
+                 let slot = Arc::new(PipelineSlot::new(conn));
+                 if self.insert_slot(slot.clone()) {
+                     reservation.commit();
++                    let active_slots = self.slots.load().len();
++                    if active_slots > self.min_size {
++                        self.maintenance.schedule(
++                            slot.connection()
++                                .last_used()
++                                .saturating_add(self.max_idle.as_millis() as u64),
++                        );
++                    }
+                     debug!(
+                         "Pipeline pool expanded: total={}/{}",
+-                        self.slots.load().len(),
+-                        self.max_size
++                        active_slots, self.max_size
+                     );
+                     self.release_notified.notify_waiters();
+                     Ok(Some(slot))
+@@ -512,7 +529,7 @@ impl<C: Connection> PipelineSlot<C> {
+         }
+     }
+ 
+-    fn release(&self, notify: &Notify) {
++    fn release(&self, notify: &Notify) -> bool {
+         let previous = self.inflight.fetch_sub(1, Ordering::AcqRel);
+         debug_assert!(previous > 0, "pipeline slot inflight underflow");
+         if previous == 1 && self.state() != SLOT_ACTIVE {
+@@ -524,6 +541,7 @@ impl<C: Connection> PipelineSlot<C> {
+         // freed capacity is in any case visible to other acquirers via
+         // `try_acquire_existing`, so this cannot strand a waiter.
+         notify.notify_one();
++        previous == 1
+     }
+ 
+     fn release_without_notify(&self) {
+@@ -582,12 +600,12 @@ impl<C: Connection> PipelineSlot<C> {
+ 
+ struct PipelineLease<'a, C: Connection> {
+     slot: Arc<PipelineSlot<C>>,
+-    notify: &'a Notify,
++    pool: &'a PipelinePool<C>,
+ }
+ 
+ impl<'a, C: Connection> PipelineLease<'a, C> {
+-    fn new(slot: Arc<PipelineSlot<C>>, notify: &'a Notify) -> Self {
+-        Self { slot, notify }
++    fn new(slot: Arc<PipelineSlot<C>>, pool: &'a PipelinePool<C>) -> Self {
++        Self { slot, pool }
+     }
+ 
+     fn connection(&self) -> &C {
+@@ -596,18 +614,30 @@ impl<'a, C: Connection> PipelineLease<'a, C> {
+ 
+     fn retire(&self) {
+         self.slot.retire();
+-        self.notify.notify_waiters();
++        self.pool.release_notified.notify_waiters();
+     }
+ 
+     fn close(&self) {
+         self.slot.close();
+-        self.notify.notify_waiters();
++        self.pool.release_notified.notify_waiters();
+     }
+ }
+ 
+ impl<C: Connection> Drop for PipelineLease<'_, C> {
+     fn drop(&mut self) {
+-        self.slot.release(self.notify);
++        if !self.slot.release(&self.pool.release_notified) {
++            return;
++        }
++        if self.slot.state() != SLOT_ACTIVE || !self.slot.connection().available() {
++            self.pool.maintenance.schedule(AppClock::elapsed_millis());
++        } else if self.pool.slots.load().len() > self.pool.min_size {
++            self.pool.maintenance.schedule(
++                self.slot
++                    .connection()
++                    .last_used()
++                    .saturating_add(self.pool.max_idle.as_millis() as u64),
++            );
++        }
+     }
+ }
+ 
+@@ -637,25 +667,8 @@ impl<C: Connection> Drop for SlotReservation<'_, C> {
+ }
+ 
+ impl<C: Connection> ManagedMaintenanceTask for PipelinePool<C> {
+-    fn maintenance_task_handle(&self) -> &Mutex<Option<task_center::ManagedTaskHandle>> {
+-        &self.maintenance_task_handle
+-    }
+-
+-    fn maintenance_task_name(&self) -> String {
+-        "upstream_pipeline_pool:maintenance".to_string()
+-    }
+-}
+-
+-impl<C: Connection> Drop for PipelinePool<C> {
+-    fn drop(&mut self) {
+-        let task_handle = self
+-            .maintenance_task_handle
+-            .lock()
+-            .ok()
+-            .and_then(|mut guard| guard.take());
+-        if let Some(handle) = task_handle {
+-            handle.stop_detached();
+-        }
++    fn maintenance(&self) -> &PoolMaintenance {
++        &self.maintenance
+     }
+ }
+ 
+@@ -785,7 +798,7 @@ mod tests {
+             connect_timeout: Duration::from_secs(5),
+             next_id: AtomicU16::new(1),
+             release_notified: Notify::new(),
+-            maintenance_task_handle: Mutex::new(None),
++            maintenance: PoolMaintenance::new(),
+         }
+     }
+ 
+@@ -1046,6 +1059,35 @@ mod tests {
+         assert!(pool.slots.load().is_empty());
+     }
+ 
++    #[tokio::test]
++    async fn test_last_lease_release_arms_idle_maintenance() {
++        AppClock::start();
++        let conn = Arc::new(MockConnection::new(true, 0, AppClock::elapsed_millis()));
++        let pool = Arc::new(make_pool(
++            0,
++            1,
++            1,
++            0,
++            MockBuilder::new(vec![]),
++            vec![conn.clone()],
++        ));
++        start_maintenance(&pool);
++
++        let lease = pool
++            .acquire(QueryDeadline::new(Duration::from_secs(1)))
++            .await
++            .unwrap();
++        drop(lease);
++        tokio::time::timeout(Duration::from_secs(2), async {
++            while !pool.slots.load().is_empty() {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .expect("the last lease should schedule idle connection cleanup");
++        assert_eq!(conn.close_calls(), 1);
++    }
++
+     #[tokio::test]
+     async fn test_maintain_marks_removed_idle_slot_closed() {
+         AppClock::start();
+diff --git a/src/infra/network/upstream/pool/reuse.rs b/src/infra/network/upstream/pool/reuse.rs
+index 0a31a93ffb8d94df633e546c6221eff6c84f9404..57a56d9ef314ac630d4da308a2813b0aad25ad33 100644
+--- a/src/infra/network/upstream/pool/reuse.rs
++++ b/src/infra/network/upstream/pool/reuse.rs
+@@ -2,8 +2,8 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
+ use std::fmt::Debug;
++use std::sync::Arc;
+ use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+-use std::sync::{Arc, Mutex};
+ use std::time::Duration;
+ 
+ use async_trait::async_trait;
+@@ -16,9 +16,9 @@ use crate::infra::error::Result;
+ use crate::infra::network::upstream::config::{ConnectionInfo, ConnectionType};
+ use crate::infra::network::upstream::pool::{
+     Connection, ConnectionBuilder, ConnectionPool, DeadlineOutcome, ManagedMaintenanceTask,
+-    PoolSize, QueryDeadline, QueryTimeoutPolicy, start_maintenance,
++    NO_MAINTENANCE_DEADLINE, PoolMaintenance, PoolSize, QueryDeadline, QueryTimeoutPolicy,
++    start_maintenance,
+ };
+-use crate::infra::task as task_center;
+ use crate::proto::Message;
+ 
+ const POOL_RETRY_BACKOFF: Duration = Duration::from_millis(10);
+@@ -59,8 +59,7 @@ pub struct ReusePool<C: Connection> {
+     next_id: AtomicU16,
+     /// Notify waiting threads when a connection becomes available
+     release_notified: Notify,
+-    /// Background maintenance task registered in task center.
+-    maintenance_task_handle: Mutex<Option<task_center::ManagedTaskHandle>>,
++    maintenance: PoolMaintenance,
+ }
+ 
+ #[async_trait]
+@@ -101,13 +100,14 @@ impl<C: Connection> ConnectionPool<C> for ReusePool<C> {
+         }
+     }
+ 
+-    /// Periodic pool maintenance task
++    /// Trim expired or invalid connections when a maintenance deadline fires.
+     /// - Removes idle/invalid connections
+     /// - Ensures minimum connection count
+     async fn maintain(&self) {
+         let now = AppClock::elapsed_millis();
+         let mut drop_vec = Vec::new();
+         let mut invalid_vec = Vec::new();
++        let mut next_idle_at_ms = NO_MAINTENANCE_DEADLINE;
+ 
+         let check_count = self.connections.len();
+         if check_count == 0 {
+@@ -121,12 +121,17 @@ impl<C: Connection> ConnectionPool<C> for ReusePool<C> {
+         for _ in 0..check_count {
+             if let Some(conn) = self.connections.pop() {
+                 if conn.available() {
+-                    let idle = now - conn.last_used();
+-                    if idle < self.max_idle.as_millis() as u64 || conn.using_count() > 0 {
++                    let idle_at_ms = conn
++                        .last_used()
++                        .saturating_add(self.max_idle.as_millis() as u64);
++                    let in_use = conn.using_count() > 0;
++                    if now < idle_at_ms || in_use {
+                         // still valid
+                         if let Err(conn) = self.connections.push(conn) {
+                             drop_vec.push(conn);
+                             self.active_count.fetch_sub(1, Ordering::Relaxed);
++                        } else if !in_use {
++                            next_idle_at_ms = next_idle_at_ms.min(idle_at_ms);
+                         }
+                     } else {
+                         // idle timeout
+@@ -175,6 +180,8 @@ impl<C: Connection> ConnectionPool<C> for ReusePool<C> {
+         if self.active_count.load(Ordering::Relaxed) < self.min_size {
+             debug!("Reuse pool expanding to maintain minimum size");
+             let _ = self.expand(QueryDeadline::new(self.connect_timeout)).await;
++        } else if self.active_count.load(Ordering::Relaxed) > self.min_size {
++            self.maintenance.schedule(next_idle_at_ms);
+         }
+     }
+ 
+@@ -223,7 +230,7 @@ impl<C: Connection> ReusePool<C> {
+             active_count: AtomicUsize::new(0),
+             next_id: AtomicU16::new(1),
+             release_notified: Notify::new(),
+-            maintenance_task_handle: Mutex::new(None),
++            maintenance: PoolMaintenance::new(),
+         });
+ 
+         start_maintenance(&pool);
+@@ -312,12 +319,21 @@ impl<C: Connection> ReusePool<C> {
+         } else {
+             debug!("Connection released back to pool");
+             self.release_notified.notify_one();
++            if self.active_count.load(Ordering::Relaxed) > self.min_size {
++                self.maintenance.schedule(
++                    conn.last_used()
++                        .saturating_add(self.max_idle.as_millis() as u64),
++                );
++            }
+         }
+     }
+ 
+     fn close_active_connection(&self, conn: Arc<C>) {
+         conn.close();
+-        self.active_count.fetch_sub(1, Ordering::Relaxed);
++        let previous = self.active_count.fetch_sub(1, Ordering::Relaxed);
++        if previous <= self.min_size {
++            self.maintenance.schedule(AppClock::elapsed_millis());
++        }
+         self.release_notified.notify_waiters();
+     }
+ 
+@@ -513,25 +529,8 @@ impl<C: Connection> Drop for BorrowedConnection<'_, C> {
+ }
+ 
+ impl<C: Connection> ManagedMaintenanceTask for ReusePool<C> {
+-    fn maintenance_task_handle(&self) -> &Mutex<Option<task_center::ManagedTaskHandle>> {
+-        &self.maintenance_task_handle
+-    }
+-
+-    fn maintenance_task_name(&self) -> String {
+-        "upstream_reuse_pool:maintenance".to_string()
+-    }
+-}
+-
+-impl<C: Connection> Drop for ReusePool<C> {
+-    fn drop(&mut self) {
+-        let task_handle = self
+-            .maintenance_task_handle
+-            .lock()
+-            .ok()
+-            .and_then(|mut guard| guard.take());
+-        if let Some(handle) = task_handle {
+-            handle.stop_detached();
+-        }
++    fn maintenance(&self) -> &PoolMaintenance {
++        &self.maintenance
+     }
+ }
+ 
+@@ -662,7 +661,7 @@ mod tests {
+             connect_timeout: Duration::from_secs(5),
+             next_id: AtomicU16::new(1),
+             release_notified: Notify::new(),
+-            maintenance_task_handle: Mutex::new(None),
++            maintenance: PoolMaintenance::new(),
+         }
+     }
+ 
+@@ -801,6 +800,25 @@ mod tests {
+         assert_eq!(pool.active_count.load(Ordering::Relaxed), 0);
+     }
+ 
++    #[tokio::test]
++    async fn test_returned_connection_arms_idle_maintenance() {
++        AppClock::start();
++        let connection = Arc::new(MockConnection::new(true, 0, AppClock::elapsed_millis()));
++        let pool = Arc::new(make_pool(0, 1, 0, MockBuilder::new(vec![])));
++        start_maintenance(&pool);
++
++        pool.active_count.store(1, Ordering::Relaxed);
++        pool.release(connection.clone());
++        tokio::time::timeout(Duration::from_secs(2), async {
++            while pool.active_count.load(Ordering::Relaxed) != 0 {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .expect("the returned connection should expire without another query");
++        assert_eq!(connection.close_calls(), 1);
++    }
++
+     #[tokio::test]
+     async fn test_maintain_drops_idle_and_invalid_connections() {
+         AppClock::start();
+diff --git a/src/plugin/executor/cache/mod.rs b/src/plugin/executor/cache/mod.rs
+index 86a32fe6ee9940b8e061c2624a29dc01345e2798..db4f668028e63aa04a4406e09821b9c5c5eff6f1 100644
+--- a/src/plugin/executor/cache/mod.rs
++++ b/src/plugin/executor/cache/mod.rs
+@@ -5,7 +5,7 @@
+ //!
+ //! Provides an in-memory cache keyed by normalized query name + query context
+ //! (qtype/qclass/DO/CD and optional ECS scope). Cache entries expire by TTL and
+-//! are periodically cleaned up.
++//! are cleaned up after their expiry deadlines.
+ use std::fmt::Debug;
+ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+ use std::sync::{Arc, Mutex, OnceLock};
+@@ -15,7 +15,10 @@ use ahash::AHashSet;
+ use async_trait::async_trait;
+ use serde::Deserialize;
+ use serde_yaml_ng::Value;
+-use tokio::sync::OnceCell;
++use tokio::sync::{Notify, OnceCell};
++use tokio::task::JoinHandle;
++use tokio_util::sync::CancellationToken;
++use tokio_util::task::AbortOnDropHandle;
+ use tracing::{Level, debug, event_enabled, warn};
+ 
+ use self::key::{CacheKey, build_cache_key as build_cache_key_internal};
+@@ -30,13 +33,6 @@ use crate::infra::observability::metrics::{
+     MetricLabel, MetricSample, MetricSink, MetricSource, register_metric_source,
+     unregister_metric_source,
+ };
+-use crate::infra::task as task_center;
+-#[cfg(not(test))]
+-use crate::infra::task::spawn_fixed as spawn_fixed_maintenance;
+-// Unit tests each own a Tokio runtime; a process-global scheduler may otherwise
+-// die with another test or be stopped by its application-reload cleanup.
+-#[cfg(test)]
+-use crate::infra::task::spawn_fixed_isolated as spawn_fixed_maintenance;
+ use crate::plugin::executor::{ExecStep, Executor, ExecutorNext};
+ use crate::plugin::{Plugin, PluginFactory, UninitializedPlugin};
+ use crate::proto::{Message, RData};
+@@ -49,8 +45,8 @@ mod persistence;
+ 
+ // Default cache size.
+ const DEFAULT_CACHE_SIZE: usize = 1024;
+-// Default cleanup interval (seconds).
+-const DEFAULT_CLEANUP_INTERVAL: u64 = 60;
++// Group nearby eviction deadlines so a busy cache does not scan per entry.
++const CLEANUP_WINDOW_MS: u64 = 60_000;
+ // Default dump interval (seconds).
+ const DEFAULT_DUMP_INTERVAL: u64 = 600;
+ // Minimum key updates required to trigger periodic dump.
+@@ -445,13 +441,13 @@ pub struct Cache {
+     ecs_in_key: bool,
+ 
+     /// Number of cache entry updates since last dump.
+-    updated_keys: Arc<AtomicU64>,
++    updated_keys: Arc<CacheChanges>,
+ 
+     /// Low-overhead cache metrics.
+     metrics: Arc<CacheMetrics>,
+ 
+     /// Created only by on_ready after the owning startup operation succeeds.
+-    dump_task_handle: Mutex<Option<task_center::ManagedTaskHandle>>,
++    dump_task_handle: Mutex<Option<CacheDumpTask>>,
+ 
+     /// Successful activation, also retained for the final shutdown dump. The
+     /// flag makes repeated notifications harmless even if scheduling fails.
+@@ -462,8 +458,7 @@ pub struct Cache {
+     /// instance's lifetime; readiness and API imports cannot lift protection.
+     persistence_writable: bool,
+ 
+-    /// Periodic cleanup task handle.
+-    cleanup_task_handle: Mutex<Option<task_center::ManagedTaskHandle>>,
++    cleanup_task_handle: Mutex<Option<AbortOnDropHandle<()>>>,
+ 
+     /// Deduplicates background refreshes for stale lazy cache hits.
+     lazy_refresh_inflight: Arc<Mutex<AHashSet<CacheKey>>>,
+@@ -478,73 +473,101 @@ pub struct Cache {
+     next_touch_interval_refresh_ms: AtomicU64,
+ }
+ 
++#[derive(Debug, Default)]
++struct CacheChanges {
++    pending: AtomicU64,
++    threshold_met: Notify,
++}
++
++impl CacheChanges {
++    fn record(&self, count: u64) {
++        let previous = self.pending.fetch_add(count, Ordering::Relaxed);
++        if previous < MINIMUM_CHANGES_TO_DUMP
++            && previous.saturating_add(count) >= MINIMUM_CHANGES_TO_DUMP
++        {
++            self.threshold_met.notify_one();
++        }
++    }
++}
++
++#[derive(Debug)]
++struct CacheDumpTask {
++    stop: CancellationToken,
++    task: JoinHandle<()>,
++}
++
++impl CacheDumpTask {
++    async fn stop(mut self) {
++        self.stop.cancel();
++        let _ = (&mut self.task).await;
++    }
++}
++
++impl Drop for CacheDumpTask {
++    fn drop(&mut self) {
++        self.stop.cancel();
++    }
++}
++
+ impl Cache {
+     fn spawn_dump_task(
+-        &self,
+         cache_map: CacheMap,
+         dump_path: String,
+         dump_interval: u64,
+-        updated_keys: Arc<AtomicU64>,
+-    ) -> Result<task_center::ManagedTaskHandle> {
+-        spawn_fixed_maintenance(
+-            format!("cache:{}:dump", self.tag),
+-            Duration::from_secs(dump_interval),
+-            task_center::TaskOptions::default(),
+-            move |_| {
+-                let cache_map = cache_map.clone();
+-                let dump_path = dump_path.clone();
+-                let updated_keys = updated_keys.clone();
+-                async move {
+-                    // Creation requires both successful restoration in init
+-                    // and runtime activation. No per-tick startup checks or
+-                    // request-path synchronization are needed.
+-                    let changed = updated_keys.swap(0, Ordering::Relaxed);
+-                    if changed < MINIMUM_CHANGES_TO_DUMP {
+-                        // Keep sparse updates accumulated so low-write
+-                        // workloads still persist
+-                        // eventually without triggering dump every interval.
+-                        if changed > 0 {
+-                            updated_keys.fetch_add(changed, Ordering::Relaxed);
+-                        }
+-                        return;
+-                    }
+-                    if let Err(e) = dump_cache_to_file(&cache_map, &dump_path).await {
+-                        warn!("Failed to dump cache to {}: {}", dump_path, e);
+-                    }
++        updated_keys: Arc<CacheChanges>,
++    ) -> Result<CacheDumpTask> {
++        let interval = Duration::from_secs(dump_interval);
++        if interval.is_zero() {
++            return Err(DnsError::plugin("cache dump interval must be positive"));
++        }
++        if tokio::time::Instant::now().checked_add(interval).is_none() {
++            return Err(DnsError::plugin(
++                "cache dump interval exceeds the monotonic clock range",
++            ));
++        }
++        let stop = CancellationToken::new();
++        let cancel = stop.clone();
++        let task = tokio::spawn(async move {
++            loop {
++                tokio::select! {
++                    biased;
++                    _ = cancel.cancelled() => break,
++                    _ = updated_keys.threshold_met.notified() => {}
+                 }
+-            },
+-        )
++                tokio::select! {
++                    biased;
++                    _ = cancel.cancelled() => break,
++                    _ = tokio::time::sleep(interval) => {}
++                }
++                let changed = updated_keys.pending.swap(0, Ordering::Relaxed);
++                // Finish an in-progress write before the shutdown snapshot.
++                if let Err(error) = dump_cache_to_file(&cache_map, &dump_path).await {
++                    updated_keys.record(changed);
++                    warn!("Failed to dump cache to {}: {}", dump_path, error);
++                }
++            }
++        });
++        Ok(CacheDumpTask { stop, task })
+     }
+ 
+-    fn spawn_cleanup_task(
+-        &self,
+-        cache_map: CacheMap,
+-        cache_size: usize,
+-    ) -> Result<task_center::ManagedTaskHandle> {
+-        spawn_fixed_maintenance(
+-            format!("cache:{}:cleanup", self.tag),
+-            Duration::from_secs(DEFAULT_CLEANUP_INTERVAL),
+-            task_center::TaskOptions::default(),
+-            move |_| {
+-                let cache_map = cache_map.clone();
+-                async move {
+-                    let stats = Cache::prune_cache_periodic(
+-                        &cache_map,
+-                        cache_size,
+-                        AppClock::elapsed_millis(),
++    fn spawn_cleanup_task(cache_map: CacheMap, cache_size: usize) -> AbortOnDropHandle<()> {
++        AbortOnDropHandle::new(tokio::spawn(async move {
++            loop {
++                cache_map.wait_for_expiry().await;
++                let stats =
++                    Cache::prune_cache_periodic(&cache_map, cache_size, AppClock::elapsed_millis());
++                if stats.expired_removed > 0 {
++                    debug!("Cleaned {} expired cache entries", stats.expired_removed);
++                }
++                if stats.evicted > 0 {
++                    warn!(
++                        "LRU eviction: removed {} items, cache size {} -> {}",
++                        stats.evicted, stats.before_len, stats.after_len
+                     );
+-                    if stats.expired_removed > 0 {
+-                        debug!("Cleaned {} expired cache entries", stats.expired_removed);
+-                    }
+-                    if stats.evicted > 0 {
+-                        warn!(
+-                            "LRU eviction: removed {} items, cache size {} -> {}",
+-                            stats.evicted, stats.before_len, stats.after_len
+-                        );
+-                    }
+                 }
+-            },
+-        )
++                cache_map.schedule_next_expiry();
++            }
++        }))
+     }
+ 
+     #[inline]
+@@ -862,7 +885,7 @@ impl Cache {
+                             && existing.expire_at_ms == item.expire_at_ms
+                             && Arc::ptr_eq(&existing.value, &item.value)
+                     }) {
+-                        self.updated_keys.fetch_add(1, Ordering::Relaxed);
++                        self.updated_keys.record(1);
+                         self.metrics
+                             .record_skip(cache_skip_reason_for_disposition(disposition));
+                         debug!(
+@@ -1111,7 +1134,7 @@ impl Cache {
+             key.domain, key.record_type, key.dns_class, ttl
+         );
+         cache_map.insert_or_update(key, Arc::new(item), now, expire_time);
+-        self.updated_keys.fetch_add(1, Ordering::Relaxed);
++        self.updated_keys.record(1);
+         self.metrics.insert_total.fetch_add(1, Ordering::Relaxed);
+         self.maybe_prune_after_insert(cache_map, now);
+     }
+@@ -1192,7 +1215,7 @@ impl Cache {
+                             now,
+                             expire_at_ms,
+                         );
+-                        updated_keys.fetch_add(1, Ordering::Relaxed);
++                        updated_keys.record(1);
+                         metrics.insert_total.fetch_add(1, Ordering::Relaxed);
+                         metrics
+                             .lazy_refresh_success_total
+@@ -1206,7 +1229,7 @@ impl Cache {
+                                         && Arc::ptr_eq(&existing.value, &refresh_entry.value)
+                                 })
+                             {
+-                                updated_keys.fetch_add(1, Ordering::Relaxed);
++                                updated_keys.record(1);
+                                 debug!(
+                                     "evicted stale lazy cache entry after low positive TTL refresh: domain={}, type={:?}, class={:?}",
+                                     key.domain, key.record_type, key.dns_class
+@@ -1253,7 +1276,10 @@ impl Plugin for Cache {
+     }
+ 
+     async fn init(&mut self, _context: &crate::plugin::PluginInitContext<'_>) -> Result<()> {
+-        let cache_map = CacheMap::with_capacity(Self::initial_cache_capacity(self.cache_size));
++        let cache_map = CacheMap::with_expiry(
++            Self::initial_cache_capacity(self.cache_size),
++            CLEANUP_WINDOW_MS,
++        );
+ 
+         let _ = self.cache_map.set(cache_map.clone());
+         self.metrics.set_cache_map(cache_map.clone());
+@@ -1295,13 +1321,7 @@ impl Plugin for Cache {
+             };
+         }
+ 
+-        let cleanup_task_handle = match self.spawn_cleanup_task(cache_map, self.cache_size) {
+-            Ok(handle) => handle,
+-            Err(error) => {
+-                unregister_metric_source(&self.tag);
+-                return Err(error);
+-            }
+-        };
++        let cleanup_task_handle = Self::spawn_cleanup_task(cache_map, self.cache_size);
+         *self
+             .cleanup_task_handle
+             .lock()
+@@ -1311,7 +1331,7 @@ impl Plugin for Cache {
+ 
+     fn on_ready(&self) {
+         // Schedule writes only after the entire runtime has started. Keep a
+-        // separate startup bit for the final dump, even if optional periodic
++        // separate startup bit for the final dump, even if optional background
+         // task registration fails. Failed candidates never receive this hook.
+         if self.persistence_ready.swap(true, Ordering::AcqRel) || !self.persistence_writable {
+             return;
+@@ -1320,7 +1340,7 @@ impl Plugin for Cache {
+             && let Some(cache_map) = self.cache_map.get()
+         {
+             let dump_interval = self.config.dump_interval.unwrap_or(DEFAULT_DUMP_INTERVAL);
+-            match self.spawn_dump_task(
++            match Self::spawn_dump_task(
+                 cache_map.clone(),
+                 dump_file.clone(),
+                 dump_interval,
+@@ -1336,7 +1356,7 @@ impl Plugin for Cache {
+                     // Readiness cannot fail after the application has started.
+                     // DNS service and a valid final shutdown dump remain
+                     // usable.
+-                    warn!(plugin = %self.tag, %error, "Failed to start periodic cache dump task");
++                    warn!(plugin = %self.tag, %error, "Failed to start cache dump task");
+                 }
+             }
+         }
+@@ -1355,13 +1375,14 @@ impl Plugin for Cache {
+             .expect("cleanup_task_handle poisoned")
+             .take();
+ 
+-        // Stop scheduled work before the final snapshot so this instance's
+-        // periodic writer cannot compete with the shutdown dump.
++        // Stop background work before the final snapshot so this instance's
++        // writer cannot compete with the shutdown dump.
+         if let Some(handle) = dump_task_handle {
+             handle.stop().await;
+         }
+         if let Some(handle) = cleanup_task_handle {
+-            handle.stop().await;
++            handle.abort();
++            let _ = handle.await;
+         }
+         // Loading is complete before init returns, so shutdown has no loader
+         // to wait for. Unactivated candidates must not persist their tentative
+@@ -1745,7 +1766,7 @@ impl CacheFactory {
+             ecs_in_key: cache_config.ecs_in_key.unwrap_or(false),
+             cache_size: cache_config.size.unwrap_or(DEFAULT_CACHE_SIZE),
+             config: cache_config,
+-            updated_keys: Arc::new(AtomicU64::new(0)),
++            updated_keys: Arc::new(CacheChanges::default()),
+             metrics,
+             dump_task_handle: Mutex::new(None),
+             persistence_ready: AtomicBool::new(false),
+@@ -1907,7 +1928,7 @@ mod tests {
+             short_circuit,
+             ecs_in_key,
+             config,
+-            updated_keys: Arc::new(AtomicU64::new(0)),
++            updated_keys: Arc::new(CacheChanges::default()),
+             metrics: Arc::new(CacheMetrics::new("cache_test".to_string())),
+             cache_size,
+             dump_task_handle: Mutex::new(None),
+@@ -3571,6 +3592,7 @@ mod tests {
+         std::fs::write(&file, &baseline).unwrap();
+         let mut cfg = default_test_config();
+         cfg.dump_file = Some(file.to_string_lossy().into_owned());
++        cfg.dump_interval = Some(1);
+         cfg.ecs_in_key = Some(true);
+ 
+         // A fully restored candidate still cannot save pruned/merged data
+@@ -3587,7 +3609,7 @@ mod tests {
+             assert_eq!(std::fs::read(&file).unwrap(), baseline);
+         }
+ 
+-        // Readiness after restoration creates the first periodic writer.
++        // Readiness arms the writer to respond to the update threshold.
+         let mut cache = test_cache(cfg.clone());
+         cache.init_for_test().await.unwrap();
+         assert_eq!(cache.cache_map.get().unwrap().len(), 4);
+@@ -3595,22 +3617,21 @@ mod tests {
+         cache.on_ready();
+         cache.on_ready(); // Repeated notifications must not spawn another task.
+         cache.cache_map.get().unwrap().clear();
+-        cache
+-            .updated_keys
+-            .store(MINIMUM_CHANGES_TO_DUMP, Ordering::Relaxed);
+-        let handle = cache.dump_task_handle.lock().unwrap().clone().unwrap();
+-        handle.trigger().await;
+-        wait_until("ready periodic dump should write an empty cache", || {
+-            std::fs::read(&file).ok().is_some_and(|bytes| {
+-                bytes == persistence::dump_cache_to_bytes(cache.cache_map.get().unwrap()).unwrap()
+-            })
++        cache.updated_keys.record(MINIMUM_CHANGES_TO_DUMP);
++        tokio::time::timeout(Duration::from_secs(5), async {
++            let expected =
++                persistence::dump_cache_to_bytes(cache.cache_map.get().unwrap()).unwrap();
++            while !std::fs::read(&file).is_ok_and(|bytes| bytes == expected) {
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
+         })
+-        .await;
++        .await
++        .expect("the armed cache writer should save an empty cache after enough changes");
+         cache.destroy().await.unwrap();
+         let empty_dump = std::fs::read(&file).unwrap();
+         assert_ne!(empty_dump, baseline);
+ 
+-        // File load failure must block both periodic and final saves, even if
++        // File load failure must block both background and final saves, even if
+         // startup succeeds and new in-memory updates reach the dump threshold.
+         for bytes in [Vec::new(), b"invalid dump".to_vec()] {
+             std::fs::write(&file, &bytes).unwrap();
+@@ -3619,9 +3640,7 @@ mod tests {
+             assert!(!cache.persistence_writable);
+             assert!(cache.dump_task_handle.lock().unwrap().is_none());
+             cache.on_ready();
+-            cache
+-                .updated_keys
+-                .store(MINIMUM_CHANGES_TO_DUMP, Ordering::Relaxed);
++            cache.updated_keys.record(MINIMUM_CHANGES_TO_DUMP);
+             assert!(cache.dump_task_handle.lock().unwrap().is_none());
+             cache.destroy().await.unwrap();
+             assert_eq!(std::fs::read(&file).unwrap(), bytes);
+@@ -3638,7 +3657,7 @@ mod tests {
+             assert_eq!(std::fs::read(&file).unwrap(), empty_dump);
+         }
+ 
+-        // A periodic-registration failure is best effort after readiness; a
++        // A background scheduling failure is best effort after readiness; a
+         // valid final shutdown snapshot must remain possible.
+         let mut unschedulable = cfg.clone();
+         unschedulable.dump_interval = Some(u64::MAX);
+diff --git a/src/plugin/executor/dual_selector.rs b/src/plugin/executor/dual_selector.rs
+index 0bf5fbf3d21a24d083072dad06259d35a0cffa72..c8383fd8d0c9f5c69c4825fa285d06b51d242cd2 100644
+--- a/src/plugin/executor/dual_selector.rs
++++ b/src/plugin/executor/dual_selector.rs
+@@ -25,8 +25,7 @@
+ //! isolated, although external side effects completed by a probe cannot be
+ //! rolled back.
+ 
+-use std::sync::Arc;
+-use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{Arc, Mutex};
+ use std::time::Duration;
+ 
+ use async_trait::async_trait;
+@@ -40,14 +39,13 @@ use crate::core::context::DnsContext;
+ use crate::infra::cache::ttl::TtlCache;
+ use crate::infra::clock::AppClock;
+ use crate::infra::error::{DnsError, Result};
+-use crate::infra::task as task_center;
+ use crate::plugin::dependency::DependencySpec;
+ use crate::plugin::executor::{ExecStep, Executor, ExecutorNext};
+ use crate::plugin::{Plugin, PluginFactory, UninitializedPlugin};
+ use crate::proto::{Rcode, RecordType};
+ use crate::{continue_next, register_plugin_factory};
+ 
+-const CLEANUP_INTERVAL_SECS: u64 = 30;
++const CLEANUP_COALESCE_MS: u64 = 30_000;
+ const DEFAULT_CACHE_ENABLED: bool = true;
+ const DEFAULT_CACHE_TTL_SECS: u64 = 60 * 60;
+ const DEFAULT_CACHE_TTL_MS: u64 = DEFAULT_CACHE_TTL_SECS * 1000;
+@@ -61,8 +59,7 @@ struct DualSelector {
+     cache: TtlCache<String, Arc<CachedPreferredState>>,
+     cache_enabled: bool,
+     cache_ttl_ms: u64,
+-    cleanup_started: AtomicBool,
+-    cleanup_task_handle: Option<task_center::ManagedTaskHandle>,
++    cleanup_task_handle: Mutex<Option<AbortOnDropHandle<()>>>,
+ }
+ 
+ #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+@@ -114,39 +111,39 @@ impl Plugin for DualSelector {
+         if !self.cache_enabled {
+             return Ok(());
+         }
+-        if self.cleanup_started.swap(true, Ordering::Relaxed) {
++        let worker = self
++            .cleanup_task_handle
++            .get_mut()
++            .map_err(|_| DnsError::runtime("dual_selector cleanup task lock poisoned"))?;
++        if worker.is_some() {
+             return Ok(());
+         }
+ 
+         let cache = self.cache.clone();
+-        self.cleanup_task_handle = Some(
+-            match task_center::spawn_fixed(
+-                format!("dual_selector:{}:cleanup", self.tag),
+-                Duration::from_secs(CLEANUP_INTERVAL_SECS),
+-                task_center::TaskOptions::default(),
+-                move |_| {
+-                    let cache = cache.clone();
+-                    async move {
+-                        let now = AppClock::elapsed_millis();
+-                        while cache.remove_expired_batch(now, 256) > 0 {}
+-                    }
+-                },
+-            ) {
+-                Ok(handle) => handle,
+-                Err(error) => {
+-                    self.cleanup_started.store(false, Ordering::Relaxed);
+-                    return Err(error);
++        *worker = Some(AbortOnDropHandle::new(tokio::spawn(async move {
++            cache.schedule_next_expiry();
++            loop {
++                cache.wait_for_expiry().await;
++                let now = AppClock::elapsed_millis();
++                while cache.remove_expired_batch(now, 256) > 0 {
++                    tokio::task::yield_now().await;
+                 }
+-            },
+-        );
++                cache.schedule_next_expiry();
++            }
++        })));
+         Ok(())
+     }
+ 
+     async fn destroy(&self) -> Result<()> {
+-        if let Some(handle) = &self.cleanup_task_handle {
+-            handle.stop().await;
++        let task_handle = self
++            .cleanup_task_handle
++            .lock()
++            .map_err(|_| DnsError::runtime("dual_selector cleanup task lock poisoned"))?
++            .take();
++        if let Some(handle) = task_handle {
++            handle.abort();
++            let _ = handle.await;
+         }
+-        self.cleanup_started.store(false, Ordering::Relaxed);
+         Ok(())
+     }
+ }
+@@ -486,11 +483,10 @@ impl PluginFactory for DualSelectorFactory {
+             tag: plugin_config.tag.clone(),
+             preferred_type: self.record_type,
+             probe_executor,
+-            cache: TtlCache::with_capacity(4096),
++            cache: TtlCache::with_expiry(4096, CLEANUP_COALESCE_MS),
+             cache_enabled: cfg.cache_enabled,
+             cache_ttl_ms: cfg.cache_ttl_ms,
+-            cleanup_started: AtomicBool::new(false),
+-            cleanup_task_handle: None,
++            cleanup_task_handle: Mutex::new(None),
+         })))
+     }
+ 
+@@ -499,11 +495,10 @@ impl PluginFactory for DualSelectorFactory {
+             tag: tag.to_string(),
+             preferred_type: self.record_type,
+             probe_executor: None,
+-            cache: TtlCache::with_capacity(4096),
++            cache: TtlCache::with_expiry(4096, CLEANUP_COALESCE_MS),
+             cache_enabled: DEFAULT_CACHE_ENABLED,
+             cache_ttl_ms: DEFAULT_CACHE_TTL_MS,
+-            cleanup_started: AtomicBool::new(false),
+-            cleanup_task_handle: None,
++            cleanup_task_handle: Mutex::new(None),
+         })))
+     }
+ }
+@@ -538,8 +533,7 @@ mod tests {
+             cache: TtlCache::with_capacity(1024),
+             cache_enabled: true,
+             cache_ttl_ms: DEFAULT_CACHE_TTL_MS,
+-            cleanup_started: AtomicBool::new(false),
+-            cleanup_task_handle: None,
++            cleanup_task_handle: Mutex::new(None),
+         }
+     }
+ 
+diff --git a/src/plugin/executor/ip_selector/mod.rs b/src/plugin/executor/ip_selector/mod.rs
+index 6e1f63488e572450f0c23a596da6eed6fea2f0af..f3642da2b793f82663e9346faa664bdf9982ad05 100644
+--- a/src/plugin/executor/ip_selector/mod.rs
++++ b/src/plugin/executor/ip_selector/mod.rs
+@@ -31,12 +31,12 @@ mod tests;
+ 
+ use std::net::IpAddr;
+ use std::sync::{Arc, Mutex};
+-use std::time::Duration;
+ 
+ use ahash::AHashMap;
+ use async_trait::async_trait;
+ use futures::StreamExt;
+ use futures::stream::FuturesUnordered;
++use tokio_util::task::AbortOnDropHandle;
+ 
+ use self::config::{
+     DnssecPolicy, IpSelectorSettings, SelectionMode, parse_ip_selector_config,
+@@ -48,9 +48,9 @@ use self::policy::{
+     candidate_records, eligible_qtype, response_requires_dnssec_caution, unique_candidate_ips,
+ };
+ use self::probe::{
+-    CLEANUP_INTERVAL_SECS, EXPIRED_SWEEP_BATCH, ProbeKey, ProbeRunner, ProbeRuntime, ProbeWaitMode,
+-    SystemProbeRunner, cached_observation, collect_probe_scores, delay_for_method,
+-    evict_probe_cache_if_needed, probe_with_runtime,
++    EXPIRED_SWEEP_BATCH, ProbeKey, ProbeRunner, ProbeRuntime, ProbeWaitMode, SystemProbeRunner,
++    cached_observation, collect_probe_scores, delay_for_method, evict_probe_cache_if_needed,
++    probe_with_runtime,
+ };
+ use crate::config::types::PluginConfig;
+ use crate::core::context::DnsContext;
+@@ -59,7 +59,6 @@ use crate::infra::error::{DnsError, Result};
+ use crate::infra::network::outbound;
+ use crate::infra::network::proxy::{Socks5Opt, parse_socks5_opt};
+ use crate::infra::observability::metrics::{register_metric_source, unregister_metric_source};
+-use crate::infra::task as task_center;
+ use crate::plugin::executor::{ExecStep, Executor, ExecutorNext};
+ use crate::plugin::{Plugin, PluginFactory, UninitializedPlugin};
+ use crate::proto::RecordType;
+@@ -67,14 +66,14 @@ use crate::{continue_next, plugin_factory};
+ 
+ #[derive(Debug)]
+ struct IpSelector {
+-    /// Plugin tag used by metrics and task names.
++    /// Plugin tag used by metrics.
+     tag: String,
+     /// Immutable per-plugin settings parsed at startup.
+     settings: IpSelectorSettings,
+     /// Shared runtime state used by foreground and background probe paths.
+     runtime: Arc<ProbeRuntime>,
+-    /// Periodic cache cleanup task; absent when cache is disabled.
+-    cleanup_task_handle: Mutex<Option<task_center::ManagedTaskHandle>>,
++    /// Cache expiry task; absent when cache is disabled.
++    cleanup_task_handle: Mutex<Option<AbortOnDropHandle<()>>>,
+ }
+ 
+ #[async_trait]
+@@ -88,30 +87,22 @@ impl Plugin for IpSelector {
+         register_metric_source(self.runtime.metrics.clone())?;
+ 
+         if self.settings.cache_enabled {
+-            // TtlCache removes expired entries lazily on access. This
+-            // background task keeps long-lived resolver processes
+-            // bounded even when old keys are never queried again.
++            // Cold keys still need cleanup at expiry when no further queries
++            // touch them. A cache without entries has no cleanup deadline.
+             let cache = self.runtime.cache.clone();
+             let cache_size = self.settings.cache_size;
+-            let task_handle = match task_center::spawn_fixed(
+-                format!("ip_selector:{}:cleanup", self.tag),
+-                Duration::from_secs(CLEANUP_INTERVAL_SECS),
+-                task_center::TaskOptions::default(),
+-                move |_| {
+-                    let cache = cache.clone();
+-                    async move {
+-                        let now = AppClock::elapsed_millis();
+-                        while cache.remove_expired_batch(now, EXPIRED_SWEEP_BATCH) > 0 {}
+-                        evict_probe_cache_if_needed(&cache, cache_size);
++            let task_handle = AbortOnDropHandle::new(tokio::spawn(async move {
++                cache.schedule_next_expiry();
++                loop {
++                    cache.wait_for_expiry().await;
++                    let now = AppClock::elapsed_millis();
++                    while cache.remove_expired_batch(now, EXPIRED_SWEEP_BATCH) > 0 {
++                        tokio::task::yield_now().await;
+                     }
+-                },
+-            ) {
+-                Ok(handle) => handle,
+-                Err(error) => {
+-                    unregister_metric_source(&self.tag);
+-                    return Err(error);
++                    evict_probe_cache_if_needed(&cache, cache_size);
++                    cache.schedule_next_expiry();
+                 }
+-            };
++            }));
+             *self
+                 .cleanup_task_handle
+                 .lock()
+@@ -130,7 +121,8 @@ impl Plugin for IpSelector {
+             .expect("cleanup_task_handle poisoned")
+             .take();
+         if let Some(handle) = cleanup_task_handle {
+-            handle.stop().await;
++            handle.abort();
++            let _ = handle.await;
+         }
+         Ok(())
+     }
+diff --git a/src/plugin/executor/ip_selector/probe.rs b/src/plugin/executor/ip_selector/probe.rs
+index 4cf4f2bf11a7e56d0ad95d5edbabf13068e7ba6e..91a0670ecef57535e531380c3e827cd5efd2b37c 100644
+--- a/src/plugin/executor/ip_selector/probe.rs
++++ b/src/plugin/executor/ip_selector/probe.rs
+@@ -34,8 +34,8 @@ use crate::infra::network::dial::{DialTarget, SocketOptions};
+ use crate::infra::network::proxy::{Socks5Opt, connect_tcp};
+ 
+ pub(super) const LAST_ACCESS_TOUCH_INTERVAL_MS: u64 = 1000;
+-pub(super) const CLEANUP_INTERVAL_SECS: u64 = 30;
+ pub(super) const EXPIRED_SWEEP_BATCH: usize = 512;
++const CLEANUP_COALESCE_MS: u64 = 30_000;
+ const EVICTION_SAMPLE_SIZE: usize = 1024;
+ 
+ pub(super) type ProbeCache = TtlCache<ProbeKey, Arc<ProbeObservation>>;
+@@ -131,7 +131,11 @@ impl ProbeRuntime {
+         metrics: Arc<IpSelectorMetrics>,
+     ) -> Self {
+         Self {
+-            cache: ProbeCache::with_capacity(settings.cache_size),
++            cache: if settings.cache_enabled {
++                ProbeCache::with_expiry(settings.cache_size, CLEANUP_COALESCE_MS)
++            } else {
++                ProbeCache::with_capacity(settings.cache_size)
++            },
+             cache_enabled: settings.cache_enabled,
+             cache_size: settings.cache_size,
+             cache_ttl_ms: settings.cache_ttl_ms,
+diff --git a/src/plugin/executor/query_recorder/backend.rs b/src/plugin/executor/query_recorder/backend.rs
+index 7d3a314ee2ea90685067a1b1db2c087269c6842b..e84e4b01a47590ecdba09ba557d5137b773a9290 100644
+--- a/src/plugin/executor/query_recorder/backend.rs
++++ b/src/plugin/executor/query_recorder/backend.rs
+@@ -3,7 +3,7 @@
+ 
+ use std::collections::{HashMap, VecDeque};
+ use std::path::{Path, PathBuf};
+-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::mpsc::{Sender as ReplySender, SyncSender, sync_channel};
+ use std::sync::{
+     Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
+@@ -24,8 +24,7 @@ pub(super) struct RecorderBackend {
+     pub(super) path: PathBuf,
+     pub(super) tables: TableNames,
+     pub(super) queue_tx: SyncSender<WriterCommand>,
+-    pub(super) stop_requested: Arc<AtomicBool>,
+-    pub(super) writer_handle: Mutex<Option<JoinHandle<()>>>,
++    writer_handle: Mutex<Option<JoinHandle<()>>>,
+     pub(super) tail: Arc<Mutex<VecDeque<RecordDetail>>>,
+     pub(super) memory_tail: usize,
+     pub(super) broadcaster: broadcast::Sender<RecordDetail>,
+@@ -79,6 +78,7 @@ pub(super) struct ClearHistoryResult {
+     pub(super) space: SpaceReclaimResult,
+ }
+ 
++#[cfg(test)]
+ pub(super) type CleanupReply = std::result::Result<CleanupResult, String>;
+ pub(super) type ClearHistoryReply = std::result::Result<ClearHistoryResult, String>;
+ #[cfg(test)]
+@@ -87,6 +87,7 @@ pub(super) type FlushReply = std::result::Result<(), String>;
+ #[derive(Debug)]
+ pub(super) enum WriterCommand {
+     Insert(Box<PendingRecord>),
++    #[cfg(test)]
+     Cleanup {
+         cutoff_ms: i64,
+         reply_tx: ReplySender<CleanupReply>,
+@@ -94,6 +95,7 @@ pub(super) enum WriterCommand {
+     ClearHistory {
+         reply_tx: ReplySender<ClearHistoryReply>,
+     },
++    Shutdown,
+     #[cfg(test)]
+     Flush {
+         reply_tx: ReplySender<FlushReply>,
+@@ -102,14 +104,16 @@ pub(super) enum WriterCommand {
+ 
+ #[derive(Debug)]
+ pub(super) struct WriterThreadContext {
++    pub(super) tag: String,
+     pub(super) path: PathBuf,
+     pub(super) tables: TableNames,
+-    pub(super) stop_requested: Arc<AtomicBool>,
+     pub(super) tail: Arc<Mutex<VecDeque<RecordDetail>>>,
+     pub(super) memory_tail: usize,
+     pub(super) broadcaster: broadcast::Sender<RecordDetail>,
+     pub(super) batch_size: usize,
+     pub(super) flush_interval: Duration,
++    pub(super) retention_ms: i64,
++    pub(super) cleanup_interval_ms: i64,
+     pub(super) database_coordinator: Arc<DatabaseCoordinator>,
+ }
+ 
+@@ -211,7 +215,6 @@ impl RecorderBackend {
+         };
+ 
+         let (queue_tx, queue_rx) = sync_channel(config.queue_size);
+-        let stop_requested = Arc::new(AtomicBool::new(false));
+         let tail = Arc::new(Mutex::new(VecDeque::with_capacity(
+             config.memory_tail.max(1),
+         )));
+@@ -221,26 +224,33 @@ impl RecorderBackend {
+ 
+         let writer_tables = tables.clone();
+         let writer_path = config.path.clone();
+-        let writer_stop = stop_requested.clone();
+         let writer_tail = tail.clone();
+         let writer_broadcaster = broadcaster.clone();
+         let memory_tail = config.memory_tail.max(1);
+         let batch_size = config.batch_size;
+         let flush_interval = Duration::from_millis(config.flush_interval_ms);
++        let retention_ms =
++            i64::try_from(config.retention_days.saturating_mul(86_400_000)).unwrap_or(i64::MAX);
++        let cleanup_interval_ms =
++            i64::try_from(config.cleanup_interval_hours.saturating_mul(3_600_000))
++                .unwrap_or(i64::MAX);
++        let writer_tag = tag.clone();
+         let writer_database_coordinator = database_coordinator.clone();
+         let writer_handle = thread::Builder::new()
+             .name(format!("query-recorder-{}", tag))
+             .spawn(move || {
+                 if let Err(err) = run_writer_thread(
+                     WriterThreadContext {
++                        tag: writer_tag,
+                         path: writer_path,
+                         tables: writer_tables,
+-                        stop_requested: writer_stop,
+                         tail: writer_tail,
+                         memory_tail,
+                         broadcaster: writer_broadcaster,
+                         batch_size,
+                         flush_interval,
++                        retention_ms,
++                        cleanup_interval_ms,
+                         database_coordinator: writer_database_coordinator,
+                     },
+                     queue_rx,
+@@ -255,7 +265,6 @@ impl RecorderBackend {
+             path: config.path,
+             tables,
+             queue_tx,
+-            stop_requested,
+             writer_handle: Mutex::new(Some(writer_handle)),
+             tail,
+             memory_tail,
+@@ -266,6 +275,27 @@ impl RecorderBackend {
+         }))
+     }
+ 
++    pub(super) async fn stop_writer(&self) -> Result<()> {
++        let writer = self
++            .writer_handle
++            .lock()
++            .map_err(|_| DnsError::runtime("query_recorder writer lock poisoned"))?
++            .take();
++        if let Some(writer) = writer {
++            let queue = self.queue_tx.clone();
++            tokio::task::spawn_blocking(move || {
++                // Sending can wait if the bounded queue is full. Commands
++                // already in the queue are processed before shutdown.
++                let _ = queue.send(WriterCommand::Shutdown);
++                writer.join()
++            })
++            .await
++            .map_err(|err| DnsError::runtime(format!("query_recorder join failed: {err}")))?
++            .map_err(|_| DnsError::runtime("query_recorder writer thread panicked"))?;
++        }
++        Ok(())
++    }
++
+     pub(super) fn enqueue(&self, pending: PendingRecord) {
+         if let Err(err) = self
+             .queue_tx
+@@ -276,6 +306,7 @@ impl RecorderBackend {
+         }
+     }
+ 
++    #[cfg(test)]
+     pub(super) fn cleanup(&self, cutoff_ms: i64) -> CleanupReply {
+         let started = Instant::now();
+         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+@@ -333,7 +364,7 @@ impl RecorderBackend {
+     }
+ }
+ 
+-fn log_space_reclaim(
++pub(super) fn log_space_reclaim(
+     tag: &str,
+     operation: &str,
+     deleted_records: usize,
+diff --git a/src/plugin/executor/query_recorder/mod.rs b/src/plugin/executor/query_recorder/mod.rs
+index 715ce7e8f4d7c9e3e5d83ae6f8eb026c045e7e72..2f4081f4ad973c2751e8f73aa35cac3d57ed3915 100644
+--- a/src/plugin/executor/query_recorder/mod.rs
++++ b/src/plugin/executor/query_recorder/mod.rs
+@@ -31,8 +31,6 @@ mod tests;
+ 
+ use std::path::PathBuf;
+ use std::sync::Arc;
+-use std::sync::atomic::Ordering;
+-use std::time::Duration;
+ 
+ use async_trait::async_trait;
+ use jiff::Timestamp;
+@@ -45,7 +43,6 @@ use crate::config::types::PluginConfig;
+ use crate::core::context::DnsContext;
+ use crate::infra::clock::AppClock;
+ use crate::infra::error::{DnsError, Result};
+-use crate::infra::task as task_center;
+ use crate::plugin::executor::{ExecStep, Executor, ExecutorNext};
+ use crate::plugin::{Plugin, PluginFactory, UninitializedPlugin};
+ use crate::{continue_next, plugin_factory};
+@@ -57,14 +54,12 @@ const DEFAULT_MEMORY_TAIL: usize = 1_024;
+ const DEFAULT_RETENTION_DAYS: u64 = 7;
+ const DEFAULT_CLEANUP_INTERVAL_HOURS: u64 = 1;
+ const DEFAULT_READER_CONCURRENCY: usize = 2;
+-const ONE_DAY_MS: u64 = 24 * 60 * 60 * 1000;
+ 
+ #[derive(Debug)]
+ struct QueryRecorder {
+     tag: String,
+     config: ResolvedRecorderConfig,
+     backend: Option<Arc<RecorderBackend>>,
+-    cleanup_task_handle: Option<task_center::ManagedTaskHandle>,
+ }
+ 
+ #[async_trait]
+@@ -75,72 +70,19 @@ impl Plugin for QueryRecorder {
+ 
+     async fn init(&mut self, _context: &crate::plugin::PluginInitContext<'_>) -> Result<()> {
+         let backend = RecorderBackend::run(self.tag.clone(), self.config.clone())?;
+-        api::register(&backend)?;
+-
+-        let recorder_backend = backend.clone();
+-        let retention_ms = self.config.retention_days.saturating_mul(ONE_DAY_MS) as i64;
+-        self.cleanup_task_handle = Some(
+-            match task_center::spawn_fixed(
+-                format!("query_recorder:{}:cleanup", self.tag),
+-                Duration::from_secs(self.config.cleanup_interval_hours * 60 * 60),
+-                task_center::TaskOptions::default(),
+-                move |_| {
+-                    let recorder_backend = recorder_backend.clone();
+-                    async move {
+-                        let cutoff_ms = Timestamp::now().as_millisecond() - retention_ms;
+-                        match tokio::task::spawn_blocking(move || {
+-                            recorder_backend.cleanup(cutoff_ms)
+-                        })
+-                        .await
+-                        {
+-                            Ok(Ok(_)) => {}
+-                            Ok(Err(err)) => warn!("query_recorder cleanup failed: {}", err),
+-                            Err(err) => warn!("query_recorder cleanup task failed: {}", err),
+-                        }
+-                    }
+-                },
+-            ) {
+-                Ok(handle) => handle,
+-                Err(error) => {
+-                    backend.stop_requested.store(true, Ordering::Relaxed);
+-                    let writer = backend
+-                        .writer_handle
+-                        .lock()
+-                        .ok()
+-                        .and_then(|mut guard| guard.take());
+-                    if let Some(writer) = writer
+-                        && let Err(join_error) =
+-                            tokio::task::spawn_blocking(move || writer.join()).await
+-                    {
+-                        warn!("query_recorder rollback join failed: {}", join_error);
+-                    }
+-                    return Err(error);
+-                }
+-            },
+-        );
++        if let Err(error) = api::register(&backend) {
++            if let Err(stop_error) = backend.stop_writer().await {
++                warn!("query_recorder rollback failed: {}", stop_error);
++            }
++            return Err(error);
++        }
+         self.backend.replace(backend);
+         Ok(())
+     }
+ 
+     async fn destroy(&self) -> Result<()> {
+-        if let Some(handle) = &self.cleanup_task_handle {
+-            handle.stop().await;
+-        }
+-        let join_handle = if let Some(backend) = &self.backend {
+-            backend.stop_requested.store(true, Ordering::Relaxed);
+-            let mut guard = backend
+-                .writer_handle
+-                .lock()
+-                .map_err(|_| DnsError::runtime("query_recorder writer lock poisoned"))?;
+-            guard.take()
+-        } else {
+-            None
+-        };
+-        if let Some(handle) = join_handle {
+-            let join_result = tokio::task::spawn_blocking(move || handle.join())
+-                .await
+-                .map_err(|err| DnsError::runtime(format!("query_recorder join failed: {err}")))?;
+-            let _ = join_result;
++        if let Some(backend) = &self.backend {
++            backend.stop_writer().await?;
+         }
+         Ok(())
+     }
+@@ -194,7 +136,6 @@ impl QueryRecorder {
+             tag,
+             config,
+             backend: None,
+-            cleanup_task_handle: None,
+         }
+     }
+ }
+diff --git a/src/plugin/executor/query_recorder/store.rs b/src/plugin/executor/query_recorder/store.rs
+index fc86f8992eb9659b7db5b75752d3fcdb6f36534b..dc1a60489d7c546116dc181063777e08e8c2d63d 100644
+--- a/src/plugin/executor/query_recorder/store.rs
++++ b/src/plugin/executor/query_recorder/store.rs
+@@ -3,17 +3,19 @@
+ 
+ use std::collections::VecDeque;
+ use std::path::{Path, PathBuf};
+-use std::sync::atomic::Ordering;
+ use std::sync::mpsc::{Receiver, RecvTimeoutError};
+ use std::sync::{Arc, Mutex};
++use std::time::{Duration, Instant};
+ 
++use jiff::Timestamp;
+ use rusqlite::types::Value;
+ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+ use tokio::sync::broadcast;
++use tracing::warn;
+ 
+ use super::backend::{
+     CleanupResult, ClearHistoryResult, DatabaseCoordinator, RecorderBackend, SpaceReclaimResult,
+-    SpaceStats, WriterCommand, WriterThreadContext,
++    SpaceStats, WriterCommand, WriterThreadContext, log_space_reclaim,
+ };
+ #[cfg(test)]
+ use super::model::StepJson;
+@@ -43,8 +45,7 @@ pub(super) fn open_writer_database(path: &Path) -> rusqlite::Result<Connection>
+     // - auto_vacuum must be selected before WAL or schema creation for a fresh
+     //   database; otherwise SQLite keeps the default NONE mode until a manual
+     //   VACUUM rewrites the file.
+-    // - WAL + synchronous=NORMAL keeps the writer fast and readers
+-    //   non-blocking.
++    // - WAL + synchronous=NORMAL keeps the writer fast and readers non-blocking.
+     conn.execute_batch(
+         "PRAGMA auto_vacuum=INCREMENTAL;
+          PRAGMA journal_mode=WAL;
+@@ -130,52 +131,107 @@ pub(super) fn run_writer_thread(
+     mut conn: Connection,
+ ) -> Result<()> {
+     let WriterThreadContext {
++        tag,
+         path,
+         tables,
+-        stop_requested,
+         tail,
+         memory_tail,
+         broadcaster,
+         batch_size,
+         flush_interval,
++        retention_ms,
++        cleanup_interval_ms,
+         database_coordinator,
+     } = context;
+ 
+     let mut pending = Vec::with_capacity(batch_size);
++    let mut batch_started = Instant::now();
++    let mut oldest_at_ms = oldest_record_ms(&conn, &tables)?;
++    let mut cleanup_not_before_ms = Timestamp::now()
++        .as_millisecond()
++        .saturating_add(cleanup_interval_ms);
++    let flush = |conn: &mut Connection, pending: &mut Vec<PendingRecord>| {
++        flush_pending_coordinated(
++            conn,
++            &tables,
++            pending,
++            &tail,
++            memory_tail,
++            &broadcaster,
++            &database_coordinator,
++        )
++    };
++    let clean = |conn: &mut Connection, pending: &mut Vec<PendingRecord>, cutoff_ms| {
++        let prepared = prepare_pending(pending)?;
++        let _access = database_coordinator.write_access()?;
++        flush_prepared(conn, &tables, prepared, &tail, memory_tail, &broadcaster)?;
++        run_cleanup(conn, &path, &tables, cutoff_ms)
++    };
+     loop {
+-        match rx.recv_timeout(flush_interval) {
++        let cleanup_wait = oldest_at_ms.map(|oldest| {
++            let deadline_ms = retention_deadline_ms(oldest, retention_ms, cleanup_not_before_ms);
++            let now_ms = Timestamp::now().as_millisecond();
++            (deadline_ms.saturating_sub(now_ms), now_ms)
++        });
++        if let Some((remaining_ms, now_ms)) = cleanup_wait
++            && remaining_ms <= 0
++        {
++            let started = Instant::now();
++            match clean(&mut conn, &mut pending, now_ms.saturating_sub(retention_ms)) {
++                Ok(result) => {
++                    oldest_at_ms = oldest_record_ms(&conn, &tables)?;
++                    log_space_reclaim(
++                        &tag,
++                        "retention",
++                        result.deleted_records,
++                        &result.space,
++                        started.elapsed(),
++                    );
++                }
++                Err(err) => warn!(plugin = %tag, "query_recorder cleanup failed: {err}"),
++            }
++            cleanup_not_before_ms = Timestamp::now()
++                .as_millisecond()
++                .saturating_add(cleanup_interval_ms);
++            continue;
++        }
++
++        // Time a partial batch from the first record, even under steady input.
++        let flush_wait =
++            (!pending.is_empty()).then(|| flush_interval.saturating_sub(batch_started.elapsed()));
++        if flush_wait == Some(Duration::ZERO) {
++            flush(&mut conn, &mut pending)?;
++            continue;
++        }
++        let cleanup_wait =
++            cleanup_wait.map(|(remaining_ms, _)| Duration::from_millis(remaining_ms as u64));
++        let command = match flush_wait.into_iter().chain(cleanup_wait).min() {
++            Some(wait) => rx.recv_timeout(wait),
++            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
++        };
++        match command {
+             Ok(WriterCommand::Insert(record)) => {
++                if pending.is_empty() {
++                    batch_started = Instant::now();
++                }
++                oldest_at_ms = Some(oldest_at_ms.map_or(record.created_at_ms, |oldest| {
++                    oldest.min(record.created_at_ms)
++                }));
+                 pending.push(*record);
+                 if pending.len() >= batch_size {
+-                    flush_pending_coordinated(
+-                        &mut conn,
+-                        &tables,
+-                        &mut pending,
+-                        &tail,
+-                        memory_tail,
+-                        &broadcaster,
+-                        &database_coordinator,
+-                    )?;
++                    flush(&mut conn, &mut pending)?;
+                 }
+             }
++            #[cfg(test)]
+             Ok(WriterCommand::Cleanup {
+                 cutoff_ms,
+                 reply_tx,
+             }) => {
+-                let result = (|| {
+-                    let prepared = prepare_pending(&mut pending)?;
+-                    let _access = database_coordinator.write_access()?;
+-                    flush_prepared(
+-                        &mut conn,
+-                        &tables,
+-                        prepared,
+-                        &tail,
+-                        memory_tail,
+-                        &broadcaster,
+-                    )?;
+-                    run_cleanup(&mut conn, &path, &tables, cutoff_ms)
+-                })()
+-                .map_err(|err: DnsError| err.to_string());
++                let result =
++                    clean(&mut conn, &mut pending, cutoff_ms).map_err(|err| err.to_string());
++                if result.is_ok() {
++                    oldest_at_ms = oldest_record_ms(&conn, &tables)?;
++                }
+                 let _ = reply_tx.send(result);
+             }
+             Ok(WriterCommand::ClearHistory { reply_tx }) => {
+@@ -193,52 +249,37 @@ pub(super) fn run_writer_thread(
+                     run_clear_history(&mut conn, &path, &tables, &tail)
+                 })()
+                 .map_err(|err: DnsError| err.to_string());
++                if result.is_ok() {
++                    oldest_at_ms = None;
++                }
+                 let _ = reply_tx.send(result);
+             }
+             #[cfg(test)]
+             Ok(WriterCommand::Flush { reply_tx }) => {
+-                let result = flush_pending_coordinated(
+-                    &mut conn,
+-                    &tables,
+-                    &mut pending,
+-                    &tail,
+-                    memory_tail,
+-                    &broadcaster,
+-                    &database_coordinator,
+-                )
+-                .map_err(|err| err.to_string());
++                let result = flush(&mut conn, &mut pending).map_err(|err| err.to_string());
+                 let _ = reply_tx.send(result);
+             }
+-            Err(RecvTimeoutError::Timeout) => {
+-                flush_pending_coordinated(
+-                    &mut conn,
+-                    &tables,
+-                    &mut pending,
+-                    &tail,
+-                    memory_tail,
+-                    &broadcaster,
+-                    &database_coordinator,
+-                )?;
+-                if stop_requested.load(Ordering::Relaxed) {
+-                    break;
+-                }
+-            }
+-            Err(RecvTimeoutError::Disconnected) => {
+-                flush_pending_coordinated(
+-                    &mut conn,
+-                    &tables,
+-                    &mut pending,
+-                    &tail,
+-                    memory_tail,
+-                    &broadcaster,
+-                    &database_coordinator,
+-                )?;
+-                break;
+-            }
++            Err(RecvTimeoutError::Timeout) => continue,
++            Ok(WriterCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
+         }
+     }
+ 
+-    Ok(())
++    flush(&mut conn, &mut pending)
++}
++
++fn retention_deadline_ms(oldest_ms: i64, retention_ms: i64, not_before_ms: i64) -> i64 {
++    oldest_ms
++        .saturating_add(retention_ms)
++        .saturating_add(1)
++        .max(not_before_ms)
++}
++
++fn oldest_record_ms(conn: &Connection, tables: &TableNames) -> Result<Option<i64>> {
++    Ok(conn.query_row(
++        &format!("SELECT MIN(created_at_ms) FROM {}", tables.records),
++        [],
++        |row| row.get(0),
++    )?)
+ }
+ 
+ fn flush_pending_coordinated(
+@@ -250,6 +291,9 @@ fn flush_pending_coordinated(
+     broadcaster: &broadcast::Sender<RecordDetail>,
+     database_coordinator: &DatabaseCoordinator,
+ ) -> Result<()> {
++    if pending.is_empty() {
++        return Ok(());
++    }
+     let prepared = prepare_pending(pending)?;
+     let _access = database_coordinator.read_access()?;
+     let _writer = database_coordinator.writer()?;
+diff --git a/src/plugin/executor/query_recorder/tests.rs b/src/plugin/executor/query_recorder/tests.rs
+index f7e11d12767f47467fc35b12e2986ca4a3ecc5b2..edcec4b299f032a3466e0c21dd666eaa964fbc9e 100644
+--- a/src/plugin/executor/query_recorder/tests.rs
++++ b/src/plugin/executor/query_recorder/tests.rs
+@@ -3,6 +3,7 @@
+ 
+ use std::net::{Ipv4Addr, SocketAddr};
+ use std::sync::atomic::Ordering;
++use std::time::Duration;
+ 
+ use rusqlite::Connection;
+ use tempfile::NamedTempFile;
+@@ -86,6 +87,139 @@ async fn flush_backend(backend: &std::sync::Arc<super::backend::RecorderBackend>
+         .unwrap();
+ }
+ 
++#[tokio::test]
++async fn test_query_recorder_flushes_partial_batches_after_idle() {
++    AppClock::start();
++
++    let temp = NamedTempFile::new().unwrap();
++    let config =
++        resolve_config(Some(recorder_space_config(&temp.path().to_string_lossy()))).unwrap();
++    let mut plugin = QueryRecorder::new("rec".to_string(), config);
++    plugin.init_for_test().await.unwrap();
++    let backend = plugin.backend.as_ref().unwrap();
++    let mut records = backend.broadcaster.subscribe();
++
++    for request_id in 1..=2 {
++        backend.enqueue(pending_record(
++            i64::from(request_id),
++            request_id,
++            "partial-batch.example.com.",
++            RecordType::A,
++            Ipv4Addr::LOCALHOST,
++            Some(Rcode::NoError),
++            None,
++            &[],
++        ));
++        let record = tokio::time::timeout(Duration::from_secs(2), records.recv())
++            .await
++            .expect("partial batch should flush without another writer command")
++            .unwrap();
++        assert_eq!(record.record.request_id, request_id);
++    }
++
++    plugin.destroy().await.unwrap();
++}
++
++#[tokio::test]
++async fn test_query_recorder_shutdown_flushes_pending_records_without_waiting_for_interval() {
++    AppClock::start();
++
++    let temp = NamedTempFile::new().unwrap();
++    let mut config =
++        resolve_config(Some(recorder_space_config(&temp.path().to_string_lossy()))).unwrap();
++    config.flush_interval_ms = 60_000;
++    let mut plugin = QueryRecorder::new("rec".to_string(), config);
++    plugin.init_for_test().await.unwrap();
++    let backend = plugin.backend.as_ref().unwrap();
++    backend.enqueue(pending_record(
++        1,
++        42,
++        "shutdown.example.com.",
++        RecordType::A,
++        Ipv4Addr::LOCALHOST,
++        Some(Rcode::NoError),
++        None,
++        &[],
++    ));
++
++    tokio::time::timeout(Duration::from_secs(2), plugin.destroy())
++        .await
++        .expect("shutdown should wake the writer without a flush timeout")
++        .unwrap();
++    assert_eq!(
++        filtered_record_ids(backend.clone(), list_query(QueryRecordFilter::default())),
++        vec![42]
++    );
++}
++
++#[tokio::test]
++async fn test_query_recorder_reaps_only_expired_records_when_its_deadline_is_due() {
++    use std::collections::VecDeque;
++    use std::sync::{Arc, Mutex, mpsc};
++
++    use super::backend::{DatabaseCoordinator, WriterThreadContext};
++    use super::store::run_writer_thread;
++
++    let temp = NamedTempFile::new().unwrap();
++    let path = temp.path().to_owned();
++    let tables = table_names("retention");
++    let mut conn = open_writer_database(&path).unwrap();
++    create_schema(&mut conn, &tables).unwrap();
++    let reader = open_reader_database(&path).unwrap();
++    let (queue, receiver) = mpsc::sync_channel(8);
++    let (broadcaster, mut updates) = tokio::sync::broadcast::channel(4);
++    let context = WriterThreadContext {
++        tag: "retention".to_string(),
++        path,
++        tables: tables.clone(),
++        tail: Arc::new(Mutex::new(VecDeque::new())),
++        memory_tail: 8,
++        broadcaster,
++        batch_size: 1,
++        flush_interval: Duration::from_millis(10),
++        retention_ms: 3_600_000,
++        cleanup_interval_ms: 10,
++        database_coordinator: Arc::new(DatabaseCoordinator::default()),
++    };
++    let writer = std::thread::spawn(move || run_writer_thread(context, receiver, conn));
++    let now_ms = jiff::Timestamp::now().as_millisecond();
++    for (request_id, created_at_ms) in [(1, now_ms - 7_200_000), (2, now_ms)] {
++        let record = pending_record(
++            created_at_ms,
++            request_id,
++            "retention.example.com.",
++            RecordType::A,
++            Ipv4Addr::LOCALHOST,
++            Some(Rcode::NoError),
++            None,
++            &[],
++        );
++        queue.send(WriterCommand::Insert(Box::new(record))).unwrap();
++        let update = tokio::time::timeout(Duration::from_secs(2), updates.recv())
++            .await
++            .unwrap()
++            .unwrap();
++        assert_eq!(update.record.request_id, request_id);
++    }
++
++    let sql = format!("SELECT COUNT(*), MAX(request_id) FROM {}", tables.records);
++    tokio::time::timeout(Duration::from_secs(2), async {
++        loop {
++            let stored: (i64, Option<i64>) = reader
++                .query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
++                .unwrap();
++            if stored == (1, Some(2)) {
++                break;
++            }
++            tokio::time::sleep(Duration::from_millis(5)).await;
++        }
++    })
++    .await
++    .expect("the oldest record should expire while the writer is idle");
++    drop(queue);
++    writer.join().unwrap().unwrap();
++}
++
+ async fn seed_bulk_records(
+     backend: &std::sync::Arc<super::backend::RecorderBackend>,
+     count: usize,
+diff --git a/src/plugin/executor/reverse_lookup.rs b/src/plugin/executor/reverse_lookup.rs
+index 8e9afb8ba8055c54233fc36c3e810271e3ffa3f4..20fcfd99a8989d3d7df4e77c3612560a2540e7e5 100644
+--- a/src/plugin/executor/reverse_lookup.rs
++++ b/src/plugin/executor/reverse_lookup.rs
+@@ -13,18 +13,18 @@
+ //!
+ //! Cache design:
+ //! - shared TTL cache component for consistent cache behavior across plugins.
+-//! - periodic cleanup removes expired entries and trims overflow in batches.
++//! - expiration deadlines and new keys trigger batched cleanup.
+ //! - IPv4-mapped IPv6 addresses are normalized to keep lookup keys consistent.
+ 
+ use std::net::IpAddr;
+-use std::sync::Arc;
+-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+-use std::time::Duration;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::{Arc, Mutex};
+ 
+ use async_trait::async_trait;
+ use bytes::Bytes;
+ use http::{Request, StatusCode};
+ use serde::Deserialize;
++use tokio_util::task::AbortOnDropHandle;
+ 
+ use crate::api::{ApiHandler, simple_response};
+ use crate::config::types::PluginConfig;
+@@ -37,7 +37,6 @@ use crate::infra::observability::metrics::{
+     MetricLabel, MetricSample, MetricSink, MetricSource, register_metric_source,
+     unregister_metric_source,
+ };
+-use crate::infra::task as task_center;
+ use crate::plugin::executor::{ExecStep, Executor, ExecutorNext};
+ use crate::plugin::{Plugin, PluginFactory, UninitializedPlugin};
+ use crate::proto::{Name, PTR, RData, Rcode, Record, RecordType};
+@@ -45,7 +44,8 @@ use crate::{continue_next, plugin_factory, register_plugin_api};
+ 
+ const DEFAULT_SIZE: usize = 65_535;
+ const DEFAULT_TTL: u32 = 7_200;
+-const CLEANUP_INTERVAL_SECS: u64 = 30;
++const CLEANUP_COALESCE_MS: u64 = 30_000;
++const OVERFLOW_DELAY_MS: u64 = 1000;
+ const EVICTION_BATCH: usize = 512;
+ 
+ #[derive(Debug, Clone, Deserialize, Default)]
+@@ -129,8 +129,7 @@ struct ReverseLookup {
+     size: usize,
+     ttl: u32,
+     handle_ptr: bool,
+-    cleanup_started: AtomicBool,
+-    cleanup_task_handle: Option<task_center::ManagedTaskHandle>,
++    cleanup_task_handle: Mutex<Option<AbortOnDropHandle<()>>>,
+     metrics: Arc<ReverseLookupMetrics>,
+ }
+ 
+@@ -141,60 +140,32 @@ impl Plugin for ReverseLookup {
+     }
+ 
+     async fn init(&mut self, _context: &crate::plugin::PluginInitContext<'_>) -> Result<()> {
+-        self.register_api_routes()?;
+-        register_metric_source(self.metrics.clone())?;
+-
+-        if self.cleanup_started.swap(true, Ordering::Relaxed) {
++        if self
++            .cleanup_task_handle
++            .get_mut()
++            .map_err(|_| DnsError::runtime("reverse_lookup cleanup task lock poisoned"))?
++            .is_some()
++        {
+             return Ok(());
+         }
+-
+-        let cache = self.cache.clone();
+-        let size = self.size;
+-        self.cleanup_task_handle = Some(
+-            match task_center::spawn_fixed(
+-                format!("reverse_lookup:{}:cleanup", self.tag),
+-                Duration::from_secs(CLEANUP_INTERVAL_SECS),
+-                task_center::TaskOptions::default(),
+-                move |_| {
+-                    let cache = cache.clone();
+-                    async move {
+-                        let now = AppClock::elapsed_millis();
+-
+-                        while cache.remove_expired_batch(now, EVICTION_BATCH) > 0 {}
+-
+-                        if cache.len() <= size {
+-                            return;
+-                        }
+-                        let overflow = cache.len().saturating_sub(size).min(EVICTION_BATCH);
+-                        if overflow == 0 {
+-                            return;
+-                        }
+-
+-                        let mut keys: Vec<(IpAddr, u64)> = cache.sample_last_access(overflow);
+-                        keys.sort_unstable_by_key(|(_, last_access_ms)| *last_access_ms);
+-                        for (key, _) in keys.into_iter().take(overflow) {
+-                            let _ = cache.remove(&key);
+-                        }
+-                    }
+-                },
+-            ) {
+-                Ok(handle) => handle,
+-                Err(error) => {
+-                    self.cleanup_started.store(false, Ordering::Relaxed);
+-                    unregister_metric_source(&self.tag);
+-                    return Err(error);
+-                }
+-            },
+-        );
++        self.register_api_routes()?;
++        register_metric_source(self.metrics.clone())?;
++        self.cleanup_task_handle =
++            Mutex::new(Some(spawn_cache_cleanup(self.cache.clone(), self.size)));
+         Ok(())
+     }
+ 
+     async fn destroy(&self) -> Result<()> {
+         unregister_metric_source(&self.tag);
+-        if let Some(handle) = &self.cleanup_task_handle {
+-            handle.stop().await;
++        let task_handle = self
++            .cleanup_task_handle
++            .lock()
++            .map_err(|_| DnsError::runtime("reverse_lookup cleanup task lock poisoned"))?
++            .take();
++        if let Some(handle) = task_handle {
++            handle.abort();
++            let _ = handle.await;
+         }
+-        self.cleanup_started.store(false, Ordering::Relaxed);
+         Ok(())
+     }
+ }
+@@ -234,6 +205,7 @@ impl Executor for ReverseLookup {
+             return Ok(step);
+         };
+         let now = AppClock::elapsed_millis();
++        let mut inserted = false;
+         for record in response.answers_mut() {
+             let Some(ip) = record.ip_addr() else {
+                 continue;
+@@ -247,7 +219,7 @@ impl Executor for ReverseLookup {
+                 .as_ref()
+                 .cloned()
+                 .unwrap_or_else(|| record.name().clone());
+-            self.cache.insert_or_update(
++            inserted |= self.cache.insert_or_update(
+                 normalize_ipv4_mapped_ip(ip),
+                 Arc::new(CacheEntry { domain }),
+                 now,
+@@ -257,11 +229,48 @@ impl Executor for ReverseLookup {
+                 .cache_insert_total
+                 .fetch_add(1, Ordering::Relaxed);
+         }
++        if inserted && self.cache.len() > self.size {
++            self.cache
++                .schedule_cleanup_at(now.saturating_add(OVERFLOW_DELAY_MS));
++        }
+ 
+         Ok(step)
+     }
+ }
+ 
++fn spawn_cache_cleanup(
++    cache: TtlCache<IpAddr, Arc<CacheEntry>>,
++    size: usize,
++) -> AbortOnDropHandle<()> {
++    AbortOnDropHandle::new(tokio::spawn(async move {
++        if cache.len() > size {
++            cache.schedule_cleanup_at(AppClock::elapsed_millis());
++        }
++        cache.schedule_next_expiry();
++        loop {
++            cache.wait_for_expiry().await;
++            let now = AppClock::elapsed_millis();
++            while cache.remove_expired_batch(now, EVICTION_BATCH) > 0 {
++                tokio::task::yield_now().await;
++            }
++
++            let overflow = cache.len().saturating_sub(size);
++            if overflow > 0 {
++                let count = overflow.min(EVICTION_BATCH);
++                let mut keys = cache.sample_last_access(count);
++                keys.sort_unstable_by_key(|(_, last_access_ms)| *last_access_ms);
++                for (key, _) in keys.into_iter().take(count) {
++                    cache.remove(&key);
++                }
++                if overflow > count {
++                    cache.schedule_cleanup_at(now.saturating_add(OVERFLOW_DELAY_MS));
++                }
++            }
++            cache.schedule_next_expiry();
++        }
++    }))
++}
++
+ impl ReverseLookup {
+     fn register_api_routes(&self) -> Result<()> {
+         register_plugin_api!(
+@@ -313,7 +322,7 @@ impl PluginFactory for ReverseLookupFactory {
+ 
+         let size = cfg.size.unwrap_or(DEFAULT_SIZE);
+         let ttl = cfg.ttl.unwrap_or(DEFAULT_TTL);
+-        let cache = TtlCache::with_capacity(size);
++        let cache = TtlCache::with_expiry(size, CLEANUP_COALESCE_MS);
+         let metrics = Arc::new(ReverseLookupMetrics::new(
+             plugin_config.tag.clone(),
+             cache.clone(),
+@@ -325,8 +334,7 @@ impl PluginFactory for ReverseLookupFactory {
+             size,
+             ttl,
+             handle_ptr: cfg.handle_ptr.unwrap_or(false),
+-            cleanup_started: AtomicBool::new(false),
+-            cleanup_task_handle: None,
++            cleanup_task_handle: Mutex::new(None),
+             metrics,
+         })))
+     }
+@@ -393,6 +401,7 @@ fn is_ptr_query(request: &crate::proto::Message) -> bool {
+ #[cfg(test)]
+ mod tests {
+     use std::net::{Ipv4Addr, SocketAddr};
++    use std::time::Duration;
+ 
+     use http::Method;
+     use http_body_util::BodyExt;
+@@ -434,8 +443,7 @@ mod tests {
+             size: 64,
+             ttl: 120,
+             handle_ptr: true,
+-            cleanup_started: AtomicBool::new(false),
+-            cleanup_task_handle: None,
++            cleanup_task_handle: Mutex::new(None),
+             metrics: Arc::new(ReverseLookupMetrics::new(
+                 "reverse_lookup".to_string(),
+                 TtlCache::with_capacity(64),
+@@ -480,8 +488,7 @@ mod tests {
+             size: 64,
+             ttl: 120,
+             handle_ptr: false,
+-            cleanup_started: AtomicBool::new(false),
+-            cleanup_task_handle: None,
++            cleanup_task_handle: Mutex::new(None),
+             metrics: Arc::new(ReverseLookupMetrics::new(
+                 "reverse_lookup".to_string(),
+                 TtlCache::with_capacity(64),
+@@ -507,6 +514,47 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn test_new_keys_trigger_cleanup_before_their_ttl_expires() {
++        let mut context = make_context("overflow.example.", RecordType::A);
++        let cache = TtlCache::with_expiry(1, CLEANUP_COALESCE_MS);
++        let plugin = ReverseLookup {
++            tag: "reverse_overflow_test".to_string(),
++            cache: cache.clone(),
++            size: 1,
++            ttl: 120,
++            handle_ptr: false,
++            cleanup_task_handle: Mutex::new(Some(spawn_cache_cleanup(cache.clone(), 1))),
++            metrics: Arc::new(ReverseLookupMetrics::new(
++                "reverse_overflow_test".to_string(),
++                cache.clone(),
++            )),
++        };
++        // Let the worker wait on an empty cache before the only DNS response.
++        tokio::task::yield_now().await;
++        let name = context.request.first_question().unwrap().name().clone();
++        let mut response = context.request.response(Rcode::NoError);
++        for last_octet in 1..=2 {
++            response.add_answer(Record::from_rdata(
++                name.clone(),
++                120,
++                RData::A(A(Ipv4Addr::new(192, 0, 2, last_octet))),
++            ));
++        }
++        context.set_response(response);
++        plugin.execute(&mut context).await.unwrap();
++        assert_eq!(cache.len(), 2);
++        tokio::time::timeout(Duration::from_secs(4), async {
++            while cache.len() > 1 {
++                tokio::time::sleep(Duration::from_millis(20)).await;
++            }
++        })
++        .await
++        .expect("overflow should be trimmed without waiting for either record's TTL");
++        assert_eq!(cache.len(), 1);
++        plugin.destroy().await.unwrap();
++    }
++
+     #[tokio::test]
+     async fn test_reverse_lookup_query_api_returns_fqdn() {
+         AppClock::start();
+diff --git a/src/plugin/executor/ros_address_list/manager.rs b/src/plugin/executor/ros_address_list/manager.rs
+index a88313814d681e331b80f633139215ff48c5f5f9..cd4446f6464ad1d003aa1678d5ab1a3fb725799a 100644
+--- a/src/plugin/executor/ros_address_list/manager.rs
++++ b/src/plugin/executor/ros_address_list/manager.rs
+@@ -51,8 +51,8 @@ use crate::plugin::executor::routeros::{ObservedAddr, SHUTDOWN_TIMEOUT};
+ const CONTROL_QUEUE_SIZE: usize = 2;
+ /// Periodic interval for persistent desired-set reconciliation.
+ const RECONCILE_INTERVAL_SECS: u64 = 180;
+-/// Periodic interval for local dynamic-cache pruning.
+-const DYNAMIC_CACHE_PRUNE_INTERVAL_SECS: u64 = 60;
++/// Group finite local lease expiries to limit cache scans under load.
++const DYNAMIC_CACHE_EXPIRY_WINDOW_MS: u64 = 60_000;
+ /// Maximum number of RouterOS upserts issued concurrently by one observation.
+ const UPSERT_PIPELINE_SIZE: usize = 16;
+ #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+@@ -180,13 +180,11 @@ impl AddressObservationPolicy {
+ #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+ enum ControlKey {
+     Reconcile,
+-    PruneDynamicCache,
+ }
+ 
+ #[derive(Debug)]
+ enum ControlCommand {
+     Reconcile,
+-    PruneDynamicCache,
+ }
+ 
+ impl Coalesce for ControlCommand {
+@@ -315,13 +313,6 @@ impl AddressListManagerHandle {
+             .is_ok()
+     }
+ 
+-    fn request_prune(&self) {
+-        let _ = self.controls.try_push(
+-            ControlKey::PruneDynamicCache,
+-            ControlCommand::PruneDynamicCache,
+-        );
+-    }
+-
+     fn close(&self) {
+         self.observations.close();
+         self.controls.close();
+@@ -340,6 +331,7 @@ enum WorkerCommand {
+         from_retry: bool,
+     },
+     Control(ControlCommand),
++    PruneDynamicCache,
+     ReconcileCompleted,
+ }
+ 
+@@ -349,8 +341,6 @@ pub(super) struct AddressListManagerRuntime {
+     shutdown_tx: Option<oneshot::Sender<ShutdownRequest>>,
+     /// Single-owner worker task that serializes all local state transitions.
+     worker_handle: Option<JoinHandle<()>>,
+-    /// Local-memory cache prune loop.
+-    prune_task_handle: Option<task_center::ManagedTaskHandle>,
+     /// Periodic persistent reconcile loop.
+     reconcile_task_handle: Option<task_center::ManagedTaskHandle>,
+ }
+@@ -373,29 +363,6 @@ impl AddressListManagerRuntime {
+         // not prevent the DNS service from coming up.
+         handle.request_reconcile();
+ 
+-        // Pruning is local-memory only. It never talks to RouterOS and exists
+-        // solely to keep the write-suppression cache bounded.
+-        let prune_handle = handle.clone();
+-        let prune_task_handle = match task_center::spawn_fixed(
+-            format!("ros_address_list:{tag}:dynamic_cache_prune"),
+-            Duration::from_secs(DYNAMIC_CACHE_PRUNE_INTERVAL_SECS),
+-            task_center::TaskOptions::default(),
+-            move |_| {
+-                let prune_handle = prune_handle.clone();
+-                async move {
+-                    prune_handle.request_prune();
+-                }
+-            },
+-        ) {
+-            Ok(handle) => handle,
+-            Err(error) => {
+-                if let Some(worker) = worker_handle.take() {
+-                    abort_and_reap(worker);
+-                }
+-                return Err(error);
+-            }
+-        };
+-
+         // Periodic reconciliation is only a persistent desired-set safety net.
+         // Dynamic entries are maintained exclusively by DNS observations and
+         // RouterOS native timeout.
+@@ -414,7 +381,6 @@ impl AddressListManagerRuntime {
+             ) {
+                 Ok(handle) => Some(handle),
+                 Err(error) => {
+-                    prune_task_handle.stop_detached();
+                     if let Some(worker) = worker_handle.take() {
+                         abort_and_reap(worker);
+                     }
+@@ -429,7 +395,6 @@ impl AddressListManagerRuntime {
+             handle,
+             shutdown_tx: Some(shutdown_tx),
+             worker_handle,
+-            prune_task_handle: Some(prune_task_handle),
+             reconcile_task_handle,
+         })
+     }
+@@ -449,30 +414,20 @@ impl AddressListManagerRuntime {
+         cleanup: bool,
+         deadline: tokio::time::Instant,
+     ) -> Result<()> {
+-        let tasks = [
+-            self.prune_task_handle.take(),
+-            self.reconcile_task_handle.take(),
+-        ]
+-        .into_iter()
+-        .flatten()
+-        .collect::<Vec<_>>();
+-        for (index, task) in tasks.iter().enumerate() {
+-            if tokio::time::timeout_at(deadline, task.stop())
++        if let Some(task) = self.reconcile_task_handle.take()
++            && tokio::time::timeout_at(deadline, task.stop())
+                 .await
+                 .is_err()
+-            {
+-                for remaining in &tasks[index..] {
+-                    remaining.stop_detached();
+-                }
+-                self.handle.close();
+-                if let Some(worker) = self.worker_handle.take() {
+-                    abort_and_reap(worker);
+-                }
+-                return Err(DnsError::plugin(format!(
+-                    "ros_address_list shutdown exceeded {} seconds",
+-                    SHUTDOWN_TIMEOUT.as_secs()
+-                )));
++        {
++            task.stop_detached();
++            self.handle.close();
++            if let Some(worker) = self.worker_handle.take() {
++                abort_and_reap(worker);
+             }
++            return Err(DnsError::plugin(format!(
++                "ros_address_list shutdown exceeded {} seconds",
++                SHUTDOWN_TIMEOUT.as_secs()
++            )));
+         }
+ 
+         let (done_tx, done_rx) = oneshot::channel::<Result<()>>();
+@@ -870,7 +825,10 @@ impl AddressListManager {
+         observations: &[(AddressListKey, AddressObservation)],
+         now: u64,
+     ) -> Vec<Result<()>> {
+-        self.prune_dynamic_cache(now);
++        if self.leases.has_due_expiry(now) {
++            self.prune_dynamic_cache(now);
++            self.refresh_managed_metric();
++        }
+ 
+         struct Prepared {
+             index: usize,
+@@ -1005,12 +963,6 @@ impl AddressListManager {
+         self.apply_reconcile_snapshot(entries).await
+     }
+ 
+-    pub(super) async fn prune_dynamic_cache_now(&mut self) -> Result<()> {
+-        self.prune_dynamic_cache(now_millis());
+-        self.refresh_managed_metric();
+-        Ok(())
+-    }
+-
+     async fn transport_retry_delay(&self) -> Option<Duration> {
+         let snapshot = self.api.transport_snapshot().await;
+         if let (Some(metrics), Some(snapshot)) = (&self.metrics, snapshot) {
+@@ -1169,6 +1121,18 @@ async fn run_manager_worker(
+                 None => std::future::pending::<()>().await,
+             }
+         };
++        let prune_at = manager
++            .leases
++            .expiry_batch_at_ms(DYNAMIC_CACHE_EXPIRY_WINDOW_MS);
++        let prune_wakeup = async move {
++            match prune_at {
++                Some(at) => {
++                    tokio::time::sleep(Duration::from_millis(at.saturating_sub(now_millis())))
++                        .await;
++                }
++                None => std::future::pending::<()>().await,
++            }
++        };
+         let command = tokio::select! {
+             biased;
+             shutdown = &mut shutdown_rx => {
+@@ -1181,6 +1145,7 @@ async fn run_manager_worker(
+                 Some(WorkerCommand::ReconcileCompleted)
+             }
+             control = handle.controls.recv() => control.map(|(_, command)| WorkerCommand::Control(command)),
++            () = prune_wakeup => Some(WorkerCommand::PruneDynamicCache),
+             () = retry_wakeup => {
+                 let now = tokio::time::Instant::now();
+                 let due_keys = retry_observations
+@@ -1294,18 +1259,11 @@ async fn run_manager_worker(
+                 ControlCommand::Reconcile => {
+                     manager.spawn_background_reconcile(tag.clone());
+                 }
+-                ControlCommand::PruneDynamicCache => {
+-                    if let Err(e) = manager.prune_dynamic_cache_now().await
+-                        && error_logs.should_log("prune")
+-                    {
+-                        warn!(
+-                            plugin = %tag,
+-                            err = %e,
+-                            "ros_address_list dynamic cache prune failed"
+-                        );
+-                    }
+-                }
+             },
++            WorkerCommand::PruneDynamicCache => {
++                manager.prune_dynamic_cache(now_millis());
++                manager.refresh_managed_metric();
++            }
+             WorkerCommand::ReconcileCompleted => {
+                 manager.await_background_reconcile(tag.as_str()).await;
+             }
+diff --git a/src/plugin/executor/ros_route/manager.rs b/src/plugin/executor/ros_route/manager.rs
+index 5997ed52ac6a4c82dcc77e0f53cd66418276e211..8e15f0eab98cd02a608e3677e8c45a2227859d65 100644
+--- a/src/plugin/executor/ros_route/manager.rs
++++ b/src/plugin/executor/ros_route/manager.rs
+@@ -43,9 +43,9 @@ use crate::plugin::executor::routeros::{ObservedAddr, SHUTDOWN_TIMEOUT};
+ const ROUTE_DEFAULT_V4: &str = "0.0.0.0/0";
+ const ROUTE_DEFAULT_V6: &str = "::/0";
+ const CONTROL_QUEUE_SIZE: usize = 2;
+-const SWEEP_INTERVAL_SECS: u64 = 30;
++const ROUTE_EXPIRY_WINDOW_MS: u64 = 30_000;
+ const RECONCILE_INTERVAL_SECS: u64 = 180;
+-const CONNECTION_GUARD_RETRY_INTERVAL_SECS: u64 = SWEEP_INTERVAL_SECS;
++const DELETE_RETRY_DELAY_MS: u64 = 30_000;
+ const CONNECTION_QUERY_BATCH_SIZE: usize = 128;
+ const UPSERT_PIPELINE_SIZE: usize = 16;
+ 
+@@ -132,13 +132,11 @@ impl Coalesce for RouteObservation {
+ 
+ #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+ enum ControlKey {
+-    Sweep,
+     Reconcile,
+ }
+ 
+ #[derive(Debug)]
+ enum ControlCommand {
+-    Sweep,
+     Reconcile,
+ }
+ 
+@@ -279,12 +277,6 @@ impl RouteManagerHandle {
+             .is_ok()
+     }
+ 
+-    fn request_sweep(&self) {
+-        let _ = self
+-            .controls
+-            .try_push(ControlKey::Sweep, ControlCommand::Sweep);
+-    }
+-
+     fn close(&self) {
+         self.observations.close();
+         self.controls.close();
+@@ -302,7 +294,6 @@ pub(super) struct RouteManagerRuntime {
+     handle: RouteManagerHandle,
+     shutdown_tx: Option<oneshot::Sender<ShutdownRequest>>,
+     worker_handle: Option<JoinHandle<()>>,
+-    sweep_task_handle: Option<task_center::ManagedTaskHandle>,
+     reconcile_task_handle: Option<task_center::ManagedTaskHandle>,
+ }
+ 
+@@ -319,24 +310,6 @@ impl RouteManagerRuntime {
+         )));
+         handle.request_reconcile();
+ 
+-        let sweep_handle = handle.clone();
+-        let sweep_task_handle = match task_center::spawn_fixed(
+-            format!("ros_route:{tag}:sweep"),
+-            Duration::from_secs(SWEEP_INTERVAL_SECS),
+-            task_center::TaskOptions::default(),
+-            move |_| {
+-                let sweep_handle = sweep_handle.clone();
+-                async move { sweep_handle.request_sweep() }
+-            },
+-        ) {
+-            Ok(handle) => handle,
+-            Err(error) => {
+-                if let Some(worker) = worker_handle.take() {
+-                    abort_and_reap(worker);
+-                }
+-                return Err(error);
+-            }
+-        };
+         let reconcile_task_handle = if has_persistent {
+             let reconcile_handle = handle.clone();
+             match task_center::spawn_fixed(
+@@ -352,7 +325,6 @@ impl RouteManagerRuntime {
+             ) {
+                 Ok(handle) => Some(handle),
+                 Err(error) => {
+-                    sweep_task_handle.stop_detached();
+                     if let Some(worker) = worker_handle.take() {
+                         abort_and_reap(worker);
+                     }
+@@ -366,7 +338,6 @@ impl RouteManagerRuntime {
+             handle,
+             shutdown_tx: Some(shutdown_tx),
+             worker_handle,
+-            sweep_task_handle: Some(sweep_task_handle),
+             reconcile_task_handle,
+         })
+     }
+@@ -385,30 +356,20 @@ impl RouteManagerRuntime {
+         cleanup: bool,
+         deadline: tokio::time::Instant,
+     ) -> Result<()> {
+-        let tasks = [
+-            self.sweep_task_handle.take(),
+-            self.reconcile_task_handle.take(),
+-        ]
+-        .into_iter()
+-        .flatten()
+-        .collect::<Vec<_>>();
+-        for (index, task) in tasks.iter().enumerate() {
+-            if tokio::time::timeout_at(deadline, task.stop())
++        if let Some(task) = self.reconcile_task_handle.take()
++            && tokio::time::timeout_at(deadline, task.stop())
+                 .await
+                 .is_err()
+-            {
+-                for remaining in &tasks[index..] {
+-                    remaining.stop_detached();
+-                }
+-                self.handle.close();
+-                if let Some(worker) = self.worker_handle.take() {
+-                    abort_and_reap(worker);
+-                }
+-                return Err(DnsError::plugin(format!(
+-                    "ros_route shutdown exceeded {} seconds",
+-                    SHUTDOWN_TIMEOUT.as_secs()
+-                )));
++        {
++            task.stop_detached();
++            self.handle.close();
++            if let Some(worker) = self.worker_handle.take() {
++                abort_and_reap(worker);
+             }
++            return Err(DnsError::plugin(format!(
++                "ros_route shutdown exceeded {} seconds",
++                SHUTDOWN_TIMEOUT.as_secs()
++            )));
+         }
+         let (done_tx, done_rx) = oneshot::channel();
+         let requested = self.shutdown_tx.take().is_some_and(|sender| {
+@@ -458,7 +419,8 @@ pub(super) struct RouteManager {
+     persistent: AHashSet<RouteKey>,
+     leases: LeaseBook<RouteKey>,
+     routes: AHashMap<RouteKey, RouteState>,
+-    connection_retry_after: AHashMap<RouteKey, u64>,
++    delete_retry_after: AHashMap<RouteKey, u64>,
++    next_delete_retry_ms: Option<u64>,
+     reconcile: BackgroundReconcile<RouteSnapshot>,
+     reconcile_retry: ReconcileRetry,
+     startup_recovery_pending: bool,
+@@ -482,7 +444,8 @@ impl RouteManager {
+             persistent,
+             leases: LeaseBook::new(),
+             routes: AHashMap::new(),
+-            connection_retry_after: AHashMap::new(),
++            delete_retry_after: AHashMap::new(),
++            next_delete_retry_ms: None,
+             reconcile: BackgroundReconcile::new(),
+             reconcile_retry: ReconcileRetry::default(),
+             startup_recovery_pending: true,
+@@ -610,7 +573,7 @@ impl RouteManager {
+                 SyncState::PendingCreate
+             };
+         }
+-        self.connection_retry_after.remove(&key);
++        self.delete_retry_after.remove(&key);
+         true
+     }
+ 
+@@ -738,13 +701,10 @@ impl RouteManager {
+                 continue;
+             };
+             let pending_dynamic = matches!(state.sync_state, SyncState::PendingDynamicDelete);
+-            if pending_dynamic
+-                && self.cfg.conntrack_guard
+-                && self
+-                    .connection_retry_after
+-                    .get(&key)
+-                    .is_some_and(|retry| *retry > now_ms)
++            if let Some(&retry_at) = self.delete_retry_after.get(&key)
++                && retry_at > now_ms
+             {
++                self.note_delete_retry(retry_at);
+                 continue;
+             }
+             match self
+@@ -758,6 +718,7 @@ impl RouteManager {
+                 }
+                 Ok(routes) => immediate.push((key, routes)),
+                 Err(error) => {
++                    self.defer_delete(&key);
+                     first_error.get_or_insert(error);
+                 }
+             }
+@@ -766,6 +727,7 @@ impl RouteManager {
+             match self.delete_routes_if_still_owned(&routes).await {
+                 Ok(()) => self.forget_deleted(&key),
+                 Err(error) => {
++                    self.defer_delete(&key);
+                     first_error.get_or_insert(error);
+                 }
+             }
+@@ -796,7 +758,7 @@ impl RouteManager {
+                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                     }
+                     for (key, _) in candidates {
+-                        self.defer_connection_check(&key, now_ms);
++                        self.defer_delete(&key);
+                     }
+                     continue;
+                 }
+@@ -806,7 +768,7 @@ impl RouteManager {
+             };
+             for (key, routes) in candidates {
+                 if active.contains(&key.ip) {
+-                    self.defer_connection_check(&key, now_ms);
++                    self.defer_delete(&key);
+                     if let Some(metrics) = &self.metrics {
+                         metrics
+                             .delete_deferred_total
+@@ -817,6 +779,7 @@ impl RouteManager {
+                 match self.delete_routes_if_still_owned(&routes).await {
+                     Ok(()) => self.forget_deleted(&key),
+                     Err(error) => {
++                        self.defer_delete(&key);
+                         first_error.get_or_insert(error);
+                     }
+                 }
+@@ -824,17 +787,31 @@ impl RouteManager {
+         }
+     }
+ 
+-    fn defer_connection_check(&mut self, key: &RouteKey, now_ms: u64) {
+-        self.connection_retry_after.insert(
+-            key.clone(),
+-            now_ms.saturating_add(CONNECTION_GUARD_RETRY_INTERVAL_SECS * 1_000),
++    fn defer_delete(&mut self, key: &RouteKey) {
++        let retry_at = now_millis().saturating_add(DELETE_RETRY_DELAY_MS);
++        self.delete_retry_after.insert(key.clone(), retry_at);
++        self.note_delete_retry(retry_at);
++    }
++
++    fn note_delete_retry(&mut self, retry_at: u64) {
++        self.next_delete_retry_ms = Some(
++            self.next_delete_retry_ms
++                .map_or(retry_at, |at| at.min(retry_at)),
+         );
+     }
+ 
++    fn next_sweep_at_ms(&self) -> Option<u64> {
++        self.leases
++            .expiry_batch_at_ms(ROUTE_EXPIRY_WINDOW_MS)
++            .into_iter()
++            .chain(self.next_delete_retry_ms)
++            .min()
++    }
++
+     fn forget_deleted(&mut self, key: &RouteKey) {
+         self.routes.remove(key);
+         self.leases.remove(key);
+-        self.connection_retry_after.remove(key);
++        self.delete_retry_after.remove(key);
+     }
+ 
+     fn discard_unsynced_observation(&mut self, key: &RouteKey) {
+@@ -851,7 +828,10 @@ impl RouteManager {
+         self.ensure_initialized().await?;
+         self.harvest_reconcile().await;
+         let now = now_millis();
+-        let expired = self.leases.expired_keys(now);
++        // All pending deletes are considered below. Skipped or failed
++        // deletes rearm their own deadline while a successful one is removed.
++        self.next_delete_retry_ms = None;
++        let expired = self.leases.take_due_expiries(now);
+         for key in &expired {
+             if let Some(state) = self.routes.get_mut(key) {
+                 state.sync_state = SyncState::PendingDynamicDelete;
+@@ -1469,12 +1449,23 @@ async fn run_manager_worker(
+                 None => std::future::pending::<()>().await,
+             }
+         };
++        let sweep_at = manager.next_sweep_at_ms();
++        let sweep_wakeup = async move {
++            match sweep_at {
++                Some(at) => {
++                    tokio::time::sleep(Duration::from_millis(at.saturating_sub(now_millis())))
++                        .await;
++                }
++                None => std::future::pending::<()>().await,
++            }
++        };
+         enum Event {
+             Observe {
+                 batch: Vec<(RouteKey, RouteObservation)>,
+                 from_retry: bool,
+             },
+             Control(ControlCommand),
++            Sweep,
+             ReconcileCompleted,
+         }
+         let event = tokio::select! {
+@@ -1487,6 +1478,7 @@ async fn run_manager_worker(
+             }
+             _ = manager.reconcile.wait(), if manager.reconcile.is_running() => Some(Event::ReconcileCompleted),
+             control = handle.controls.recv() => control.map(|(_, command)| Event::Control(command)),
++            _ = sweep_wakeup => Some(Event::Sweep),
+             _ = retry_wakeup => {
+                 let now = tokio::time::Instant::now();
+                 let keys = retries
+@@ -1535,7 +1527,7 @@ async fn run_manager_worker(
+                     manager.record_reconcile_error(error).await;
+                 }
+             }
+-            Event::Control(ControlCommand::Sweep) => {
++            Event::Sweep => {
+                 if let Err(error) = manager.sweep().await
+                     && error_logs.should_log("sweep")
+                 {
+@@ -2590,11 +2582,46 @@ mod tests {
+         assert_eq!(api.routes().len(), 2);
+ 
+         api.connections.lock().expect("connections").clear();
+-        manager.connection_retry_after.clear();
++        manager.delete_retry_after.clear();
+         manager.sweep().await.expect("retry sweep");
+         assert!(api.routes().is_empty());
+     }
+ 
++    #[tokio::test]
++    async fn expired_route_delete_failure_schedules_a_bounded_retry() {
++        let api = Arc::new(MockApi::default());
++        let mut manager = RouteManager::new(api.clone(), config(Some(1), false));
++        let key = RouteKey::new("203.0.113.14".parse().expect("ip"), "policy".to_string());
++        assert_eq!(manager.next_sweep_at_ms(), None);
++        let now = now_millis();
++        manager
++            .observe_key(
++                key.clone(),
++                &RouteObservation {
++                    deadline: LeaseDeadline::At(now + 300_000),
++                    observed_at_ms: now,
++                    completions: Vec::new(),
++                },
++            )
++            .await
++            .expect("observation");
++        manager.leases.remove(&key);
++        manager.leases.observe(key.clone(), LeaseDeadline::At(0), 0);
++        api.delete_failures.store(1, Ordering::Release);
++
++        assert!(manager.sweep().await.is_err());
++        let retry_at = manager.next_sweep_at_ms().expect("delete retry");
++        assert!(retry_at >= now + DELETE_RETRY_DELAY_MS);
++        manager.sweep().await.expect("delay unexpired retry");
++        assert_eq!(api.routes().len(), 1);
++        assert_eq!(manager.next_sweep_at_ms(), Some(retry_at));
++
++        manager.delete_retry_after.insert(key, 0);
++        manager.sweep().await.expect("retry expired delete");
++        assert!(api.routes().is_empty());
++        assert_eq!(manager.next_sweep_at_ms(), None);
++    }
++
+     #[tokio::test]
+     async fn removed_persistent_route_deletes_all_duplicates_without_conntrack_guard() {
+         let api = Arc::new(MockApi::default());
+diff --git a/src/plugin/executor/routeros/lease.rs b/src/plugin/executor/routeros/lease.rs
+index 48bc02e29891611b20e476c2bd039dfdab9836bd..8aed940943db81f846eddddf9ade65bd7aac3909 100644
+--- a/src/plugin/executor/routeros/lease.rs
++++ b/src/plugin/executor/routeros/lease.rs
+@@ -146,6 +146,9 @@ pub(crate) enum ObserveLease {
+ pub(crate) struct LeaseBook<K> {
+     entries: AHashMap<K, LeaseRecord>,
+     revision: u64,
++    /// Earlier deadlines introduced by inserts are tracked immediately. An
++    /// extension or removal can leave a hint for the next maintenance pass.
++    earliest_expiry_ms: Option<u64>,
+ }
+ 
+ impl<K> LeaseBook<K>
+@@ -156,6 +159,7 @@ where
+         Self {
+             entries: AHashMap::new(),
+             revision: 0,
++            earliest_expiry_ms: None,
+         }
+     }
+ 
+@@ -177,11 +181,30 @@ where
+         self.entries.get(key)
+     }
+ 
++    pub(crate) fn expiry_batch_at_ms(&self, window_ms: u64) -> Option<u64> {
++        self.earliest_expiry_ms
++            .map(|deadline| deadline.div_ceil(window_ms).saturating_mul(window_ms))
++    }
++
++    #[cfg(feature = "plugin-ros-address-list")]
++    pub(crate) fn has_due_expiry(&self, now_ms: u64) -> bool {
++        self.earliest_expiry_ms.is_some_and(|at| at <= now_ms)
++    }
++
++    fn note_expiry(&mut self, deadline: LeaseDeadline) {
++        self.earliest_expiry_ms = self
++            .earliest_expiry_ms
++            .into_iter()
++            .chain(deadline.unix_millis())
++            .min();
++    }
++
+     pub(crate) fn observe(&mut self, key: K, deadline: LeaseDeadline, now_ms: u64) -> ObserveLease {
+         if let Some(record) = self.entries.get_mut(&key) {
+             let merged = record.desired.max(deadline);
+             let window = lease_window_ms(deadline, now_ms);
+-            let changed = merged != record.desired || now_ms > record.last_observed_ms;
++            let deadline_changed = merged != record.desired;
++            let changed = deadline_changed || now_ms > record.last_observed_ms;
+             record.desired = merged;
+             record.desired_window_ms = record.desired_window_ms.max(window);
+             record.last_observed_ms = record.last_observed_ms.max(now_ms);
+@@ -189,6 +212,9 @@ where
+                 self.revision = self.revision.wrapping_add(1);
+                 record.desired_revision = self.revision;
+             }
++            if deadline_changed {
++                self.note_expiry(merged);
++            }
+             return if changed {
+                 ObserveLease::Updated
+             } else {
+@@ -208,6 +234,7 @@ where
+                 desired_revision: self.revision,
+             },
+         );
++        self.note_expiry(deadline);
+         ObserveLease::Inserted
+     }
+ 
+@@ -263,29 +290,50 @@ where
+                 desired_revision: generation,
+             },
+         );
++        self.note_expiry(deadline);
+         true
+     }
+ 
+     pub(crate) fn remove(&mut self, key: &K) -> Option<LeaseRecord> {
+-        self.entries.remove(key)
++        let removed = self.entries.remove(key);
++        if self.entries.is_empty() {
++            self.earliest_expiry_ms = None;
++        }
++        removed
+     }
+ 
+     #[cfg(feature = "plugin-ros-address-list")]
+     pub(crate) fn retain(&mut self, mut keep: impl FnMut(&K, &LeaseRecord) -> bool) {
+-        self.entries.retain(|key, value| keep(key, value));
++        let mut next = None;
++        self.entries.retain(|key, value| {
++            if keep(key, value) {
++                next = next.into_iter().chain(value.desired.unix_millis()).min();
++                true
++            } else {
++                false
++            }
++        });
++        self.earliest_expiry_ms = next;
+     }
+ 
+     #[cfg(feature = "plugin-ros-route")]
+-    pub(crate) fn expired_keys(&self, now_ms: u64) -> Vec<K> {
+-        self.entries
+-            .iter()
+-            .filter(|(_, lease)| lease.desired.is_expired(now_ms))
+-            .map(|(key, _)| key.clone())
+-            .collect()
++    pub(crate) fn take_due_expiries(&mut self, now_ms: u64) -> Vec<K> {
++        let mut due = Vec::new();
++        let mut next = None;
++        for (key, lease) in &self.entries {
++            if lease.desired.is_expired(now_ms) {
++                due.push(key.clone());
++            } else {
++                next = next.into_iter().chain(lease.desired.unix_millis()).min();
++            }
++        }
++        self.earliest_expiry_ms = next;
++        due
+     }
+ 
+     pub(crate) fn clear(&mut self) {
+         self.entries.clear();
++        self.earliest_expiry_ms = None;
+     }
+ }
+ 
+@@ -313,6 +361,44 @@ fn next_refresh_at(deadline: LeaseDeadline, now_ms: u64, max_interval_ms: Option
+ mod tests {
+     use super::*;
+ 
++    #[cfg(feature = "plugin-ros-address-list")]
++    #[test]
++    fn pruning_rearms_only_for_remaining_finite_leases() {
++        let mut book = LeaseBook::new();
++        book.observe("early", LeaseDeadline::At(15), 1);
++        book.observe("later", LeaseDeadline::At(31), 1);
++        book.observe("timeless", LeaseDeadline::Timeless, 1);
++        assert_eq!(book.expiry_batch_at_ms(10), Some(20));
++
++        book.retain(|_, lease| !lease.desired().is_expired(20));
++        assert!(book.get(&"early").is_none());
++        assert_eq!(book.expiry_batch_at_ms(10), Some(40));
++
++        book.retain(|_, lease| !lease.desired().is_expired(40));
++        assert_eq!(book.len(), 1);
++        assert_eq!(book.expiry_batch_at_ms(10), None);
++    }
++
++    #[cfg(feature = "plugin-ros-route")]
++    #[test]
++    fn expiry_wakeup_advances_past_extended_and_due_leases() {
++        let mut book = LeaseBook::new();
++        book.observe("timeless", LeaseDeadline::Timeless, 10);
++        assert_eq!(book.expiry_batch_at_ms(30), None);
++
++        book.observe("finite", LeaseDeadline::At(41), 10);
++        book.observe("finite", LeaseDeadline::At(81), 20);
++        assert_eq!(book.expiry_batch_at_ms(30), Some(60));
++        assert!(book.take_due_expiries(60).is_empty());
++        assert_eq!(book.expiry_batch_at_ms(30), Some(90));
++
++        assert_eq!(book.take_due_expiries(90), vec!["finite"]);
++        assert!(book.get(&"finite").is_some());
++        assert_eq!(book.expiry_batch_at_ms(30), None);
++        book.observe("finite", LeaseDeadline::At(113), 91);
++        assert_eq!(book.expiry_batch_at_ms(30), Some(120));
++    }
++
+     #[test]
+     fn observations_merge_by_key_and_keep_the_longest_lease() {
+         let mut book = LeaseBook::new();
+diff --git a/src/plugin/matcher/mod.rs b/src/plugin/matcher/mod.rs
+index d60f20f774edc26ef3b7c3ec72402c234c92bb4c..e3668db57766cfbd2527926b8aef8211f4866602 100644
+--- a/src/plugin/matcher/mod.rs
++++ b/src/plugin/matcher/mod.rs
+@@ -24,6 +24,8 @@ use crate::plugin::Plugin;
+ 
+ mod control;
+ 
++#[cfg(feature = "provider-adguard-rule")]
++pub mod adguard_dns;
+ pub mod any_match;
+ pub mod client_ip;
+ pub mod cname;
+diff --git a/src/plugin/matcher/rate_limiter.rs b/src/plugin/matcher/rate_limiter.rs
+index 3a64f232226995ae8933882285111afd55fca5b8..8e8c8c6d458ca6578e83bb19e34bcba90e51933e 100644
+--- a/src/plugin/matcher/rate_limiter.rs
++++ b/src/plugin/matcher/rate_limiter.rs
+@@ -16,17 +16,17 @@
+ //! - `mask4`/`mask6`: aggregation granularity for IPv4/IPv6 clients.
+ //!
+ //! Lifecycle:
+-//! - `init` starts periodic cleanup for stale buckets.
++//! - `init` starts cleanup driven by bucket expiration deadlines.
+ //! - `destroy` stops cleanup task and releases background resources.
+ 
+ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::{Arc, Mutex};
+-use std::time::Duration;
+ 
+ use async_trait::async_trait;
+ use serde::Deserialize;
+ use serde_yaml_ng::Value;
++use tokio_util::task::AbortOnDropHandle;
+ 
+ use crate::config::types::PluginConfig;
+ use crate::core::context::DnsContext;
+@@ -37,7 +37,6 @@ use crate::infra::observability::metrics::{
+     MetricLabel, MetricSample, MetricSink, MetricSource, register_metric_source,
+     unregister_metric_source,
+ };
+-use crate::infra::task as task_center;
+ use crate::plugin::matcher::Matcher;
+ use crate::plugin::{Plugin, PluginFactory, UninitializedPlugin};
+ use crate::plugin_factory;
+@@ -47,7 +46,7 @@ const DEFAULT_BURST: f64 = 40.0;
+ const DEFAULT_MASK4: u8 = 32;
+ const DEFAULT_MASK6: u8 = 48;
+ const STALE_TIMEOUT_MS: u64 = 5 * 60 * 1000;
+-const CLEANUP_INTERVAL_SECS: u64 = 30;
++const CLEANUP_COALESCE_MS: u64 = 30_000;
+ 
+ #[derive(Debug, Clone, Deserialize, Default)]
+ struct RateLimiterConfig {
+@@ -75,8 +74,7 @@ struct RateLimiter {
+     mask4: u8,
+     mask6: u8,
+     buckets: TtlCache<IpAddr, Bucket>,
+-    cleanup_started: AtomicBool,
+-    cleanup_task_handle: Mutex<Option<task_center::ManagedTaskHandle>>,
++    cleanup_task_handle: Mutex<Option<AbortOnDropHandle<()>>>,
+     metrics: Arc<RateLimiterMetrics>,
+ }
+ 
+@@ -142,8 +140,7 @@ impl PluginFactory for RateLimiterFactory {
+             burst: cfg.burst.unwrap_or(DEFAULT_BURST as u32) as f64,
+             mask4: cfg.mask4.unwrap_or(DEFAULT_MASK4),
+             mask6: cfg.mask6.unwrap_or(DEFAULT_MASK6),
+-            buckets: TtlCache::with_capacity(4096),
+-            cleanup_started: AtomicBool::new(false),
++            buckets: TtlCache::with_expiry(4096, CLEANUP_COALESCE_MS),
+             cleanup_task_handle: Mutex::new(None),
+             metrics: Arc::new(RateLimiterMetrics::new(plugin_config.tag.clone())),
+         })))
+@@ -159,8 +156,7 @@ impl PluginFactory for RateLimiterFactory {
+             burst: cfg.burst.unwrap_or(DEFAULT_BURST as u32) as f64,
+             mask4: cfg.mask4.unwrap_or(DEFAULT_MASK4),
+             mask6: cfg.mask6.unwrap_or(DEFAULT_MASK6),
+-            buckets: TtlCache::with_capacity(4096),
+-            cleanup_started: AtomicBool::new(false),
++            buckets: TtlCache::with_expiry(4096, CLEANUP_COALESCE_MS),
+             cleanup_task_handle: Mutex::new(None),
+             metrics: Arc::new(RateLimiterMetrics::new(tag.to_string())),
+         })))
+@@ -174,48 +170,41 @@ impl Plugin for RateLimiter {
+     }
+ 
+     async fn init(&mut self, _context: &crate::plugin::PluginInitContext<'_>) -> DnsResult<()> {
+-        register_metric_source(self.metrics.clone())?;
+-        if self.cleanup_started.swap(true, Ordering::Relaxed) {
++        let worker = self
++            .cleanup_task_handle
++            .get_mut()
++            .map_err(|_| DnsError::runtime("rate_limiter cleanup task lock poisoned"))?;
++        if worker.is_some() {
+             return Ok(());
+         }
+ 
++        register_metric_source(self.metrics.clone())?;
+         let buckets = self.buckets.clone();
+-        let task_handle = match task_center::spawn_fixed(
+-            format!("rate_limiter:{}:cleanup", self.tag),
+-            Duration::from_secs(CLEANUP_INTERVAL_SECS),
+-            task_center::TaskOptions::default(),
+-            move |_| {
+-                let buckets = buckets.clone();
+-                async move {
+-                    let now = AppClock::elapsed_millis();
+-                    while buckets.remove_expired_batch(now, 2048) > 0 {}
++        *worker = Some(AbortOnDropHandle::new(tokio::spawn(async move {
++            buckets.schedule_next_expiry();
++            loop {
++                buckets.wait_for_expiry().await;
++                let now = AppClock::elapsed_millis();
++                while buckets.remove_expired_batch(now, 2048) > 0 {
++                    tokio::task::yield_now().await;
+                 }
+-            },
+-        ) {
+-            Ok(handle) => handle,
+-            Err(error) => {
+-                self.cleanup_started.store(false, Ordering::Relaxed);
+-                unregister_metric_source(&self.tag);
+-                return Err(error);
++                buckets.schedule_next_expiry();
+             }
+-        };
+-        if let Ok(mut guard) = self.cleanup_task_handle.lock() {
+-            *guard = Some(task_handle);
+-        }
++        })));
+         Ok(())
+     }
+ 
+     async fn destroy(&self) -> DnsResult<()> {
+         unregister_metric_source(&self.tag);
+-        let task_handle = if let Ok(mut guard) = self.cleanup_task_handle.lock() {
+-            guard.take()
+-        } else {
+-            None
+-        };
++        let task_handle = self
++            .cleanup_task_handle
++            .lock()
++            .map_err(|_| DnsError::runtime("rate_limiter cleanup task lock poisoned"))?
++            .take();
+         if let Some(handle) = task_handle {
+-            handle.stop().await;
++            handle.abort();
++            let _ = handle.await;
+         }
+-        self.cleanup_started.store(false, Ordering::Relaxed);
+         Ok(())
+     }
+ }
+@@ -410,7 +399,6 @@ mod tests {
+             mask4: 32,
+             mask6: 128,
+             buckets: TtlCache::with_capacity(16),
+-            cleanup_started: AtomicBool::new(false),
+             cleanup_task_handle: Mutex::new(None),
+             metrics: metrics.clone(),
+         };
+diff --git a/src/plugin/provider/adguard_rule/mod.rs b/src/plugin/provider/adguard_rule/mod.rs
+index b211bb4a9fac5287ca13ed7c7fa28acde81e4cf2..7a44082d070c9dc3504905862ab062b424051bad 100644
+--- a/src/plugin/provider/adguard_rule/mod.rs
++++ b/src/plugin/provider/adguard_rule/mod.rs
+@@ -32,7 +32,7 @@ use crate::infra::task::spawn_isolated_build;
+ use crate::plugin::provider::Provider;
+ use crate::plugin::{Plugin, PluginFactory, UninitializedPlugin};
+ use crate::plugin_factory;
+-use crate::proto::{Name, Question};
++use crate::proto::{Name, Question, RecordType};
+ 
+ mod compiler;
+ mod config;
+@@ -54,6 +54,12 @@ pub struct AdGuardRule {
+     snapshot: ArcSwap<AdGuardRuleSnapshot>,
+ }
+ 
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum RuleAction {
++    Allow,
++    Block,
++}
++
+ impl AdGuardRule {
+     fn contains_name_only(&self, qname: &Name) -> bool {
+         let snapshot = self.snapshot.load();
+@@ -70,20 +76,24 @@ impl AdGuardRule {
+     }
+ 
+     fn contains_question_rule(&self, question: &Question) -> bool {
+-        let snapshot = self.snapshot.load();
+-        let qname = question.name();
+-        let qtype = question.qtype();
++        self.action(question.name(), question.qtype()) == Some(RuleAction::Block)
++    }
+ 
++    pub(crate) fn action(&self, qname: &Name, qtype: RecordType) -> Option<RuleAction> {
++        let snapshot = self.snapshot.load();
+         if snapshot.important_exceptions.is_match(qname, qtype) {
+-            return false;
++            return Some(RuleAction::Allow);
+         }
+         if snapshot.important_blocks.is_match(qname, qtype) {
+-            return true;
++            return Some(RuleAction::Block);
+         }
+         if snapshot.exceptions.is_match(qname, qtype) {
+-            return false;
++            return Some(RuleAction::Allow);
+         }
+-        snapshot.blocks.is_match(qname, qtype)
++        snapshot
++            .blocks
++            .is_match(qname, qtype)
++            .then_some(RuleAction::Block)
+     }
+ 
+     #[hotpath::measure]
+@@ -255,6 +265,21 @@ mod tests {
+         assert!(!compiled.is_match("testexample.org", RecordType::A));
+     }
+ 
++    #[test]
++    fn partial_domain_anchor_keeps_its_literal_trailing_dot() {
++        for constraints in ["", "$dnstype=A"] {
++            let provider = make_provider(config::AdGuardRuleConfig {
++                rules: vec![format!("||adgate.{constraints}")],
++                files: Vec::new(),
++            });
++            let action = |value| provider.action(&Name::from_ascii(value).unwrap(), RecordType::A);
++            assert_eq!(action("adgate.invalid"), Some(RuleAction::Block));
++            assert_eq!(action("sub.adgate.invalid"), Some(RuleAction::Block));
++            assert_eq!(action("adgate"), None);
++            assert_eq!(action("adgatekeeper.invalid"), None);
++        }
++    }
++
+     #[test]
+     fn regex_rule_is_case_insensitive() {
+         let compiled = compile_test_rule("/EXAMPLE\\.(org|net)/");
+diff --git a/src/plugin/provider/adguard_rule/syntax.rs b/src/plugin/provider/adguard_rule/syntax.rs
+index f01aa5808bb3bd8457f22fb58a4c4ad1a30bee4a..0d387a556e639424ea9868c8bceb11bf4d3a9d25 100644
+--- a/src/plugin/provider/adguard_rule/syntax.rs
++++ b/src/plugin/provider/adguard_rule/syntax.rs
+@@ -269,7 +269,7 @@ pub(super) fn compile_pattern(raw: &str) -> Result<PatternMatcher, String> {
+         return compile_regex_pattern(raw);
+     }
+ 
+-    let normalized = normalize_domain(raw);
++    let normalized = normalize_pattern_cow(raw);
+     if normalized.is_empty() {
+         return Err("empty domain pattern".to_string());
+     }
+@@ -277,13 +277,16 @@ pub(super) fn compile_pattern(raw: &str) -> Result<PatternMatcher, String> {
+     if let Some(domain) = normalized
+         .strip_prefix("||")
+         .and_then(|value| value.strip_suffix('^'))
++        && !domain.ends_with('.')
+         && is_simple_hostname(domain)
+     {
+         return Ok(PatternMatcher::Domain(domain.to_string().into_boxed_str()));
+     }
+ 
+     if !normalized.contains('*') && !normalized.contains('^') && !normalized.contains('|') {
+-        return Ok(PatternMatcher::Exact(normalized.into_boxed_str()));
++        return Ok(PatternMatcher::Exact(
++            normalized.into_owned().into_boxed_str(),
++        ));
+     }
+ 
+     if let Some(prefix) = normalized.strip_prefix('|')
+@@ -322,7 +325,7 @@ pub(super) fn with_fast_rule<T>(
+         return sink(DomainRuleKind::Regexp, body);
+     }
+ 
+-    let normalized = normalize_domain_cow(raw);
++    let normalized = normalize_pattern_cow(raw);
+     if normalized.is_empty() {
+         return Err("empty domain pattern".to_string());
+     }
+@@ -330,6 +333,7 @@ pub(super) fn with_fast_rule<T>(
+     if let Some(domain) = normalized
+         .strip_prefix("||")
+         .and_then(|value| value.strip_suffix('^'))
++        && !domain.ends_with('.')
+         && is_simple_hostname(domain)
+     {
+         return sink(DomainRuleKind::Domain, domain);
+@@ -412,7 +416,7 @@ pub(super) fn canonical_pattern_key(raw: &str) -> String {
+     if raw.starts_with('/') {
+         raw.to_string()
+     } else {
+-        normalize_domain(raw)
++        normalize_pattern_cow(raw).into_owned()
+     }
+ }
+ 
+@@ -421,11 +425,25 @@ pub(super) fn normalize_domain(raw: &str) -> String {
+ }
+ 
+ fn normalize_domain_cow(raw: &str) -> Cow<'_, str> {
+-    let trimmed = raw.trim().trim_end_matches('.');
+-    if trimmed.bytes().any(|byte| byte.is_ascii_uppercase()) {
+-        Cow::Owned(trimmed.to_ascii_lowercase())
++    normalize_case_cow(raw.trim().trim_end_matches('.'))
++}
++
++fn normalize_pattern_cow(raw: &str) -> Cow<'_, str> {
++    let pattern = raw.trim();
++    // A trailing dot in a mask such as `||ads.` is a literal separator.
++    // Stripping it changes which domain labels are matched by the rule.
++    if pattern.contains(['|', '*', '^']) {
++        normalize_case_cow(pattern)
++    } else {
++        normalize_domain_cow(pattern)
++    }
++}
++
++fn normalize_case_cow(value: &str) -> Cow<'_, str> {
++    if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
++        Cow::Owned(value.to_ascii_lowercase())
+     } else {
+-        Cow::Borrowed(trimmed)
++        Cow::Borrowed(value)
+     }
+ }
+ 
+diff --git a/src/plugin/provider/dynamic_domain_set/backend.rs b/src/plugin/provider/dynamic_domain_set/backend.rs
+index 7cc7d26330dff955ad190e59e91eeb3669fefe91..452126c3b0b9fe56ebe67cd8ee0ced99bbd93184 100644
+--- a/src/plugin/provider/dynamic_domain_set/backend.rs
++++ b/src/plugin/provider/dynamic_domain_set/backend.rs
+@@ -671,11 +671,19 @@ impl DynamicDomainSetBackend {
+         // keeps ordering simple: every mutating API call either waits behind
+         // earlier appends or observes their flushed state before it runs.
+         let mut pending = Vec::new();
+-        let mut interval =
+-            tokio::time::interval(Duration::from_millis(self.config.flush_interval_ms.max(1)));
++        let flush_interval = Duration::from_millis(self.config.flush_interval_ms.max(1));
++        let mut batch_started: Option<tokio::time::Instant> = None;
+         loop {
+             tokio::select! {
+-                _ = interval.tick() => {
++                biased;
++                _ = async {
++                    if let Some(started) = batch_started {
++                        let remaining = flush_interval.saturating_sub(started.elapsed());
++                        if !remaining.is_zero() {
++                            tokio::time::sleep(remaining).await;
++                        }
++                    }
++                }, if batch_started.is_some() => {
+                     self.flush_appends(&mut pending).await;
+                 }
+                 command = rx.recv() => {
+@@ -693,6 +701,9 @@ impl DynamicDomainSetBackend {
+                                     }
+                                 }
+                                 Ok(staged) => {
++                                    if pending.is_empty() {
++                                        batch_started = Some(tokio::time::Instant::now());
++                                    }
+                                     pending.push(PendingAppend {
+                                         rules: staged.rules,
+                                         wait,
+@@ -737,6 +748,9 @@ impl DynamicDomainSetBackend {
+                     }
+                 }
+             }
++            if pending.is_empty() {
++                batch_started = None;
++            }
+         }
+     }
+ }
+diff --git a/src/plugin/provider/dynamic_domain_set/tests.rs b/src/plugin/provider/dynamic_domain_set/tests.rs
+index 98dbce3eaeb9bb09ce8c94cd89112a2f0c425f22..927d48186145748ad3c35c48ec33eea67cd24d3c 100644
+--- a/src/plugin/provider/dynamic_domain_set/tests.rs
++++ b/src/plugin/provider/dynamic_domain_set/tests.rs
+@@ -229,11 +229,6 @@ async fn dynamic_domain_set_sync_append_flushes_without_batch_or_tick() {
+     ));
+     backend.start().await.expect("backend should start");
+ 
+-    // Give the worker time to consume Tokio interval's immediate first tick.
+-    // Without an explicit flush for waited appends, this request would then sit
+-    // in the pending batch until the 60s interval and exceed the caller
+-    // timeout.
+-    tokio::time::sleep(Duration::from_millis(25)).await;
+     backend
+         .append_rules_sync(
+             vec!["Sync.Example.".to_string()],
+@@ -252,6 +247,36 @@ async fn dynamic_domain_set_sync_append_flushes_without_batch_or_tick() {
+     backend.shutdown().await.expect("shutdown");
+ }
+ 
++#[tokio::test]
++async fn dynamic_domain_set_queued_append_flushes_below_batch_limit() {
++    AppClock::start();
++    let dir = tempfile::tempdir().expect("tempdir");
++    let path = dir.path().join("learned.txt");
++    let backend = Arc::new(DynamicDomainSetBackend::new(
++        "learned".to_string(),
++        test_config_with_flush(path.clone(), 64, 15),
++    ));
++    backend.start().await.expect("backend should start");
++
++    let name = test_name("queued.example.");
++    backend
++        .append_rules_async(vec![name.to_string()], DynamicDomainRuleKind::Full)
++        .expect("async append should enqueue");
++    tokio::time::timeout(Duration::from_secs(2), async {
++        while !backend.contains_name(&name) {
++            tokio::time::sleep(Duration::from_millis(5)).await;
++        }
++    })
++    .await
++    .expect("a single queued append should publish the updated snapshot");
++    assert_eq!(
++        fs::read_to_string(&path).expect("file should exist"),
++        "full:queued.example\n"
++    );
++
++    backend.shutdown().await.expect("shutdown");
++}
++
+ #[tokio::test]
+ async fn dynamic_domain_set_remove_clear_and_reload() {
+     AppClock::start();
+diff --git a/website/docs/plugin-reference/executor/observability.mdx b/website/docs/plugin-reference/executor/observability.mdx
+index d4cbf1dcce6005a6fba2e426c812871931592f4e..5ae58eb896a35dab6a575d22b55587bdcd3c8edf 100644
+--- a/website/docs/plugin-reference/executor/observability.mdx
++++ b/website/docs/plugin-reference/executor/observability.mdx
+@@ -266,13 +266,13 @@ import PluginAvailability from "@site/src/components/PluginAvailability";
+ 
+ - 类型：`integer`；必填：否；默认值：`7`
+ - 最小值：`1`
+-- 作用：定义日志保留天数；过期数据会被定时实际删除。
++- 作用：定义日志保留天数。到期记录会被自动删除。
+ 
+ #### `cleanup_interval_hours`
+ 
+ - 类型：`integer`；必填：否；默认值：`1`
+ - 最小值：`1`
+-- 作用：定义过期清理任务的执行周期。
++- 作用：定义两次自动清理之间的最短间隔。
+ 
+ #### `reader_concurrency`
+ 
+@@ -282,7 +282,7 @@ import PluginAvailability from "@site/src/components/PluginAvailability";
+ 
+ ### 行为说明
+ 
+-- 通过 `retention_days` 控制保留天数，过期记录按 `cleanup_interval_hours` 定时清理。少量删除后文件可能不会立即变小，释放的空间可供后续记录复用。
++- 通过 `retention_days` 控制保留天数。写线程按最早记录的到期时间安排清理，两次自动清理之间至少间隔 `cleanup_interval_hours`。空库无需安排清理。少量删除后文件可能不会立即变小，释放的空间可供后续记录复用。
+ - 多个 recorder 可以共用数据库文件；记录按 tag 隔离，清空一个不会删除其他 recorder 的历史。
+ - `client_ip` 是 OxiDNS 看到的来源地址。经过本机转发时可能显示 `127.0.0.1`，而非真实终端 IP。
+ - 较旧数据库首次回收空间时可能需要额外临时磁盘空间，并短暂影响历史查询和记录写入；DNS 解析继续运行。
+diff --git a/website/docs/plugin-reference/executor/resolution.mdx b/website/docs/plugin-reference/executor/resolution.mdx
+index fef5a8a592d199fe3f5a80f450e1d4e0ba4c0b58..8e8cbfa2c0536c453f5a916770b4916492891275 100644
+--- a/website/docs/plugin-reference/executor/resolution.mdx
++++ b/website/docs/plugin-reference/executor/resolution.mdx
+@@ -403,7 +403,7 @@ import PluginAvailability from "@site/src/components/PluginAvailability";
+ 
+ - 类型：`integer`；必填：否；默认值：`600`
+ - 单位：秒
+-- 作用：定义缓存定期落盘周期。
++- 作用：定义缓存更新次数达到落盘阈值后的批处理等待时间。
+ - 说明：定时任务注册失败时记录告警，DNS 服务继续运行；若缓存已成功加载，正常关闭时仍会尝试保存。
+ 
+ #### `short_circuit`
+diff --git a/website/docs/plugin-reference/provider/domain.mdx b/website/docs/plugin-reference/provider/domain.mdx
+index 8ace0756a94df2116d1ece55eecbe4d231ab1a02..af8a7542ec213aa60a76f7f7c697449fef6640df 100644
+--- a/website/docs/plugin-reference/provider/domain.mdx
++++ b/website/docs/plugin-reference/provider/domain.mdx
+@@ -164,7 +164,7 @@ import PluginAvailability from "@site/src/components/PluginAvailability";
+ #### `flush_interval_ms`
+ 
+ - 类型：`integer`；必填：否；默认值：`200`
+-- 作用：定义后台 append 的定时 flush 间隔。
++- 作用：定义批次从收到首条待追加规则到自动写入的等待时间。
+ 
+ ### 文件格式
+ 
+diff --git a/website/i18n/en/docusaurus-plugin-content-docs/current/plugin-reference/executor/observability.mdx b/website/i18n/en/docusaurus-plugin-content-docs/current/plugin-reference/executor/observability.mdx
+index 67d625a09d96d9995144c2c93d07d636b536937e..fc2377d2b2b79f9c8f406d9d408fcb1ccbed44aa 100644
+--- a/website/i18n/en/docusaurus-plugin-content-docs/current/plugin-reference/executor/observability.mdx
++++ b/website/i18n/en/docusaurus-plugin-content-docs/current/plugin-reference/executor/observability.mdx
+@@ -264,7 +264,7 @@ To reclaim space manually, resolve the actual `path` first (relative paths use t
+ #### `cleanup_interval_hours`
+ 
+ - Type: `integer`; Required: no; Default: `1`; Minimum: `1`
+-- Purpose: Cleanup task cadence.
++- Purpose: Minimum time between automatic cleanups.
+ 
+ #### `reader_concurrency`
+ 
+@@ -273,7 +273,7 @@ To reclaim space manually, resolve the actual `path` first (relative paths use t
+ 
+ ### Behavior
+ 
+-- Set `retention_days` to control how long records are kept; expired records are cleaned up every `cleanup_interval_hours`. Small deletions may not immediately shrink the file, but the freed space can be reused for new records.
++- The writer schedules cleanup when the oldest record expires, with at least `cleanup_interval_hours` between automatic cleanups. An empty database requires no cleanup timer. Small deletions may not immediately shrink the file, but the freed space can be reused for new records.
+ - Multiple recorders can share a database file. History is isolated by tag, so clearing one recorder preserves the others.
+ - `client_ip` is the source address OxiDNS sees. Local forwarding may make it appear as `127.0.0.1` instead of the actual device address.
+ - The first space reclamation on an older database may require temporary disk space and briefly pause history queries and record writes. DNS resolution continues.
+diff --git a/website/i18n/en/docusaurus-plugin-content-docs/current/plugin-reference/executor/resolution.mdx b/website/i18n/en/docusaurus-plugin-content-docs/current/plugin-reference/executor/resolution.mdx
+index 2e9e9ffdb1896a0cab6481b983f89bfdd5c3a27a..ace4a574c3cd05023ac52b146dedcd2e0570d8a8 100644
+--- a/website/i18n/en/docusaurus-plugin-content-docs/current/plugin-reference/executor/resolution.mdx
++++ b/website/i18n/en/docusaurus-plugin-content-docs/current/plugin-reference/executor/resolution.mdx
+@@ -353,8 +353,8 @@ For A/AAAA and other non-CNAME queries, cache admission requires the requested t
+ #### `dump_interval`
+ 
+ - Type: `duration`; Required: no; Default: `600s`
+-- Purpose: Periodic dump interval.
+-- Notes: If periodic task registration fails, OxiDNS logs a warning and continues serving DNS. Normal shutdown still attempts to save a successfully loaded cache.
++- Purpose: Batch delay after the cache reaches its update threshold for saving.
++- Notes: If scheduling the background writer fails, OxiDNS logs a warning and continues serving DNS. Normal shutdown still attempts to save a successfully loaded cache.
+ 
+ #### `short_circuit`
+ 
+diff --git a/website/i18n/en/docusaurus-plugin-content-docs/current/plugin-reference/provider/domain.mdx b/website/i18n/en/docusaurus-plugin-content-docs/current/plugin-reference/provider/domain.mdx
+index c872c7ae7c65cc12e060f38e81270e9e84895fff..2db157806b2fea988b73856a78afa3b5fd50b74a 100644
+--- a/website/i18n/en/docusaurus-plugin-content-docs/current/plugin-reference/provider/domain.mdx
++++ b/website/i18n/en/docusaurus-plugin-content-docs/current/plugin-reference/provider/domain.mdx
+@@ -164,7 +164,7 @@ Provides a writable local domain rule set. It persists rules to a text file and
+ #### `flush_interval_ms`
+ 
+ - Type: `integer`; Required: no; Default: `200`
+-- Purpose: Timed flush interval for background appends.
++- Purpose: Time to wait before flushing a batch, measured from its first queued rule.
+ 
+ ### File Format
+ 
+diff --git a/webui/lib/i18n/locales/en-US/docs.ts b/webui/lib/i18n/locales/en-US/docs.ts
+index 2d195f56b988dbd87f80cdba74ff6553a6351382..9d474ae6d0617ca740d05ed7bf8dadc5fd7c7899 100644
+--- a/webui/lib/i18n/locales/en-US/docs.ts
++++ b/webui/lib/i18n/locales/en-US/docs.ts
+@@ -115,7 +115,7 @@ export const enUSDocs = {
+     dump_file:
+       "- Type: `string`; Required: No; Default: None\n- Function: Specify the cache persistence file path.",
+     dump_interval:
+-      "- Type: `integer`; required: no; default value: `600`\n- Unit: seconds\n- Function: Define how often the cache is flushed to disk.",
++      "- Type: `integer`; required: no; default value: `600`\n- Unit: seconds\n- Function: Batch delay after the cache reaches its update threshold for saving.",
+     short_circuit:
+       "- Type: `boolean`; Required: No; Default: Automatic\n- Function: Control whether to end subsequent execution immediately after a cache hit.\n- Description:\n  - When set to `false`, even if the cache has written the response, the subsequent execution chain will continue.\n  - If you want to avoid subsequent `forward` initiating queries again, you should use it in conjunction with `has_resp`, `accept` and other control flows in `sequence`.",
+     cache_negative:
+@@ -311,13 +311,13 @@ export const enUSDocs = {
+     batch_size:
+       "- Type: `integer`; required: no; default value: `256`\n- Function: Define how many records are written to SQLite in each background batch.",
+     flush_interval_ms:
+-      "- Type: `integer`; required: no; default value: `200`\n- Function: Define the batch flush interval for the background writer.",
++      "- Type: `integer`; required: no; default value: `200`\n- Function: Time to wait before flushing a batch, measured from its first record.",
+     memory_tail:
+       "- Type: `integer`; required: no; default value: `1024`\n- Function: Define how many recent records are kept in memory for `stream?tail=n` replay.",
+     retention_days:
+-      "- Type: `integer`; required: no; default value: `7`\n- Minimum value: `1`\n- Function: Define how many days logs are retained; expired data is periodically deleted.",
++      "- Type: `integer`; required: no; default value: `7`\n- Minimum value: `1`\n- Function: Defines the log retention period in days. Expired records are removed automatically.",
+     cleanup_interval_hours:
+-      "- Type: `integer`; required: no; default value: `1`\n- Minimum value: `1`\n- Function: Define how often the expired-data cleanup task runs.",
++      "- Type: `integer`; required: no; default value: `1`\n- Minimum value: `1`\n- Function: Defines the minimum time between automatic cleanups.",
+     reader_concurrency:
+       "- Type: `integer`; required: no; default value: `2`\n- Minimum value: `1`\n- Function: Limit how many SQLite readers may run concurrently for query_recorder API/statistics reads, preventing WebUI or API bursts from occupying too many blocking threads and too much memory.",
+   },
+@@ -674,7 +674,7 @@ export const enUSDocs = {
+     batch_size:
+       "- Type: `integer`; required: no; default value: `256`\n- Configuration requirement: must be greater than 0.\n- Function: Define the batch flush threshold for background appends.\n- Operational impact: Larger values write more rules per flush and concentrate CPU/disk work into fewer flushes.",
+     flush_interval_ms:
+-      "- Type: `integer`; required: no; default value: `200`\n- Unit: milliseconds\n- Configuration requirement: must be greater than 0.\n- Function: Define the scheduled flush interval for background appends.\n- Operational impact: Together with `batch_size`, this controls write cadence. Smaller values make new rules visible sooner but flush to disk more often.",
++      "- Type: `integer`; required: no; default value: `200`\n- Unit: milliseconds\n- Configuration requirement: must be greater than 0.\n- Function: Time to wait before flushing a batch, measured from its first queued rule.\n- Operational impact: Together with `batch_size`, this controls write cadence. Smaller values make new rules visible sooner but flush to disk more often.",
+   },
+   geosite: {
+     file: "- Type: `string`; Required: Yes\n- Function: Specify the `geosite.dat` file path.",
+diff --git a/webui/lib/i18n/locales/en-US/plugin-defined.ts b/webui/lib/i18n/locales/en-US/plugin-defined.ts
+index fe168a2211a4d1b91f73f8290b832e9013cf2f8c..3d996935aa6342dabd55020f13b80a7cb53e847b 100644
+--- a/webui/lib/i18n/locales/en-US/plugin-defined.ts
++++ b/webui/lib/i18n/locales/en-US/plugin-defined.ts
+@@ -549,8 +549,8 @@ export const enUSPluginDefined = {
+           example: "./dns_cache.dump",
+         },
+         dump_interval: {
+-          label: "Dump interval (seconds)",
+-          description: "Defines how often the cache is flushed to disk.",
++          label: "Dump batch delay (seconds)",
++          description: "Batch delay after the cache reaches its update threshold for saving.",
+         },
+         short_circuit: {
+           label: "Stop subsequent execution after hit",
+@@ -1356,11 +1356,11 @@ export const enUSPluginDefined = {
+         retention_days: {
+           label: "Retention days",
+           description:
+-            "Defines how many days logs are retained; expired data is periodically deleted.",
++            "Defines the log retention period in days. Expired records are removed automatically.",
+         },
+         cleanup_interval_hours: {
+-          label: "Cleanup interval (hours)",
+-          description: "Defines how often the expired-data cleanup task runs.",
++          label: "Minimum cleanup interval (hours)",
++          description: "Defines the minimum time between automatic cleanups.",
+         },
+         reader_concurrency: {
+           label: "Reader concurrency",
+diff --git a/webui/lib/i18n/locales/zh-CN/docs.ts b/webui/lib/i18n/locales/zh-CN/docs.ts
+index f6320a706f923112fd86398c12d3d3f456fe8daf..a30041a5d7c6e398896f493c1f4ab5ca8bb7e61f 100644
+--- a/webui/lib/i18n/locales/zh-CN/docs.ts
++++ b/webui/lib/i18n/locales/zh-CN/docs.ts
+@@ -112,7 +112,7 @@ export const zhCNDocs = {
+     dump_file:
+       "- 类型：`string`；必填：否；默认值：无\n- 作用：指定缓存持久化文件路径。",
+     dump_interval:
+-      "- 类型：`integer`；必填：否；默认值：`600`\n- 单位：秒\n- 作用：定义缓存定期落盘周期。",
++      "- 类型：`integer`；必填：否；默认值：`600`\n- 单位：秒\n- 作用：定义缓存更新次数达到落盘阈值后的批处理等待时间。",
+     short_circuit:
+       "- 类型：`boolean`；必填：否；默认值：自动\n- 作用：控制缓存命中后是否立即结束后续执行。\n- 说明：\n  - 设为 `false` 时，即使 cache 已经写入 response，后续执行链仍会继续。\n  - 如需避免后续 `forward` 再次发起查询，应在 `sequence` 中配合 `has_resp`、`accept` 等控制流使用。",
+     cache_negative:
+@@ -313,7 +313,7 @@ export const zhCNDocs = {
+     retention_days:
+       "- 类型：`integer`；必填：否；默认值：`7`\n- 最小值：`1`\n- 作用：定义日志保留天数；过期数据会被定时实际删除。",
+     cleanup_interval_hours:
+-      "- 类型：`integer`；必填：否；默认值：`1`\n- 最小值：`1`\n- 作用：定义过期清理任务的执行周期。",
++      "- 类型：`integer`；必填：否；默认值：`1`\n- 最小值：`1`\n- 作用：定义两次自动清理之间的最短间隔。",
+     reader_concurrency:
+       "- 类型：`integer`；必填：否；默认值：`2`\n- 最小值：`1`\n- 作用：限制 query_recorder API/统计读取侧同时运行的 SQLite reader 数量，避免 WebUI 或 API 突发请求占用过多阻塞线程和内存。",
+   },
+diff --git a/webui/lib/i18n/locales/zh-CN/plugin-defined.ts b/webui/lib/i18n/locales/zh-CN/plugin-defined.ts
+index b85702c66c28e0078ebdba6e6b45dfe1178d817f..d53de243d368b6ff77bcfde4e51181b886f93336 100644
+--- a/webui/lib/i18n/locales/zh-CN/plugin-defined.ts
++++ b/webui/lib/i18n/locales/zh-CN/plugin-defined.ts
+@@ -492,8 +492,8 @@ export const zhCNPluginDefined = {
+           example: "./dns_cache.dump",
+         },
+         dump_interval: {
+-          label: "落盘周期(秒)",
+-          description: "定义缓存定期落盘周期。",
++          label: "落盘批处理延迟(秒)",
++          description: "定义缓存更新次数达到落盘阈值后的批处理等待时间。",
+         },
+         short_circuit: {
+           label: "命中后停止后续执行",
+@@ -1234,8 +1234,8 @@ export const zhCNPluginDefined = {
+           description: "定义日志保留天数；过期数据会被定时实际删除。",
+         },
+         cleanup_interval_hours: {
+-          label: "清理周期(小时)",
+-          description: "定义过期清理任务的执行周期。",
++          label: "最短清理间隔(小时)",
++          description: "定义两次自动清理之间的最短间隔。",
+         },
+         reader_concurrency: {
+           label: "读取并发数",
+diff --git a/webui/lib/plugin-definitions/docs.ts b/webui/lib/plugin-definitions/docs.ts
+index 92872b1cd7283c826ce42eff4ed21ddb92539e52..744536138d9faecfd9d4da33a81da2efb4e95ff4 100644
+--- a/webui/lib/plugin-definitions/docs.ts
++++ b/webui/lib/plugin-definitions/docs.ts
+@@ -112,7 +112,7 @@ export const pluginFieldDocs = {
+     dump_file:
+       "- 类型：`string`；必填：否；默认值：无\n- 作用：指定缓存持久化文件路径。",
+     dump_interval:
+-      "- 类型：`integer`；必填：否；默认值：`600`\n- 单位：秒\n- 作用：定义缓存定期落盘周期。",
++      "- 类型：`integer`；必填：否；默认值：`600`\n- 单位：秒\n- 作用：定义缓存更新次数达到落盘阈值后的批处理等待时间。",
+     short_circuit:
+       "- 类型：`boolean`；必填：否；默认值：自动\n- 作用：控制缓存命中后是否立即结束后续执行。\n- 说明：\n  - 设为 `false` 时，即使 cache 已经写入 response，后续执行链仍会继续。\n  - 如需避免后续 `forward` 再次发起查询，应在 `sequence` 中配合 `has_resp`、`accept` 等控制流使用。",
+     cache_negative:
+@@ -297,7 +297,7 @@ export const pluginFieldDocs = {
+     retention_days:
+       "- 类型：`integer`；必填：否；默认值：`7`\n- 最小值：`1`\n- 作用：定义日志保留天数；过期数据会被定时实际删除。",
+     cleanup_interval_hours:
+-      "- 类型：`integer`；必填：否；默认值：`1`\n- 最小值：`1`\n- 作用：定义过期清理任务的执行周期。",
++      "- 类型：`integer`；必填：否；默认值：`1`\n- 最小值：`1`\n- 作用：定义两次自动清理之间的最短间隔。",
+   },
+   metrics_collector: {
+     name: '- 类型：`string`；必填：否；默认值：`"default"`\n- 作用：定义当前指标收集器的名称标签。',
+diff --git a/webui/lib/plugin-definitions/executor.ts b/webui/lib/plugin-definitions/executor.ts
+index e6b7ccf3307aacc2dcf2fb6cb5874cc86e97adf0..57cd94b3c27f5ad8f2cafaa34978f947df74c14d 100644
+--- a/webui/lib/plugin-definitions/executor.ts
++++ b/webui/lib/plugin-definitions/executor.ts
+@@ -429,8 +429,8 @@ export const executorPluginDefinitions: PluginKindDefinition[] = [
+       },
+       {
+         key: "dump_interval",
+-        description: "定义缓存定期落盘周期。",
+-        label: "落盘周期(秒)",
++        description: "定义缓存更新次数达到落盘阈值后的批处理等待时间。",
++        label: "落盘批处理延迟(秒)",
+         type: "number",
+         default: 600,
+         advanced: true,
+@@ -1448,8 +1448,8 @@ export const executorPluginDefinitions: PluginKindDefinition[] = [
+       },
+       {
+         key: "cleanup_interval_hours",
+-        description: "定义过期清理任务的执行周期。",
+-        label: "清理周期(小时)",
++        description: "定义两次自动清理之间的最短间隔。",
++        label: "最短清理间隔(小时)",
+         type: "number",
+         default: 1,
+         advanced: true,
+diff --git a/src/infra/deadline_alarm.rs b/src/infra/deadline_alarm.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bd375777eeb7c14e7b7b031804a28d00ca3357a0
+--- /dev/null
++++ b/src/infra/deadline_alarm.rs
+@@ -0,0 +1,63 @@
++// SPDX-FileCopyrightText: 2026 OxiDNS contributors
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::time::Duration;
++
++use tokio::sync::Notify;
++
++use crate::infra::clock::AppClock;
++
++pub(crate) const NO_DEADLINE: u64 = u64::MAX;
++
++/// A single consumer waits for the earliest deadline posted by producers.
++#[derive(Debug)]
++pub(crate) struct DeadlineAlarm {
++    deadline_ms: AtomicU64,
++    changed: Notify,
++}
++
++impl DeadlineAlarm {
++    pub(crate) fn new() -> Self {
++        Self {
++            deadline_ms: AtomicU64::new(NO_DEADLINE),
++            changed: Notify::new(),
++        }
++    }
++
++    pub(crate) fn schedule(&self, deadline_ms: u64) {
++        if self.deadline_ms.fetch_min(deadline_ms, Ordering::AcqRel) > deadline_ms {
++            self.changed.notify_one();
++        }
++    }
++
++    pub(crate) async fn wait(&self) {
++        loop {
++            let deadline_ms = self.deadline_ms.load(Ordering::Acquire);
++            if deadline_ms == NO_DEADLINE {
++                self.changed.notified().await;
++                continue;
++            }
++
++            let remaining = deadline_ms.saturating_sub(AppClock::elapsed_millis());
++            tokio::select! {
++                biased;
++                _ = self.changed.notified() => continue,
++                _ = tokio::time::sleep(Duration::from_millis(remaining)) => {}
++            }
++            // A producer may have advanced the deadline as the timer fired.
++            if self
++                .deadline_ms
++                .compare_exchange(
++                    deadline_ms,
++                    NO_DEADLINE,
++                    Ordering::AcqRel,
++                    Ordering::Acquire,
++                )
++                .is_ok()
++            {
++                return;
++            }
++        }
++    }
++}
+diff --git a/src/plugin/matcher/adguard_dns.rs b/src/plugin/matcher/adguard_dns.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f67dc90236ed0ae625eee26402c5f1550e167fa3
+--- /dev/null
++++ b/src/plugin/matcher/adguard_dns.rs
+@@ -0,0 +1,166 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++//! DNS filtering using separate AdGuard Home-style allow and block lists.
++
++use std::sync::Arc;
++
++use async_trait::async_trait;
++use serde::Deserialize;
++
++use crate::config::types::PluginConfig;
++use crate::core::context::DnsContext;
++use crate::infra::error::{DnsError, Result as DnsResult};
++use crate::plugin::dependency::DependencySpec;
++use crate::plugin::matcher::Matcher;
++use crate::plugin::provider::Provider;
++use crate::plugin::provider::adguard_rule::{AdGuardRule, RuleAction};
++use crate::plugin::{Plugin, PluginFactory, PluginInitContext, UninitializedPlugin};
++use crate::plugin_factory;
++use crate::proto::rdata::SvcParamValue;
++use crate::proto::{Name, RData, RecordType};
++
++#[derive(Clone, Copy, Debug, Deserialize)]
++#[serde(rename_all = "snake_case")]
++enum Stage {
++    QueryAllowed,
++    QueryBlocked,
++    ResponseBlocked,
++}
++
++#[derive(Debug, Deserialize)]
++struct Config {
++    stage: Stage,
++    rules: String,
++    allowlist: String,
++}
++
++impl Config {
++    fn parse(plugin: &PluginConfig) -> DnsResult<Self> {
++        let args = plugin
++            .args
++            .clone()
++            .ok_or_else(|| DnsError::plugin("adguard_dns requires args"))?;
++        serde_yaml_ng::from_value(args)
++            .map_err(|err| DnsError::plugin(format!("invalid adguard_dns args: {err}")))
++    }
++}
++
++#[derive(Debug, Clone)]
++#[plugin_factory("adguard_dns")]
++pub struct AdGuardDnsFactory;
++
++impl PluginFactory for AdGuardDnsFactory {
++    fn get_dependency_specs(&self, plugin: &PluginConfig) -> Vec<DependencySpec> {
++        Config::parse(plugin).map_or_else(
++            |_| Vec::new(),
++            |config| {
++                vec![
++                    DependencySpec::provider_type("args.rules", config.rules, "adguard_rule"),
++                    DependencySpec::provider_type(
++                        "args.allowlist",
++                        config.allowlist,
++                        "adguard_rule",
++                    ),
++                ]
++            },
++        )
++    }
++
++    fn create(
++        &self,
++        plugin: &PluginConfig,
++        _context: &PluginInitContext<'_>,
++    ) -> DnsResult<UninitializedPlugin> {
++        let config = Config::parse(plugin)?;
++        Ok(UninitializedPlugin::Matcher(Box::new(AdGuardDns {
++            tag: plugin.tag.clone(),
++            config,
++            providers: None,
++        })))
++    }
++}
++
++#[derive(Debug)]
++struct AdGuardDns {
++    tag: String,
++    config: Config,
++    providers: Option<(Arc<dyn Provider>, Arc<dyn Provider>)>,
++}
++
++#[async_trait]
++impl Plugin for AdGuardDns {
++    fn tag(&self) -> &str {
++        &self.tag
++    }
++
++    async fn init(&mut self, context: &PluginInitContext<'_>) -> DnsResult<()> {
++        let rules = context.provider_of_type("args.rules", &self.config.rules, "adguard_rule")?;
++        let allowlist =
++            context.provider_of_type("args.allowlist", &self.config.allowlist, "adguard_rule")?;
++        self.providers = Some((rules, allowlist));
++        Ok(())
++    }
++
++    async fn destroy(&self) -> DnsResult<()> {
++        Ok(())
++    }
++}
++
++impl Matcher for AdGuardDns {
++    fn is_match(&self, context: &mut DnsContext) -> bool {
++        let Some((rules, allowlist)) = &self.providers else {
++            return false;
++        };
++        let rules = rules
++            .as_any()
++            .downcast_ref::<AdGuardRule>()
++            .expect("validated AdGuard provider");
++        let allowlist = allowlist
++            .as_any()
++            .downcast_ref::<AdGuardRule>()
++            .expect("validated AdGuard provider");
++        let action = |name: &Name, qtype| {
++            if allowlist.action(name, qtype).is_some() {
++                Some(RuleAction::Allow)
++            } else {
++                rules.action(name, qtype)
++            }
++        };
++        let query_action = || {
++            context
++                .request()
++                .questions()
++                .first()
++                .and_then(|question| action(question.name(), question.qtype()))
++        };
++        match self.config.stage {
++            Stage::QueryAllowed => query_action() == Some(RuleAction::Allow),
++            Stage::QueryBlocked => query_action() == Some(RuleAction::Block),
++            Stage::ResponseBlocked => {
++                let blocked = |name: &Name, qtype| action(name, qtype) == Some(RuleAction::Block);
++                let blocked_ip = |ip: std::net::IpAddr, qtype| {
++                    Name::from_ascii(&ip.to_string()).is_ok_and(|name| blocked(&name, qtype))
++                };
++                context.response().is_some_and(|response| {
++                    response.answers().iter().any(|answer| match answer.data() {
++                        RData::CNAME(alias) => blocked(&alias.0, RecordType::CNAME),
++                        RData::A(ip) => blocked_ip(ip.0.into(), RecordType::A),
++                        RData::AAAA(ip) => blocked_ip(ip.0.into(), RecordType::AAAA),
++                        RData::HTTPS(https) => {
++                            https.0.params().iter().any(|param| match param.parsed() {
++                                SvcParamValue::Ipv4Hint(ips) => ips
++                                    .iter()
++                                    .any(|ip| blocked_ip((*ip).into(), RecordType::HTTPS)),
++                                SvcParamValue::Ipv6Hint(ips) => ips
++                                    .iter()
++                                    .any(|ip| blocked_ip((*ip).into(), RecordType::HTTPS)),
++                                _ => false,
++                            })
++                        }
++                        _ => false,
++                    })
++                })
++            }
++        }
++    }
++}

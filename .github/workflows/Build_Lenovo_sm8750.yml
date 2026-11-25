@@ -16,6 +16,14 @@ on:
           - '6.6.118'
         default: '6.6.89'
 
+      efficiency_profile:
+        description: "OPD2413 6.6.89 efficiency profile"
+        type: choice
+        default: 'off'
+        options:
+          - 'off'
+          - crystal-lz4kds-le9uo-idle
+
       zram_patch:
         description: "ZRAM 补丁：LZ4=1.10.0 + ZSTD=1.5.7；LZ4KD；DISABLE=不打补丁"
         required: true
@@ -87,6 +95,46 @@ on:
       
        
 jobs:
+  honk:
+    name: Build Honk Android ARM64
+    if: ${{ inputs.efficiency_profile == 'crystal-lz4kds-le9uo-idle' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Apply Honk patches and build
+        run: bash ci/ace6-android/build.sh honk
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: Honk-Android-arm64
+          path: ${{ runner.temp }}/ace6-android/honk.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+
+  oxidns:
+    name: Build OxiDNS Android ARM64
+    if: ${{ inputs.efficiency_profile == 'crystal-lz4kds-le9uo-idle' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Apply OxiDNS patches and build
+        run: bash ci/ace6-android/build.sh oxidns
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: OxiDNS-Android-arm64
+          path: ${{ runner.temp }}/ace6-android/oxidns.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+
   build:
     name: Build_${{ github.event.inputs.kernel_version }}
     runs-on: ubuntu-24.04
@@ -94,6 +142,7 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       KERNEL_VERSION: ${{ github.event.inputs.kernel_version }}
       ZRAM_PATCH: ${{ github.event.inputs.zram_patch || 'LZ4' }}
+      EFFICIENCY_PROFILE: ${{ inputs.efficiency_profile || 'off' }}
       CUSTOM_KERNEL_SUFFIX: ${{ github.event.inputs.custom_kernel_suffix }}
       CUSTOM_KERNEL_TIME: ${{ github.event.inputs.custom_kernel_time }}
       ENABLE_REKERNEL: ${{ github.event.inputs.enable_ReKernel }}
@@ -110,6 +159,13 @@ jobs:
           fetch-depth: 0
       - name: ⚙️ Set Kernel version config(设置对应内核版本配置文件)
         run: |
+          if [ "$EFFICIENCY_PROFILE" != off ]; then
+            if [ "$KERNEL_VERSION:$ZRAM_PATCH:$ENABLE_REKERNEL" != 6.6.89:LZ4KD:true ] ||
+               [ '${{ inputs.enable_fuse_bpf_revalidate }}' != true ]; then
+              echo "::error::OPD2413 efficiency requires 6.6.89, ZRAM LZ4KD, Re-Kernel and FUSE revalidation"
+              exit 1
+            fi
+          fi
           case "$ZRAM_PATCH" in
             LZ4|LZ4KD|DISABLE)
               echo "ZRAM patch selection: $ZRAM_PATCH"
@@ -201,6 +257,8 @@ jobs:
           rm -f ./ccache &
           echo "正在克隆源码仓库..."
           aria2c -s16 -x16 -k1M "https://github.com/showdo/Build_Lenovo_sm8750/releases/download/common/${{ env.os_patch_level }}.tar.gz" -o common.tar.gz && \
+          { [ "$EFFICIENCY_PROFILE" = off ] || printf '%s  %s\n' \
+            'ac27c6a2a4aaf368e2f2a754d121256548ed4f17ca8ae44a0a0f5c60e19c776f' common.tar.gz | sha256sum --check; } && \
           mkdir -p common && \
           tar -xzf common.tar.gz -C common && \
           rm -f common.tar.gz &
@@ -239,6 +297,9 @@ jobs:
           fi
           if [ "${{ env.ENABLE_NTSYNC }}" = "true" ]; then
             CACHE_VARIANT="${CACHE_VARIANT}-ntsync"
+          fi
+          if [ "$EFFICIENCY_PROFILE" != off ]; then
+            CACHE_VARIANT="$CACHE_VARIANT-opd2413-efficiency"
           fi
           echo "CACHE_VARIANT=$CACHE_VARIANT" >> $GITHUB_ENV
           echo "当前构建内核：${{ env.KERNEL_VERSION }}，缓存变体：${CACHE_VARIANT:-(无)}"
@@ -399,7 +460,7 @@ jobs:
           fi
 
       - name: 🔧 Add Re-Kernel Support (添加 Re-Kernel 支持)
-        if: ${{ env.ENABLE_REKERNEL == 'true' }}
+        if: ${{ env.EFFICIENCY_PROFILE == 'off' && env.ENABLE_REKERNEL == 'true' }}
         run: |
             cd kernel_workspace
             VERSION=$(awk -F'=' '/^VERSION[ \t]*=/ {gsub(/ /,"",$2); print $2}' common/Makefile)
@@ -456,7 +517,7 @@ jobs:
           echo "✓ ADIOS I/O 调度器支持配置完成"
           
       - name: ⚙️ apply lz4 lz4 1.10.0 & zstd 1.5.7 Patch (应用lz4 1.10.0 & zstd 1.5.7补丁)
-        if: ${{ env.ZRAM_PATCH == 'LZ4' }}
+        if: ${{ env.EFFICIENCY_PROFILE == 'off' && env.ZRAM_PATCH == 'LZ4' }}
         run: |
           echo "正在添加lz4 1.10.0 & zstd 1.5.7补丁…"
           cd kernel_workspace
@@ -469,7 +530,7 @@ jobs:
           patch -p1 < 002-zstd.patch || true
 
       - name: 🔧 Apply LZ4KD ZRAM patches (添加 LZ4KD 压缩支持)
-        if: ${{ env.ZRAM_PATCH == 'LZ4KD' }}
+        if: ${{ env.EFFICIENCY_PROFILE == 'off' && env.ZRAM_PATCH == 'LZ4KD' }}
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
@@ -816,6 +877,17 @@ jobs:
           sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" ./common/arch/arm64/configs/gki_defconfig
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
 
+      - name: Apply OPD2413 efficiency profile
+        if: ${{ env.EFFICIENCY_PROFILE != 'off' }}
+        run: |
+          set -euo pipefail
+          kernel=kernel_workspace/common
+          report=kernel_workspace/preflash/efficiency
+          python3 efficiency/apply_profile.py apply --kernel "$kernel" --report "$report" --profile "$EFFICIENCY_PROFILE"
+          python3 efficiency/apply_profile.py configure --kernel "$kernel" --profile "$EFFICIENCY_PROFILE"
+          python3 efficiency/thread_affinity/install_builtin.py --kernel "$kernel"
+          python3 efficiency/xcy-reclaim/install_builtin.py --kernel "$kernel" --report "$report/xcy-reclaim-source.json"
+
       - name: 📥 Start build timer (构建计时开始)
         run: 
           echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
@@ -903,7 +975,13 @@ jobs:
             fi
           fi
 
-          if [ "$ZRAM_PATCH" = 'LZ4KD' ]; then
+          if [ "$EFFICIENCY_PROFILE" != off ]; then
+            mkdir -p ../preflash/efficiency
+            cp out/.config ../preflash/efficiency/resolved.config
+            python3 "$WORKDIR/efficiency/apply_profile.py" verify --kernel . \
+              --report ../preflash/efficiency/config-verification.json --profile "$EFFICIENCY_PROFILE"
+            grep -qx 'CONFIG_XCY_RECLAIM=y' out/.config
+          elif [ "$ZRAM_PATCH" = 'LZ4KD' ]; then
             for symbol in ZRAM ZSMALLOC CRYPTO_LZ4K CRYPTO_LZ4KD CRYPTO_LZ4K_OPLUS CRYPTO_DEFLATE ZRAM_DEF_COMP_LZ4KD; do
               if ! grep -qx "CONFIG_${symbol}=y" out/.config; then
                 echo "::error::LZ4KD configuration did not resolve to CONFIG_${symbol}=y"
@@ -939,6 +1017,24 @@ jobs:
           fi
 
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image 2>&1 | tee build.log
+
+          if [ "$EFFICIENCY_PROFILE" != off ]; then
+            report=../preflash/efficiency
+            symvers=out/vmlinux.symvers
+            if [ ! -s "$symvers" ]; then
+              symvers=out/Module.symvers
+            fi
+            test -s "$symvers"
+            cp "$symvers" "$report/Module.symvers"
+            cp out/System.map "$report/System.map"
+            "$CLANG_DIR/llvm-objcopy" --dump-section .BTF="$report/kernel.btf" out/vmlinux
+            python3 "$WORKDIR/efficiency/verify_opd2413_kmi.py" --symvers "$symvers" \
+              --btf "$report/kernel.btf" --report "$report/kmi-verification.json"
+            for init in xcy_reclaim_init7 affinity_init6 start_rekernel7; do
+              grep -E "[[:space:]]__initcall__.*_$init$" out/System.map
+            done | tee "$report/builtin-initcalls.txt"
+            test "$(wc -l < "$report/builtin-initcalls.txt")" -eq 3
+          fi
 
           BUILT_KSU_VERSION="$(grep -oE '(BakaSU|ReSukiSU) version code: [0-9]+' build.log | awk '{print $NF}' | tail -n 1 || true)"
           if [ -z "$BUILT_KSU_VERSION" ]; then
@@ -1138,7 +1234,7 @@ jobs:
 
   upload_rekernel:
     name: Upload Re-Kernel Module
-    if: ${{ github.event.inputs.enable_ReKernel == 'true' }}
+    if: ${{ github.event.inputs.enable_ReKernel == 'true' && (inputs.efficiency_profile == 'off' || inputs.efficiency_profile == '') }}
     needs: build
     runs-on: ubuntu-24.04
     steps:

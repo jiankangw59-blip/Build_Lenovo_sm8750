@@ -1,0 +1,30 @@
+{
+  "repository": "Sakion-Team/Re-Kernel",
+  "commit": "ac08296174d7fb2801c0eee1084f067a34f8a0fe",
+  "files": {
+    "Kconfig": "19d6d93501c5113e5ce117ce42d4bdf83167b71ac3675f1fd1558df1682d10d2",
+    "Makefile": "9427146cc6de0b1fdf5a5a124ded215a37fa6da73492b38bd3370c3d71c19f86",
+    "README.md": "b5830dc55c9f8919a36e3f1b5509b5ad8b2d047b2b7e5c700905d53ff39bce15",
+    "rekernel.h": "7e6a1c4fcec67c2736f790e4c7287dd70a779285d9600f49ad07829c218068b3",
+    "rekernel_binder.c": "a93976c640813db16be9c61eccc6275df6a98e87e28cb9f0a0fa733c43840179",
+    "rekernel_internal.h": "a50333c4e832150fb62b65fdc3bbafdda1639c58b3b203af55539df8b7e79bb9",
+    "rekernel_main.c": "cdc220e93d1c7a0adfdf1d9a8e5e79b95a2c018ac372a61adad412ee70ad3ce0",
+    "rekernel_netfilter.c": "0dc12c0b7f6bd6302f3234e1b3a8bc8b1fa7aa8665526795823f2d99c2af3a40",
+    "rekernel_netlink.c": "85634489e0c5b28722f0b215e8dea4ece562d518b73939c6fdee37a832244663",
+    "rekernel_signal.c": "5ae6296753bebdd5dd04dc2b1ae24d6d8dd868e8756c217ebc6c853c98bc0ff8"
+  },
+  "builtin_adaptation": {
+    "repository": "jiankangw59-blip/Build_Oneplus_Realme_Action",
+    "branch": "codex/rekernel-builtin",
+    "commit": "0e47686327464c7612f34b5feee5119793635ae7",
+    "source_path": "patch/rekernel-builtin.patch",
+    "file": "builtin.patch",
+    "sha256": "f08807fa487e10d85712651d794ffca48803f5fbd4e0f39e6969986498f8d31b",
+    "patched_files": {
+      "Kconfig": "38deaaed8c7c078bff9bef7324e6a089bdb686f89b4383605c331181e238cb3f",
+      "Makefile": "0d73962c762d53cbaca73d22639c228a5e370851a69f811eb7ce620bc9cb91f9",
+      "rekernel_binder.c": "ba7271f1564cfd381a8a4b7a5b7b6b83856023548aaca55b01f2109350aa113a",
+      "rekernel_main.c": "98f93300ffcff80155871e141ee0b223d5a03be3ff4e855a827bc598e101a282"
+    }
+  }
+}

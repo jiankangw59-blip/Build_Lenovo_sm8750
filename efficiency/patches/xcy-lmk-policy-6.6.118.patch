@@ -1,0 +1,330 @@
+diff --git a/include/uapi/linux/xcy_lmk.h b/include/uapi/linux/xcy_lmk.h
+new file mode 100644
+index 0000000..0d3c2d6
+--- /dev/null
++++ b/include/uapi/linux/xcy_lmk.h
+@@ -0,0 +1,48 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++#ifndef _UAPI_LINUX_XCY_LMK_H
++#define _UAPI_LINUX_XCY_LMK_H
++
++#include <linux/ioctl.h>
++#include <linux/types.h>
++
++#define XCY_LMK_ABI_VERSION 1
++#define XCY_LMK_MAX_ENTRIES 512
++#define XCY_LMK_NO_SELECTION ((__u32)~0U)
++
++#define XCY_LMK_RANK_URGENT (1U << 0)
++#define XCY_LMK_CANDIDATE_ELIGIBLE (1U << 0)
++#define XCY_LMK_CANDIDATE_RECENT (1U << 1)
++
++struct xcy_lmk_batch {
++	__aligned_u64 entries;
++	__u32 version;
++	__u32 count;
++	__u32 flags;
++	__u32 selected;
++};
++
++/* Eligibility and PSS are supplied after the Android-level policy checks. */
++struct xcy_lmk_candidate {
++	__aligned_u64 background_age_ms;
++	__u32 pss_kib;
++	__u32 flags;
++};
++
++/* pid, uid and start_ticks identify a process. The rest is output.
++ * start_ticks is the Linux /proc/PID/stat field 22 in the caller's time namespace.
++ * RSS and swap are separate kernel counters and are not PSS.
++ */
++struct xcy_lmk_task {
++	__u32 pid;
++	__u32 uid;
++	__aligned_u64 start_ticks;
++	__aligned_u64 rss_kib;
++	__aligned_u64 swap_kib;
++	__s32 oom_score_adj;
++	__s32 status;
++};
++
++#define XCY_LMK_READ_TASKS _IOWR('X', 0x80, struct xcy_lmk_batch)
++#define XCY_LMK_RANK _IOWR('X', 0x81, struct xcy_lmk_batch)
++
++#endif
+diff --git a/mm/Kconfig b/mm/Kconfig
+index 8080830..96839d1 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -1361,6 +1361,16 @@ config MEMFD_ASHMEM_SHIM
+ 
+ 	  Unless you are running Android, say N.
+ 
++config XCY_LMK_POLICY
++	bool "XiaoCaiYe low-memory candidate policy"
++	depends on MMU
++	help
++	  Expose an on-demand interface for selecting a low-memory candidate
++	  from Android-verified input and reading batched process counters.
++	  This interface does not issue signals or run a background worker.
++	  Android-side policy remains responsible for foreground, playback
++	  and package allowlist checks before acting on the selected index.
++
+ source "mm/damon/Kconfig"
+ 
+ endmenu
+diff --git a/mm/Makefile b/mm/Makefile
+index 29037c2..7a79ab1 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -146,3 +146,4 @@ obj-$(CONFIG_IO_MAPPING) += io-mapping.o
+ obj-$(CONFIG_HAVE_BOOTMEM_INFO_NODE) += bootmem_info.o
+ obj-$(CONFIG_GENERIC_IOREMAP) += ioremap.o
+ obj-$(CONFIG_SHRINKER_DEBUG) += shrinker_debug.o
++obj-$(CONFIG_XCY_LMK_POLICY) += xcy_lmk.o
+diff --git a/mm/xcy_lmk.c b/mm/xcy_lmk.c
+new file mode 100644
+index 0000000..df821cc
+--- /dev/null
++++ b/mm/xcy_lmk.c
+@@ -0,0 +1,137 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/capability.h>
++#include <linux/compat.h>
++#include <linux/cred.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/jiffies.h>
++#include <linux/miscdevice.h>
++#include <linux/mm.h>
++#include <linux/pid.h>
++#include <linux/sched/signal.h>
++#include <linux/sched/task.h>
++#include <linux/slab.h>
++#include <linux/time_namespace.h>
++#include <linux/uaccess.h>
++
++#include "xcy_lmk_policy.h"
++
++static void xcy_lmk_read_task(struct xcy_lmk_task *entry)
++{
++	struct task_struct *task;
++	struct mm_struct *mm;
++	struct pid *pid;
++
++	entry->rss_kib = 0;
++	entry->swap_kib = 0;
++	entry->oom_score_adj = 0;
++	entry->status = -EINVAL;
++	if (entry->pid <= 1 || entry->pid > INT_MAX || !entry->start_ticks)
++		return;
++
++	entry->status = -ESRCH;
++	pid = find_get_pid(entry->pid);
++	task = get_pid_task(pid, PIDTYPE_TGID);
++	put_pid(pid);
++	if (!task)
++		return;
++	if (__kuid_val(task_uid(task)) != entry->uid ||
++	    nsec_to_clock_t(timens_add_boottime_ns(task->start_boottime)) !=
++	    entry->start_ticks) {
++		entry->status = -ESTALE;
++		goto out;
++	}
++
++	task_lock(task);
++	mm = task->mm;
++	if (mm && !(READ_ONCE(task->flags) & PF_EXITING) &&
++	    __kuid_val(task_uid(task)) == entry->uid) {
++		entry->rss_kib = (__u64)get_mm_rss(mm) << (PAGE_SHIFT - 10);
++		entry->swap_kib = (__u64)get_mm_counter(mm, MM_SWAPENTS) <<
++				 (PAGE_SHIFT - 10);
++		entry->oom_score_adj = READ_ONCE(task->signal->oom_score_adj);
++		entry->status = 0;
++	}
++	task_unlock(task);
++out:
++	put_task_struct(task);
++}
++
++static long xcy_lmk_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++	struct xcy_lmk_batch batch;
++	void __user *request = (void __user *)arg;
++	void __user *entries;
++	void *data;
++	size_t size;
++	__u32 i;
++	long error = 0;
++
++	if (cmd != XCY_LMK_READ_TASKS && cmd != XCY_LMK_RANK)
++		return -ENOTTY;
++	if (!capable(CAP_SYS_ADMIN))
++		return -EPERM;
++	if (copy_from_user(&batch, request, sizeof(batch)))
++		return -EFAULT;
++	if (batch.version != XCY_LMK_ABI_VERSION || !batch.count ||
++	    batch.count > XCY_LMK_MAX_ENTRIES ||
++	    batch.flags & ~(cmd == XCY_LMK_RANK ? XCY_LMK_RANK_URGENT : 0U))
++		return -EINVAL;
++
++	entries = u64_to_user_ptr(batch.entries);
++	size = batch.count * (cmd == XCY_LMK_RANK ?
++			      sizeof(struct xcy_lmk_candidate) : sizeof(struct xcy_lmk_task));
++	data = memdup_user(entries, size);
++	if (IS_ERR(data))
++		return PTR_ERR(data);
++
++	batch.selected = XCY_LMK_NO_SELECTION;
++	if (cmd == XCY_LMK_RANK) {
++		struct xcy_lmk_candidate *items = data;
++
++		for (i = 0; i < batch.count; i++) {
++			if (items[i].flags & ~(XCY_LMK_CANDIDATE_ELIGIBLE |
++					      XCY_LMK_CANDIDATE_RECENT)) {
++				error = -EINVAL;
++				goto out;
++			}
++		}
++		batch.selected = xcy_lmk_pick(items, batch.count,
++					     batch.flags & XCY_LMK_RANK_URGENT);
++	} else {
++		struct xcy_lmk_task *items = data;
++
++		for (i = 0; i < batch.count; i++)
++			xcy_lmk_read_task(&items[i]);
++		if (copy_to_user(entries, items, size)) {
++			error = -EFAULT;
++			goto out;
++		}
++	}
++	if (copy_to_user(request, &batch, sizeof(batch)))
++		error = -EFAULT;
++out:
++	kfree(data);
++	return error;
++}
++
++static const struct file_operations xcy_lmk_fops = {
++	.unlocked_ioctl = xcy_lmk_ioctl,
++#ifdef CONFIG_COMPAT
++	.compat_ioctl = compat_ptr_ioctl,
++#endif
++	.llseek = no_llseek,
++};
++
++static struct miscdevice xcy_lmk_device = {
++	.minor = MISC_DYNAMIC_MINOR,
++	.name = "xcy_lmk",
++	.fops = &xcy_lmk_fops,
++	.mode = 0600,
++};
++
++static int __init xcy_lmk_init(void)
++{
++	return misc_register(&xcy_lmk_device);
++}
++device_initcall(xcy_lmk_init);
+diff --git a/mm/xcy_lmk_policy.h b/mm/xcy_lmk_policy.h
+new file mode 100644
+index 0000000..d66072b
+--- /dev/null
++++ b/mm/xcy_lmk_policy.h
+@@ -0,0 +1,97 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _XCY_LMK_POLICY_H
++#define _XCY_LMK_POLICY_H
++
++#ifdef __KERNEL__
++#include <linux/math64.h>
++#include <uapi/linux/xcy_lmk.h>
++#else
++#include <linux/xcy_lmk.h>
++#endif
++
++/* The guard's urgent score is PSS * (age + 360000) / (age + 600000).
++ * Use Q12 KiB. A 32-bit PSS multiplied by the largest Q12 penalty
++ * factor fits in 64 bits, including when PSS has its maximum ABI value.
++ */
++static inline __u64 xcy_lmk_urgent_score(const struct xcy_lmk_candidate *item)
++{
++	__u64 score = (__u64)item->pss_kib << 12;
++	__u64 age = item->background_age_ms;
++	__u64 penalty;
++
++	if (age > (~(__u64)0) - 600000)
++		return score;
++#ifdef __KERNEL__
++	penalty = div64_u64(score * 240000, age + 600000);
++#else
++	penalty = score * 240000 / (age + 600000);
++#endif
++	return score - penalty;
++}
++
++static inline __u32 xcy_lmk_pick(const struct xcy_lmk_candidate *items,
++				 __u32 count, int urgent)
++{
++	__u32 maximum_pss = 0, minimum_pss, i;
++	__u32 selected = XCY_LMK_NO_SELECTION;
++	__u64 oldest = 0, maximum_score = 0;
++
++	for (i = 0; i < count; i++)
++		if ((items[i].flags & XCY_LMK_CANDIDATE_ELIGIBLE) &&
++		    items[i].pss_kib > maximum_pss)
++			maximum_pss = items[i].pss_kib;
++	if (!maximum_pss)
++		return selected;
++
++	/* Compute the 60% pool before removing recent candidates. */
++	minimum_pss = (maximum_pss / 5) * 3 + ((maximum_pss % 5) * 3 + 4) / 5;
++	for (i = 0; i < count; i++) {
++		const struct xcy_lmk_candidate *item = &items[i];
++
++		if (!(item->flags & XCY_LMK_CANDIDATE_ELIGIBLE) ||
++		    item->pss_kib < minimum_pss)
++			continue;
++		if (urgent) {
++			__u64 score = xcy_lmk_urgent_score(item);
++
++			if (score > maximum_score)
++				maximum_score = score;
++		} else if (!(item->flags & XCY_LMK_CANDIDATE_RECENT) &&
++			   item->background_age_ms > oldest) {
++			oldest = item->background_age_ms;
++		}
++	}
++
++	for (i = 0; i < count; i++) {
++		const struct xcy_lmk_candidate *item = &items[i], *best;
++
++		if (!(item->flags & XCY_LMK_CANDIDATE_ELIGIBLE) ||
++		    item->pss_kib < minimum_pss)
++			continue;
++		if (urgent) {
++			if (xcy_lmk_urgent_score(item) * 10 < maximum_score * 9)
++				continue;
++		} else if ((item->flags & XCY_LMK_CANDIDATE_RECENT) ||
++			   oldest - item->background_age_ms > 60000) {
++			continue;
++		}
++		if (selected == XCY_LMK_NO_SELECTION) {
++			selected = i;
++			continue;
++		}
++		best = &items[selected];
++		if (urgent) {
++			if (item->background_age_ms > best->background_age_ms ||
++			    (item->background_age_ms == best->background_age_ms &&
++			     item->pss_kib > best->pss_kib))
++				selected = i;
++		} else if (item->pss_kib > best->pss_kib ||
++			   (item->pss_kib == best->pss_kib &&
++			    item->background_age_ms > best->background_age_ms)) {
++			selected = i;
++		}
++	}
++	return selected;
++}
++
++#endif

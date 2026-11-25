@@ -1,0 +1,6 @@
+id=ace6_kernel_efficiency
+name=Ace 6 Kernel Efficiency Policy
+version=0.1-test
+versionCode=1
+author=Local
+description=One-shot PLQ110 workqueue CPU mask and TCP ECN policy for the matching efficiency kernel.

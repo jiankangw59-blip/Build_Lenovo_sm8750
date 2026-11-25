@@ -1,0 +1,68 @@
+{
+  "base_kernel_version": "6.6.118",
+  "base_commit": "65b954a773b183a9999b06bb1b2f921f12eaaf11",
+  "profile": "crystal-lz4kds-le9uo-idle",
+  "replacement_patches": {
+    "patches/7260c34c80917577aafa552e39add6ade493cedf.patch": {
+      "file": "patches/f2fs-gc-io-idle-6.6.118.patch",
+      "sha256": "3b2f08f37f4b8713f4953aa46a4a40b60d56d8dceab9450e86ab0227854b4578",
+      "adaptation": "Set idle I/O priority using the 6.6.118 F2FS critical_task_priority field."
+    },
+    "patches/e0291b601733f5c4532502fa146aa333b3d5f209.patch": {
+      "file": "patches/f2fs-gc-cpu-idle-6.6.118.patch",
+      "sha256": "c0c7dc81a667aac99fd66a2f97270936d14f76c203a0e466859e41566ef9f16e",
+      "adaptation": "Set SCHED_IDLE at the 6.6.118 F2FS GC thread start."
+    },
+    "patches/2900e738109db0b1c6105eca24daf4d48869a9cb.patch": {
+      "file": "patches/bbrv3-6.6.118.patch",
+      "sha256": "2c753585dc579f07ead676ac8a524a9c5b8f41f6546a742ecd37b0f490a2a801",
+      "adaptation": "Use the original 6.6.118 BBRv3 port from the reviewed series."
+    },
+    "patches/le9uo-6.6.89.patch": {
+      "file": "patches/le9uo-6.6.118.patch",
+      "sha256": "82a15227cce322aff128fe043923ee5f0b74cdf71e8e0fd8a18e8fb8591b1db3",
+      "adaptation": "Preserve proactive_swappiness and all OEM fields; use only the 6.6.118 padding byte after reclaim_idx."
+    },
+    "patches/cpuidle-refinement-6.6.89.patch": {
+      "file": "patches/cpuidle-refinement-6.6.118.patch",
+      "sha256": "bfa706ed1c0751b60a0df8fe7fb9497eae3d6879426797f54427014395d4221e",
+      "adaptation": "Same stopped-tick timer selection and TEO deadline clamp, using the 6.6.118 Menu layout."
+    }
+  },
+  "cpuidle_refinement": {
+    "base_source_commit": "65b954a773b183a9999b06bb1b2f921f12eaaf11",
+    "base_profile": "crystal-lz4kds-le9uo",
+    "base_patch_count": 21,
+    "patch_file": "patches/cpuidle-refinement-6.6.118.patch",
+    "patch_sha256": "bfa706ed1c0751b60a0df8fe7fb9497eae3d6879426797f54427014395d4221e",
+    "files": {
+      "drivers/cpuidle/governors/menu.c": {
+        "before_sha256": "b7347146da884bd5b6fadf1c917ba4af3c2587f9419ae7ea5c4ba2aedef74e9e",
+        "after_sha256": "80db9153cf2c766e8e8110f2a2304f2f59fe2619ee23b2bde5b93119966fffc0"
+      },
+      "drivers/cpuidle/governors/teo.c": {
+        "before_sha256": "ae8a4e511db0ef6957bd068a341c90385270ae36551fbb9390514872685cb75f",
+        "after_sha256": "4a36b274c30fdc63dffd911001b21c2cdd14082b589da2520ab3a0142bf6ec43"
+      }
+    },
+    "required_unchanged_files": {
+      "drivers/cpuidle/governors/gov.h": "4adc865ad8f63dfd48130d823867c5296e71916973135f91c7ecbfaa30e7dc9b"
+    },
+    "upstream_commits": [
+      "80606f4eb8d7484ab7f7d6f0fd30d71e6fbcf328",
+      "e57c2bf2e89df3b176ab579abfd3ed54fd27034c",
+      "106a2662e655363db0dd73d9a91e1ec9afe9f4b1"
+    ],
+    "global_kmi_layout_changed": false,
+    "runtime_governor_changed": false,
+    "fuzz": 0
+  },
+  "additional_patches": [
+    {
+      "commit": "310b5a537a78c358a4cd244bd767c1a517a05459",
+      "file": "patches/psi-cgroup-rtpoll-6.6.152.patch",
+      "sha256": "2baa036c3a4fe095761b8e7e2cd4b4f3bd8acbc5cfb30c93edb75fdaee64c07d",
+      "source": "https://git.kernel.org/stable/c/310b5a537a78c358a4cd244bd767c1a517a05459"
+    }
+  ]
+}

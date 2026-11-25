@@ -1,0 +1,56 @@
+diff --git a/drivers/crystalfrostwork/crystal_hybridswap/zms.c b/drivers/crystalfrostwork/crystal_hybridswap/zms.c
+--- a/drivers/crystalfrostwork/crystal_hybridswap/zms.c
++++ b/drivers/crystalfrostwork/crystal_hybridswap/zms.c
+@@ -451,6 +451,13 @@
+ 	return (unsigned long)percpu_counter_read_positive(&zms->statcounters[id]);
+ }
+ 
++/* External snapshots must include the per-CPU deltas, especially at zero. */
++static unsigned long zms_stat_sum_positive(struct zms *zms,
++					   enum zms_stat_counter_id id)
++{
++	return (unsigned long)percpu_counter_sum_positive(&zms->statcounters[id]);
++}
++
+ static unsigned long zms_dirty_pages(struct zms *zms)
+ {
+ 	return zms_stat_read_positive(zms, ZMS_STAT_DIRTY_PAGES);
+@@ -2164,11 +2171,11 @@
+ 		stats->load_resident_hit_pct =
+ 			div64_u64((u64)stats->load_resident_hits * 100,
+ 				  load_total);
+-	stats->used_blocks = zms_stat_read_positive(zms, ZMS_STAT_USED_BLOCKS);
+-	stats->pending_free = zms_stat_read_positive(zms, ZMS_STAT_PENDING_FREE);
+-	stats->objects = zms_stat_read_positive(zms, ZMS_STAT_OBJECTS);
+-	stats->stored_bytes = zms_stat_read_positive(zms, ZMS_STAT_STORED_BYTES);
+-	stats->packed_bytes = zms_stat_read_positive(zms, ZMS_STAT_PACKED_BYTES);
++	stats->used_blocks = zms_stat_sum_positive(zms, ZMS_STAT_USED_BLOCKS);
++	stats->pending_free = zms_stat_sum_positive(zms, ZMS_STAT_PENDING_FREE);
++	stats->objects = zms_stat_sum_positive(zms, ZMS_STAT_OBJECTS);
++	stats->stored_bytes = zms_stat_sum_positive(zms, ZMS_STAT_STORED_BYTES);
++	stats->packed_bytes = zms_stat_sum_positive(zms, ZMS_STAT_PACKED_BYTES);
+ 	stats->physical_read_pages =
+ 		atomic64_read(&zms->physical_read_pages);
+ 	stats->physical_read_ios = atomic64_read(&zms->physical_read_ios);
+@@ -2182,14 +2189,14 @@
+ 	stats->bd_stat_read_pages = atomic64_read(&zms->bd_stat_read_pages);
+ 	stats->bd_stat_write_pages = atomic64_read(&zms->bd_stat_write_pages);
+ 	stats->partial_blocks =
+-		zms_stat_read_positive(zms, ZMS_STAT_PARTIAL_BLOCKS);
+-	stats->low_blocks = zms_stat_read_positive(zms, ZMS_STAT_LOW_BLOCKS);
+-	stats->mid_blocks = zms_stat_read_positive(zms, ZMS_STAT_MID_BLOCKS);
++		zms_stat_sum_positive(zms, ZMS_STAT_PARTIAL_BLOCKS);
++	stats->low_blocks = zms_stat_sum_positive(zms, ZMS_STAT_LOW_BLOCKS);
++	stats->mid_blocks = zms_stat_sum_positive(zms, ZMS_STAT_MID_BLOCKS);
+ 	stats->almost_full_blocks =
+-		zms_stat_read_positive(zms, ZMS_STAT_ALMOST_FULL_BLOCKS);
+-	stats->full_blocks = zms_stat_read_positive(zms, ZMS_STAT_FULL_BLOCKS);
+-	stats->dirty_blocks = zms_stat_read_positive(zms, ZMS_STAT_DIRTY_BLOCKS);
+-	stats->dirty_pages = zms_stat_read_positive(zms, ZMS_STAT_DIRTY_PAGES);
++		zms_stat_sum_positive(zms, ZMS_STAT_ALMOST_FULL_BLOCKS);
++	stats->full_blocks = zms_stat_sum_positive(zms, ZMS_STAT_FULL_BLOCKS);
++	stats->dirty_blocks = zms_stat_sum_positive(zms, ZMS_STAT_DIRTY_BLOCKS);
++	stats->dirty_pages = zms_stat_sum_positive(zms, ZMS_STAT_DIRTY_PAGES);
+ 	stats->valid_classes = atomic_long_read(&zms->valid_classes);
+ 	if (stats->nr_blocks >= stats->used_blocks)
+ 		stats->free_blocks = stats->nr_blocks - stats->used_blocks;

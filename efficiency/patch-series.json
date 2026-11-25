@@ -1,0 +1,116 @@
+{
+  "base_repo": "OnePlusOSS/android_kernel_common_oneplus_sm8750",
+  "base_commit": "c1802dd6f3343e71c166a3c67c50554c81880b6e",
+  "base_kernel_version": "6.6.89",
+  "patches": [
+    {
+      "commit": "a1f8e41c83f9ce35a9cfe5e91772a57768097c1e",
+      "sha256": "7ddd51d5e11fda93f8fdddd81d1b27d4514881f01ba9654eef02c24ba102c499",
+      "file": "patches/a1f8e41c83f9ce35a9cfe5e91772a57768097c1e.patch",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/a1f8e41c83f9ce35a9cfe5e91772a57768097c1e"
+    },
+    {
+      "commit": "7acde489a4a720eabce912e25c83e078642e1384",
+      "sha256": "0cd8c284ce259ce340e2a2960870f4fff4755615034239369820f84f2f2a1315",
+      "file": "patches/7acde489a4a720eabce912e25c83e078642e1384.patch",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/7acde489a4a720eabce912e25c83e078642e1384"
+    },
+    {
+      "commit": "7260c34c80917577aafa552e39add6ade493cedf",
+      "sha256": "9c5de2af8175ff2126509efc21658681e313ff5ef1775a360d86f43f6da97ec0",
+      "file": "patches/7260c34c80917577aafa552e39add6ade493cedf.patch",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/7260c34c80917577aafa552e39add6ade493cedf",
+      "adaptation": "Place idle I/O priority after successful 6.6.89 GC kthread creation; do not reference the newer critical_task_priority field."
+    },
+    {
+      "commit": "e0291b601733f5c4532502fa146aa333b3d5f209",
+      "sha256": "a554ee57f2a3b0652d8dc9ba2280e79810ef2457772d23780ad8d64bdff7b73a",
+      "file": "patches/e0291b601733f5c4532502fa146aa333b3d5f209.patch",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/e0291b601733f5c4532502fa146aa333b3d5f209",
+      "adaptation": "Set SCHED_IDLE at the native 6.6.89 GC kthread initialization site."
+    },
+    {
+      "commit": "2900e738109db0b1c6105eca24daf4d48869a9cb",
+      "sha256": "f8bcf875f163d96ee6ea60f2c47e66ac79b1e611f0127dfe947dd826856a4588",
+      "file": "patches/2900e738109db0b1c6105eca24daf4d48869a9cb.patch",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/2900e738109db0b1c6105eca24daf4d48869a9cb",
+      "adaptation": "Rebase on official Ace 6 6.6.89; preserve the Android vendor hook adjacent to TLP ACK handling and all existing KMI adaptations."
+    },
+    {
+      "commit": "45952959fc66176254a80bef833a621997deb7e6",
+      "sha256": "42c2ce2b369762358ff1d4c790a3029ac3ed88943cc9ec1284926a8522f5353c",
+      "file": "patches/45952959fc66176254a80bef833a621997deb7e6.patch",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/45952959fc66176254a80bef833a621997deb7e6"
+    },
+    {
+      "commit": "d29ab201ef2620d31faa29ddbf1269c4dfeff738",
+      "sha256": "d1b09200c9f933e82d97c855d13389fcf5233a46781043b20e25e03dae42f846",
+      "file": "patches/d29ab201ef2620d31faa29ddbf1269c4dfeff738.patch",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/d29ab201ef2620d31faa29ddbf1269c4dfeff738"
+    },
+    {
+      "commit": "962787f52a1cacf7e3d3e85d8f8c6fbd1da8fcaa",
+      "sha256": "0dfd26b7e88100afb53adc7116b19fbd7766880b5b745939fe42d6c1f2389546",
+      "file": "patches/962787f52a1cacf7e3d3e85d8f8c6fbd1da8fcaa.patch",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/962787f52a1cacf7e3d3e85d8f8c6fbd1da8fcaa"
+    },
+    {
+      "file": "patches/lz4kd-native-no-blacklist.patch",
+      "sha256": "4d57024660726804f702d2940ec0a151efb46e7e24ceafb85ad2246c54eb0f9c",
+      "source": "https://github.com/luyancib-org/kernel_patches/blob/1434ad8799fe267aeae7d91fb667473d80c8f73d/other/lz4kd.patch",
+      "adaptation": "Remove OEM module blacklist and per-library -O3 override; native ZRAM remains unchanged and uses global -O2."
+    },
+    {
+      "file": "patches/pending-ipi-helper-upstream.patch",
+      "sha256": "9f3df7abb6d0779b5a2ffc107215818f192936372e5d3abd00512a86dcab3207",
+      "source": "https://github.com/torvalds/linux/commit/ccde6525183c5489de293cf91a441585fff3c847"
+    },
+    {
+      "file": "patches/cpuidle-pending-ipi-6.6.patch",
+      "sha256": "04d2fe5528437e7e0c444fb212153c6a9c31acea8e9b66c2a5608ea0e5921421",
+      "source": "https://lore.kernel.org/r/20260403-cpuidle_ipi-v2-1-b3e44b032e2c@oss.qualcomm.com",
+      "adaptation": "Check current CPU after instrumentation_begin and balance instrumentation_end on early return."
+    },
+    {
+      "file": "patches/668d22021ba08b7b49827824f25c64e8ac576d86.patch",
+      "sha256": "9bfa3f334dc0bfd734796e861896c053707e5150ea057f04cd541e1aa60f5702",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/668d22021ba08b7b49827824f25c64e8ac576d86"
+    },
+    {
+      "file": "patches/mglru-dirty-writeback-6.6.patch",
+      "sha256": "db7ccfd63ce6cee1e6a4fae0f33546a36050c98278551e5c534f75c2695c2b18",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/e36ef45be91813f7aca451e4264b7dcf56aabfd2",
+      "adaptation": "Preserve 6.6 private helper flow and Android hooks; pass existing isolated count to the per-batch flusher decision."
+    },
+    {
+      "file": "patches/0e5caf7dd7342831008bfe6bf986a96a2293d6e8.patch",
+      "sha256": "8376a37f240f6a0931492afbae3bd20726577e65d6b810de5fa3029d7a4d13df",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/0e5caf7dd7342831008bfe6bf986a96a2293d6e8"
+    },
+    {
+      "file": "patches/2909366ad1687ab969e821f9e7269d623f884e1a.patch",
+      "sha256": "430f37ea0f99ddd081443032ed6065fcea33c80590a96fb8c9b432fc4059e9a4",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/2909366ad1687ab969e821f9e7269d623f884e1a"
+    },
+    {
+      "file": "patches/10b3484076f4e311d4ae0d0b357d4a56d3735492.patch",
+      "sha256": "2afbce863f303883355ba55a84527f5416c8e62881e818f49dcb260f4cb4159e",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/10b3484076f4e311d4ae0d0b357d4a56d3735492"
+    },
+    {
+      "file": "patches/f995b9736c4c0d0b55ffdc74ef74de2f7ae827c9.patch",
+      "sha256": "5682610696ef5c14761e2f1b4add20ea9544d6581da2ccf9d99b7f7cc108acb0",
+      "source": "https://github.com/Wcoom/oneplus_sm8750_kernel/commit/f995b9736c4c0d0b55ffdc74ef74de2f7ae827c9"
+    },
+    {
+      "file": "patches/low-frequency-power-efficient-queues.patch",
+      "sha256": "ecb34041b8c865b3f1a45633d171634da6df404dc2ad998edcf50efc0daa4aa9",
+      "source": "local audited queue migration; thermal polling is already power-efficient in the official base"
+    },
+    {
+      "file": "patches/block-icq-kmi-6.6.patch",
+      "sha256": "d8fed32249f4573c89561fa97267048b3add90e7ffaad2a95bc3f6c61b19880f",
+      "source": "local compatibility fix: preserve original io_context KMI with BFQ disabled; confirmed from live configuration and LLVM debug metadata"
+    }
+  ]
+}

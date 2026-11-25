@@ -1,0 +1,24 @@
+{
+  "repository": "https://github.com/Wcoom/oneplus_sm8750_kernel",
+  "commit": "13d291aef3d1d9607ad3fa5ff30dc23b2888a3da",
+  "files": {
+    "drivers/crystalfrostwork/crystal_hybridswap/Kconfig": "10dcc4ef9edea1ea56d3944bf5fb664bc918de269322a0f54a4ec05fcda81a07",
+    "drivers/crystalfrostwork/crystal_hybridswap/Makefile": "b825bc6e54867fff9d84ae64e13015ce37e8a233bad91398257638e4f4d69b62",
+    "drivers/crystalfrostwork/crystal_hybridswap/core.c": "f4bad2d9dbab5d834f7c45e3fdd5716d377162a25834210f376c8ad7dc3c018d",
+    "drivers/crystalfrostwork/crystal_hybridswap/crystal_hybridswap_internal.h": "a0dd9b6421467080cf02ae09fb835ae4d664b1d260fbb851b0bd96be61171c69",
+    "drivers/crystalfrostwork/crystal_hybridswap/memcg.c": "8796cb74beced369b497faf66b160fb643fce2e0456df2e597a51fe2ebed6336",
+    "drivers/crystalfrostwork/crystal_hybridswap/param.c": "38f85efb22cde12fa3d117c235202ce76afb5508499261b38ba8f0bc6e366a4c",
+    "drivers/crystalfrostwork/crystal_hybridswap/pressure.c": "e4e8006f1987a05c47bfa93e8606f50d59bc62d63fb4f3898d144e5242c77805",
+    "drivers/crystalfrostwork/crystal_hybridswap/stats.c": "ad2fd1813dbc5652ad5c7b80001df427fdfc8a0c3c0d5b7ff5f32e3cdf5ecfcf",
+    "drivers/crystalfrostwork/crystal_hybridswap/zcomp.c": "95c5a57c47c94bc293c2714ac95aa89b92f9469e0c63adcb883f3139b0db0d4d",
+    "drivers/crystalfrostwork/crystal_hybridswap/zcomp.h": "4e7b3ac255d57c763e52c4713e7d31150c05508359a258239f7d9788a74950fe",
+    "drivers/crystalfrostwork/crystal_hybridswap/zms.c": "e3f6b60165558ac29c591a55bcc3ab21c11ee6162ae0095ebb3d78ecdc7a11a8",
+    "drivers/crystalfrostwork/crystal_hybridswap/zms.h": "1f86113461f73d69444e0e60a77186e1cb97c7b6a606c09166536a53fcfd50f5",
+    "drivers/crystalfrostwork/crystal_hybridswap/zram_bridge.c": "b9a5b9c60a716a17f2ab52e7d8579eb046566749a07f51650d326d744e9ad140",
+    "drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c": "5cb90c2b52919a5b115c5fd32c3fce750ca49b0d1a42f788e692ec62b1e02ea3",
+    "drivers/crystalfrostwork/crystal_hybridswap/zram_drv.h": "917572158f712a1a7c09e756e086fd18137f273429c51f7296209e6d86f0e9db",
+    "drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.h": "f22e978381f9aa0c391229dbfc52753b8dfffa94e71715229b6fa0776d32001e",
+    "include/linux/crystal_hybridswap.h": "ef22f305118dc7e966bc94dd29398bb8410541bb5643ed13a97ca8fae6b03eea",
+    "include/linux/vmscan_balance.h": "8ad431a3b63bcf32984b6901335bb00f249254c4f037ddb00c8c34a17b5dc01c"
+  }
+}
