@@ -245,10 +245,8 @@ static ssize_t xcy_channel_protection(struct xcy_reclaim_channel *channel,
 	frame = vmemdup_user(buffer, length);
 	if (IS_ERR(frame))
 		return PTR_ERR(frame);
-	if ((length >= sizeof(XCY_RECLAIM_SCENE_PREFIX) - 1 &&
-	     !memcmp(frame, XCY_RECLAIM_SCENE_PREFIX, sizeof(XCY_RECLAIM_SCENE_PREFIX) - 1)) ||
-	    (length == sizeof(XCY_RECLAIM_SCENE_LOST) - 1 &&
-	     !memcmp(frame, XCY_RECLAIM_SCENE_LOST, length))) {
+	if (length == sizeof(XCY_RECLAIM_AUDIO_LOST) - 1 &&
+	    !memcmp(frame, XCY_RECLAIM_AUDIO_LOST, length)) {
 		error = channel_ops->publish(NULL, frame, length);
 	} else {
 		mutex_lock(&channel->challenge_lock);
@@ -265,7 +263,7 @@ static ssize_t xcy_channel_write(struct file *file, const char __user *buffer, s
 	struct xcy_reclaim_channel *channel = file->private_data;
 	struct xcy_reclaim_reply challenge;
 	xcy_memory_snapshot_t snapshot = {0};
-	char prefix[sizeof(XCY_RECLAIM_SCENE_LOST) - 1];
+	char prefix[sizeof(XCY_RECLAIM_AUDIO_LOST) - 1];
 	int error;
 
 	if (!xcy_is_owner(channel->root_publisher, channel->publisher_secid))
@@ -273,8 +271,8 @@ static ssize_t xcy_channel_write(struct file *file, const char __user *buffer, s
 	if (length >= sizeof(prefix)) {
 		if (copy_from_user(prefix, buffer, sizeof(prefix)))
 			return -EFAULT;
-		if (!memcmp(prefix, XCY_RECLAIM_STATE_PREFIX, sizeof(XCY_RECLAIM_STATE_PREFIX) - 1) ||
-		    !memcmp(prefix, XCY_RECLAIM_SCENE_LOST, sizeof(prefix)))
+		if (!memcmp(prefix, XCY_RECLAIM_AUDIO_PREFIX, sizeof(XCY_RECLAIM_AUDIO_PREFIX) - 1) ||
+		    !memcmp(prefix, XCY_RECLAIM_AUDIO_LOST, sizeof(prefix)))
 			return xcy_channel_protection(channel, buffer, length);
 	}
 	if (mutex_lock_interruptible(&channel->reply_lock))

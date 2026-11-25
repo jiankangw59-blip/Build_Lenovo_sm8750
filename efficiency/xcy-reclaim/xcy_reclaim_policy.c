@@ -3,6 +3,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/fs_struct.h>
+#include <linux/fsnotify_backend.h>
 #include <linux/ktime.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
@@ -13,19 +14,25 @@
 #include <linux/sort.h>
 #include <linux/uaccess.h>
 #include <linux/user_namespace.h>
+#include <linux/workqueue.h>
 
 #include "xcy_reclaim_identity.h"
 #include "xcy_reclaim_lease.h"
 #include "xcy_reclaim_plan.h"
 #include "xcy_reclaim_policy.h"
+#include "xcy_reclaim_protection.h"
 
 #define XCY_CONFIG_DIR "/data/adb/XiaoCaiYe/proc_guard/"
 #define XCY_SYNC_DIR "/data/adb/feedmeboost-sync"
+#define XCY_SCENE_ROOT "/data/user/0/com.omarea.vtools"
+#define XCY_SCENE_DIR XCY_SCENE_ROOT "/files"
+#define XCY_SCENE_NAME "xiaocaiye_a11y_state"
+#define XCY_SCENE_AGE_MS 180000U
 #define XCY_LIST_LIMIT (1024U * 1024U)
 #define XCY_LIST_ROWS 16384U
 
 enum xcy_policy_input {
-	XCY_CONFIG, XCY_NORMAL, XCY_FULL, XCY_EXACT, XCY_GAME, XCY_SYNC, XCY_INPUTS,
+	XCY_CONFIG, XCY_NORMAL, XCY_FULL, XCY_EXACT, XCY_GAME, XCY_SYNC, XCY_SCENE, XCY_INPUTS,
 };
 
 struct xcy_policy_file {
@@ -38,6 +45,7 @@ struct xcy_policy_file {
 
 struct xcy_reclaim_policy {
 	struct xcy_policy_file files[XCY_INPUTS];
+	struct xcy_reclaim_protection_frame scene;
 	u64 authority;
 };
 
@@ -45,6 +53,8 @@ static DEFINE_MUTEX(policy_lock);
 static const struct cred *policy_cred;
 static struct path policy_root;
 static u64 policy_generation;
+static struct fsnotify_group *scene_watch;
+static void (*scene_changed)(const struct xcy_reclaim_protection_frame *frame);
 
 static struct file *xcy_policy_open(const char *path, int flags)
 {
@@ -74,7 +84,7 @@ static int xcy_safe_dir(const char *path, kuid_t uid, umode_t forbidden)
 }
 
 static int xcy_read_policy_file(struct xcy_policy_file *input, size_t limit,
-				bool optional, umode_t forbidden)
+				kuid_t owner, bool optional, umode_t forbidden)
 {
 	struct file *file = xcy_policy_open(input->path, O_RDONLY);
 	struct kstat after;
@@ -90,7 +100,7 @@ static int xcy_read_policy_file(struct xcy_policy_file *input, size_t limit,
 	error = vfs_getattr(&file->f_path, &input->stamp, STATX_BASIC_STATS, AT_STATX_SYNC_AS_STAT);
 	if (error)
 		goto out;
-	if (!S_ISREG(input->stamp.mode) || !uid_eq(input->stamp.uid, GLOBAL_ROOT_UID) ||
+	if (!S_ISREG(input->stamp.mode) || !uid_eq(input->stamp.uid, owner) ||
 	    (input->stamp.mode & forbidden) || input->stamp.size < 0 || input->stamp.size > limit) {
 		error = -EACCES;
 		goto out;
@@ -271,7 +281,7 @@ static int xcy_read_sync(struct xcy_policy_file *input, struct xcy_reclaim_prote
 	error = xcy_safe_dir(XCY_SYNC_DIR, GLOBAL_ROOT_UID, 0022);
 	if (error)
 		return error;
-	error = xcy_read_policy_file(input, 4096, true, 0077);
+	error = xcy_read_policy_file(input, 4096, GLOBAL_ROOT_UID, true, 0077);
 	if (error || input->missing)
 		return error;
 	error = xcy_read_boot_id(boot_id, sizeof(boot_id));
@@ -288,12 +298,112 @@ static int xcy_read_sync(struct xcy_policy_file *input, struct xcy_reclaim_prote
 	return 0;
 }
 
+static int xcy_read_scene(struct xcy_policy_file *input, u64 max_age,
+			  struct xcy_reclaim_protection_frame *scene)
+{
+	struct file *app = xcy_policy_open(XCY_SCENE_ROOT, O_PATH | O_DIRECTORY);
+	kuid_t uid;
+	int error;
+
+	if (IS_ERR(app))
+		return PTR_ERR(app);
+	uid = file_inode(app)->i_uid;
+	fput(app);
+	if (__kuid_val(uid) < 10000 || __kuid_val(uid) > 19999)
+		return -EACCES;
+	input->path = XCY_SCENE_DIR "/" XCY_SCENE_NAME;
+	error = xcy_safe_dir(XCY_SCENE_DIR, uid, 0);
+	if (!error)
+		error = xcy_read_policy_file(input, 32768, uid, false, 0077);
+	if (!error)
+		error = xcy_reclaim_scene_parse(input->data, ktime_get_real_seconds(),
+						input->stamp.mtime.tv_sec, ktime_to_ms(ktime_get_boottime()),
+						max_age, scene);
+	if (!error)
+		input->data = NULL; /* The parsed Scene view owns the bytes. */
+	return error;
+}
+
+static void xcy_refresh_scene(struct work_struct *work)
+{
+	struct xcy_reclaim_protection_frame frame = {0};
+	struct xcy_policy_file input = {0};
+	const struct cred *previous;
+	bool ready = false;
+
+	mutex_lock(&policy_lock);
+	if (policy_cred) {
+		previous = override_creds(policy_cred);
+		ready = !xcy_read_scene(&input, XCY_SCENE_AGE_MS, &frame) && xcy_file_current(&input);
+		revert_creds(previous);
+	}
+	scene_changed(ready ? &frame : NULL);
+	mutex_unlock(&policy_lock);
+	xcy_reclaim_protection_free(&frame);
+	xcy_snapshot_free(input.data);
+}
+
+static DECLARE_WORK(scene_work, xcy_refresh_scene);
+
+static int xcy_scene_event(struct fsnotify_mark *mark, u32 mask, struct inode *inode, struct inode *directory,
+			   const struct qstr *name, u32 cookie)
+{
+	if (!name || (name->len == sizeof(XCY_SCENE_NAME) - 1 &&
+		      !memcmp(name->name, XCY_SCENE_NAME, name->len)))
+		queue_work(system_freezable_power_efficient_wq, &scene_work);
+	return 0;
+}
+
+static void xcy_scene_free_mark(struct fsnotify_mark *mark)
+{
+	kfree(mark);
+}
+
+static const struct fsnotify_ops xcy_scene_notify_ops = {
+	.handle_inode_event = xcy_scene_event,
+	.free_mark = xcy_scene_free_mark,
+};
+
+static struct fsnotify_group *xcy_watch_scene(void)
+{
+	struct fsnotify_group *group;
+	struct fsnotify_mark *mark;
+	struct file *directory = xcy_policy_open(XCY_SCENE_DIR, O_PATH | O_DIRECTORY);
+	int error;
+
+	if (IS_ERR(directory))
+		return ERR_CAST(directory);
+	group = fsnotify_alloc_group(&xcy_scene_notify_ops, 0);
+	if (IS_ERR(group))
+		goto put_file;
+	mark = kzalloc(sizeof(*mark), GFP_KERNEL);
+	if (!mark) {
+		error = -ENOMEM;
+		goto destroy;
+	}
+	fsnotify_init_mark(mark, group);
+	mark->mask = FS_EVENT_ON_CHILD | FS_CLOSE_WRITE | FS_MOVED_TO |
+		FS_MOVED_FROM | FS_DELETE | FS_DELETE_SELF | FS_MOVE_SELF;
+	error = fsnotify_add_inode_mark(mark, file_inode(directory), 0);
+	fsnotify_put_mark(mark);
+	if (error)
+		goto destroy;
+put_file:
+	fput(directory);
+	return group;
+destroy:
+	fsnotify_destroy_group(group);
+	fput(directory);
+	return ERR_PTR(error);
+}
+
 void xcy_reclaim_policy_put(struct xcy_reclaim_policy *policy)
 {
 	size_t i;
 
 	if (!policy)
 		return;
+	xcy_reclaim_protection_free(&policy->scene);
 	if (policy->files[XCY_SYNC].data)
 		memzero_explicit(policy->files[XCY_SYNC].data, policy->files[XCY_SYNC].stamp.size + 2);
 	for (i = 0; i < XCY_INPUTS; ++i) {
@@ -314,7 +424,7 @@ static bool xcy_policy_files_current(const struct xcy_reclaim_policy *policy)
 }
 
 int xcy_reclaim_policy_get(struct xcy_reclaim_protection *protection, u64 *grace_ms,
-			  u64 *scene_valid_ms, struct xcy_reclaim_policy **result)
+			  struct xcy_reclaim_policy **result)
 {
 	struct xcy_reclaim_names *lists[] = {
 		&protection->package_whitelist, &protection->full_whitelist, &protection->exact_whitelist,
@@ -322,6 +432,7 @@ int xcy_reclaim_policy_get(struct xcy_reclaim_protection *protection, u64 *grace
 	struct xcy_reclaim_policy *policy;
 	struct xcy_policy_file *files;
 	const struct cred *previous;
+	u64 scene_valid_ms;
 	size_t i;
 	int error = -ENOKEY;
 
@@ -339,17 +450,17 @@ int xcy_reclaim_policy_get(struct xcy_reclaim_protection *protection, u64 *grace
 		goto unlock;
 	policy->authority = policy_generation;
 	previous = override_creds(policy_cred);
-	error = xcy_read_policy_file(&files[XCY_CONFIG], 16384, false, 0);
+	error = xcy_read_policy_file(&files[XCY_CONFIG], 16384, GLOBAL_ROOT_UID, false, 0);
 	if (!error)
-		error = xcy_configure(policy, grace_ms, scene_valid_ms);
+		error = xcy_configure(policy, grace_ms, &scene_valid_ms);
 	for (i = 0; !error && i < ARRAY_SIZE(lists); ++i) {
 		memset(lists[i], 0, sizeof(*lists[i]));
-		error = xcy_read_policy_file(&files[XCY_NORMAL + i], XCY_LIST_LIMIT, false, 0);
+		error = xcy_read_policy_file(&files[XCY_NORMAL + i], XCY_LIST_LIMIT, GLOBAL_ROOT_UID, false, 0);
 		if (!error)
 			error = xcy_policy_names(&files[XCY_NORMAL + i], lists[i]);
 	}
 	if (!error)
-		error = xcy_read_policy_file(&files[XCY_GAME], XCY_MEMORY_PACKAGE_BYTES, true, 0);
+		error = xcy_read_policy_file(&files[XCY_GAME], XCY_MEMORY_PACKAGE_BYTES, GLOBAL_ROOT_UID, true, 0);
 	if (!error && files[XCY_GAME].data) {
 		char *game = strim(files[XCY_GAME].data);
 		xcy_memory_token_t token = { .text = game, .len = strlen(game) };
@@ -361,9 +472,16 @@ int xcy_reclaim_policy_get(struct xcy_reclaim_protection *protection, u64 *grace
 	}
 	if (!error)
 		error = xcy_read_sync(&files[XCY_SYNC], protection);
+	if (!error)
+		error = xcy_read_scene(&files[XCY_SCENE], scene_valid_ms, &policy->scene);
 	if (!error && !xcy_policy_files_current(policy))
 		error = -ESTALE;
 	revert_creds(previous);
+	if (!error) {
+		scene_changed(&policy->scene);
+		protection->visible = policy->scene.view.visible;
+		protection->active = policy->scene.view.active;
+	}
 unlock:
 	mutex_unlock(&policy_lock);
 	if (error)
@@ -381,7 +499,8 @@ bool xcy_reclaim_policy_current(const struct xcy_reclaim_policy *policy)
 	mutex_lock(&policy_lock);
 	if (policy_cred && policy->authority == policy_generation) {
 		previous = override_creds(policy_cred);
-		valid = xcy_policy_files_current(policy);
+		valid = xcy_policy_files_current(policy) &&
+			ktime_to_ms(ktime_get_boottime()) - policy->scene.scene_observed_ms <= policy->scene.scene_valid_ms;
 		revert_creds(previous);
 	}
 	mutex_unlock(&policy_lock);
@@ -391,8 +510,10 @@ bool xcy_reclaim_policy_current(const struct xcy_reclaim_policy *policy)
 static ssize_t xcy_policy_write(struct file *file, const char __user *buffer,
 				size_t length, loff_t *pos)
 {
+	struct fsnotify_group *old_watch;
 	char command[8];
 	bool enable;
+	int error = 0;
 
 	if (!uid_eq(current_euid(), GLOBAL_ROOT_UID) || current_user_ns() != &init_user_ns ||
 	    !capable(CAP_SYS_ADMIN))
@@ -405,6 +526,8 @@ static ssize_t xcy_policy_write(struct file *file, const char __user *buffer,
 	if (!enable && (length != 8 || memcmp(command, "disable\n", 8)))
 		return -EINVAL;
 	mutex_lock(&policy_lock);
+	old_watch = scene_watch;
+	scene_watch = NULL;
 	if (policy_cred) {
 		put_cred(policy_cred);
 		path_put(&policy_root);
@@ -412,11 +535,23 @@ static ssize_t xcy_policy_write(struct file *file, const char __user *buffer,
 	}
 	if (enable) {
 		get_fs_root(current->fs, &policy_root);
-		policy_cred = get_current_cred();
+		scene_watch = xcy_watch_scene();
+		if (IS_ERR(scene_watch)) {
+			error = PTR_ERR(scene_watch);
+			scene_watch = NULL;
+			path_put(&policy_root);
+		} else {
+			policy_cred = get_current_cred();
+		}
 	}
 	++policy_generation;
+	scene_changed(NULL);
 	mutex_unlock(&policy_lock);
-	return length;
+	if (old_watch)
+		fsnotify_destroy_group(old_watch);
+	if (enable && !error)
+		queue_work(system_freezable_power_efficient_wq, &scene_work);
+	return error ? error : length;
 }
 
 static const struct file_operations xcy_policy_fops = {
@@ -432,8 +567,9 @@ static struct miscdevice xcy_policy_device = {
 	.mode = 0200,
 };
 
-int xcy_reclaim_policy_register(void)
+int xcy_reclaim_policy_register(void (*notify)(const struct xcy_reclaim_protection_frame *frame))
 {
+	scene_changed = notify;
 	return misc_register(&xcy_policy_device);
 }
 
