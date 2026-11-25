@@ -9,9 +9,9 @@ scene=/data/user/0/com.omarea.vtools/files/xiaocaiye_a11y_state
 games=/data/user/0/com.omarea.vtools/shared_prefs/games.xml
 display=/sys/class/backlight/panel0-backlight/brightness
 
-# Both markers are set during the tested handover. Keeping the old module
-# installed lets a failed startup or a rollback boot restore its policy.
-[ -f "$module/active" ] && [ -f "$legacy/disable" ] || exit 0
+# The retired AppOpt module can supply a fallback if still installed.
+[ -f "$module/active" ] || exit 0
+[ ! -d "$legacy" ] || [ -f "$legacy/disable" ] || exit 0
 
 if [ "${1:-}" = reload ]; then
 	[ -f "$module/ready" ] && ! pidof AppOpt >/dev/null || exit 1
@@ -31,6 +31,9 @@ owned=
 rollback() {
 	trap - EXIT HUP INT TERM
 	rm -f "$module/ready"
+	case "$(getprop sys.powerctl)" in
+		reboot*|shutdown*) return 0 ;;
+	esac
 	if [ -n "$watcher" ]; then
 		kill "$watcher" 2>/dev/null
 		wait "$watcher"
@@ -52,6 +55,11 @@ rm -f "$module/ready"
 grep -qx 'game_tgid=0' "$node" || exit 1
 ! pidof AppOpt >/dev/null || exit 1
 "$controller" check "$rules" >/dev/null || exit 1
+
+# Wait for Android's initial cpuset setup and service launches to finish.
+until [ "$(getprop sys.boot_completed)" = 1 ]; do
+	sleep 2
+done
 
 # Load the static configuration while the credential-encrypted Scene state is
 # unavailable. Once the watcher publishes context, adaptive rules take effect.

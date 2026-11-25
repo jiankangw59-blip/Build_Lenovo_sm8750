@@ -13,6 +13,7 @@
 #define DEVICE "/dev/ace6_thread_affinity"
 #define MAX_BYTES (512 * 1024)
 #define MAX_PROFILES 512
+#define STATUS_BYTES 1536
 #define SCENE_PATH "/data/user/0/com.omarea.vtools/files/xiaocaiye_a11y_state"
 #define DISPLAY_PATH "/sys/class/backlight/panel0-backlight/brightness"
 
@@ -20,6 +21,16 @@ static const char *const sources[] = {
 	"template_rules.prop", "app_profile_rules.prop", "auto_rules.prop",
 	"measured_game_rules.prop", "applist.prop",
 };
+
+static size_t append_bytes(char *buffer, size_t used, const char *text, size_t length)
+{
+	if (length > MAX_BYTES - used) {
+		fprintf(stderr, "Rule configuration exceeds %u bytes\n", MAX_BYTES);
+		exit(1);
+	}
+	memcpy(buffer + used, text, length);
+	return used + length;
+}
 
 static size_t append_row(char *buffer, size_t used, size_t tier, const char *selector,
 			 const char *row, size_t length)
@@ -44,15 +55,17 @@ struct shared_profile {
 	char *body;
 	size_t used;
 	bool defined;
+	bool emitted;
 };
 
-static size_t append_profiles(char *buffer, size_t used, FILE *file)
+static size_t append_profiles(char *buffer, size_t used, FILE *file, bool compact)
 {
 	struct shared_profile profiles[MAX_PROFILES] = {};
 	struct shared_profile *current = NULL;
 	char *line = NULL;
-	size_t capacity = 0, row = 0;
+	size_t capacity = 0, row = 0, initial = used;
 	ssize_t length;
+	bool expand = false;
 
 	while ((length = getline(&line, &capacity, file)) >= 0) {
 		char *start = line;
@@ -85,6 +98,24 @@ static size_t append_profiles(char *buffer, size_t used, FILE *file)
 			if (*tail != ' ' || !profile->body || !tail[1] || strpbrk(tail + 1, " \t"))
 				goto invalid;
 			current = NULL;
+			if (compact) {
+				/* Legacy concatenation can give these selectors a different meaning. */
+				if (strpbrk(tail + 1, "{}=")) {
+					expand = true;
+					break;
+				}
+				if (!profile->emitted) {
+					char definition_line[32];
+					int len = snprintf(definition_line, sizeof(definition_line), "@profile %lu\n", id);
+
+					used = append_bytes(buffer, used, definition_line, (size_t)len);
+					used = append_bytes(buffer, used, profile->body, profile->used);
+					profile->emitted = true;
+				}
+				used = append_bytes(buffer, used, start, (size_t)length - (start - line));
+				used = append_bytes(buffer, used, "\n", 1);
+				continue;
+			}
 			for (size_t pos = 0; pos < profile->used;) {
 				const char *entry = profile->body + pos;
 				const char *newline = memchr(entry, '\n', profile->used - pos);
@@ -95,6 +126,8 @@ static size_t append_profiles(char *buffer, size_t used, FILE *file)
 			}
 			continue;
 		}
+		if (compact)
+			length -= start - line;
 		if (!current || (*start != '{' && *start != '=') ||
 		    (size_t)length + 1 > MAX_BYTES - current->used)
 			goto invalid;
@@ -104,7 +137,7 @@ static size_t append_profiles(char *buffer, size_t used, FILE *file)
 			exit(1);
 		}
 		current->body = body;
-		memcpy(body + current->used, line, (size_t)length);
+		memcpy(body + current->used, compact ? start : line, (size_t)length);
 		current->used += (size_t)length;
 		body[current->used++] = '\n';
 	}
@@ -113,13 +146,21 @@ static size_t append_profiles(char *buffer, size_t used, FILE *file)
 	for (size_t i = 0; i < MAX_PROFILES; i++)
 		free(profiles[i].body);
 	free(line);
+	if (expand) {
+		if (fseek(file, 0, SEEK_SET) != 0) {
+			perror("rewind app profile rules");
+			exit(1);
+		}
+		return append_profiles(buffer, initial, file, false);
+	}
 	return used;
 invalid:
 	fprintf(stderr, "Invalid app_profile_rules.profiles near line %zu\n", row);
 	exit(1);
 }
 
-static size_t append_source(char *buffer, size_t used, const char *dir, size_t tier)
+static size_t append_source(char *buffer, size_t used, const char *dir, size_t tier,
+			    bool compact)
 {
 	char path[4096];
 	char *line = NULL;
@@ -134,7 +175,7 @@ static size_t append_source(char *buffer, size_t used, const char *dir, size_t t
 		}
 		file = fopen(path, "r");
 		if (file) {
-			used = append_profiles(buffer, used, file);
+			used = append_profiles(buffer, used, file, compact);
 			fclose(file);
 			return used;
 		}
@@ -178,20 +219,50 @@ static size_t append_source(char *buffer, size_t used, const char *dir, size_t t
 	return used;
 }
 
-static int status(void)
+static ssize_t read_status(char *data, size_t size)
 {
-	char data[768];
 	int fd = open(DEVICE, O_RDONLY | O_CLOEXEC);
+	int saved_errno;
 	ssize_t n;
 
-	if (fd < 0) {
-		perror(DEVICE);
-		return 1;
-	}
-	n = read(fd, data, sizeof(data));
+	if (fd < 0)
+		return -1;
+	do {
+		n = read(fd, data, size);
+	} while (n < 0 && errno == EINTR);
+	saved_errno = errno;
 	close(fd);
+	errno = saved_errno;
+	return n;
+}
+
+static bool supports_profile_wire(void)
+{
+	const char cap[] = "profile_wire=1";
+	char data[STATUS_BYTES];
+	ssize_t n = read_status(data, sizeof(data));
+	const char *line = data;
+
+	while (n > 0) {
+		const char *end = memchr(line, '\n', (size_t)n);
+
+		if (!end)
+			break;
+		if ((size_t)(end - line) == sizeof(cap) - 1 && !memcmp(line, cap, sizeof(cap) - 1))
+			return true;
+		n -= end - line + 1;
+		line = end + 1;
+	}
+	return false;
+}
+
+static int status(void)
+{
+	char data[STATUS_BYTES];
+	ssize_t n = read_status(data, sizeof(data));
+
 	if (n < 0) {
-		perror("read affinity status");
+		perror(DEVICE);
 		return 1;
 	}
 	return fwrite(data, 1, (size_t)n, stdout) != (size_t)n;
@@ -203,6 +274,7 @@ int main(int argc, char **argv)
 	bool load = argc == 3 && !strcmp(argv[1], "load");
 	bool adaptive = (argc == 3 || argc == 4) && !strcmp(argv[1], "adapt-load");
 	bool dump = argc == 3 && !strcmp(argv[1], "dump");
+	bool dump_compact = argc == 3 && !strcmp(argv[1], "dump-compact");
 	bool clear = argc == 2 && !strcmp(argv[1], "clear");
 	char *buffer;
 	size_t used = 0, tier;
@@ -216,9 +288,9 @@ int main(int argc, char **argv)
 	if ((argc == 2 || argc == 5) && !strcmp(argv[1], "watch-games"))
 		return watch_context(argc == 5 ? argv[2] : SCENE_PATH, argc == 5 ? argv[3] : DISPLAY_PATH,
 				     argc == 5 ? argv[4] : "/data/user/0/com.omarea.vtools/shared_prefs/games.xml");
-	if (!check && !load && !adaptive && !dump && !clear) {
+	if (!check && !load && !adaptive && !dump && !dump_compact && !clear) {
 		fprintf(stderr,
-			"Usage: %s status | clear | {check,load,dump} RULE_DIRECTORY\n"
+			"Usage: %s status | clear | {check,load,dump,dump-compact} RULE_DIRECTORY\n"
 			"       %s adapt-load RULE_DIRECTORY [PROCESS_PATTERN]\n"
 			"       %s watch [SCENE_FILE BRIGHTNESS_FILE]\n"
 			"       %s watch-games [SCENE_FILE BRIGHTNESS_FILE GAMES_FILE]\n",
@@ -244,9 +316,11 @@ int main(int argc, char **argv)
 		}
 		used = snprintf(buffer, MAX_BYTES, "?adapt\t%s\n", scope);
 	}
-	if (check || load || adaptive || dump) {
+	if (check || load || adaptive || dump || dump_compact) {
+		bool compact = dump_compact || (!dump && supports_profile_wire());
+
 		for (tier = 0; tier < sizeof(sources) / sizeof(sources[0]); tier++)
-			used = append_source(buffer, used, argv[2], tier);
+			used = append_source(buffer, used, argv[2], tier, compact);
 	}
 	if (clear)
 		buffer[used++] = '\n';
@@ -254,7 +328,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "No rules in configuration. Use clear to disable policy.\n");
 		return 1;
 	}
-	if (dump) {
+	if (dump || dump_compact) {
 		int status = fwrite(buffer, 1, used, stdout) != used;
 		free(buffer);
 		return status;
@@ -273,5 +347,7 @@ int main(int argc, char **argv)
 	free(buffer);
 	if (n < 0 || (size_t)n != used)
 		return 1;
-	return status();
+	/* The write is committed even if the subsequent status read fails. */
+	status();
+	return 0;
 }
