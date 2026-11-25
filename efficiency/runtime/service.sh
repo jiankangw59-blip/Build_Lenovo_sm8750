@@ -1,12 +1,12 @@
 #!/system/bin/sh
 # This companion only applies runtime policy. It contains no module overlays.
 umask 077
-STATE_DIR=/data/adb/ace6-kernel-efficiency
+STATE_DIR=/data/adb/opd2413-kernel-efficiency
 MASK_NODE=/sys/devices/virtual/workqueue/cpumask
 mkdir -p "$STATE_DIR" || exit 1
 
 model=$(getprop ro.product.model)
-if [ "$model" != PLQ110 ]; then
+if [ "$model" != OPD2413 ]; then
     printf 'status=skipped\nreason=wrong-device\nmodel=%s\n' "$model" > "$STATE_DIR/policy.state"
     exit 0
 fi

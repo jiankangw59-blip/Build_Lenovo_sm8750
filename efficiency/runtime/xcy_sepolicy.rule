@@ -1,0 +1,4 @@
+type xcy_reclaim_device dev_type
+allow xcy_reclaim_device tmpfs filesystem associate
+allow ksu xcy_reclaim_device chr_file { getattr setattr relabelto }
+allow system_server xcy_reclaim_device chr_file { getattr open read write }

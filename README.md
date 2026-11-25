@@ -54,6 +54,14 @@
 
 ## 🔧 高级功能
 
+### OPD2413 效率配置
+
+一加平板 OPD2413 的 6.6.89 工作流可选择 `crystal-lz4kds-le9uo-idle`、选择 `LZ4KD` 并启用 Re-Kernel 和 FUSE revalidation。该配置使用固定的 2025-06 源码归档，并用平板上已加载的厂商模块校验符号 CRC 和 BTF 结构布局。
+
+内核包括 Crystal HybridSwap/ZMS、LZ4KDS、Kcompressd、le9uo、MGLRU 修补、RCU Lazy、节能工作队列、F2FS/EROFS 优化、BBRv3、PSI 修补、线程绑核和小菜叶内存回收。Re-Kernel 内建。Honk 和 OxiDNS 的 Android ARM64 产物独立构建。
+
+`preflash-verification` 内的 `OPD2413-Kernel-Efficiency.zip` 只在匹配的内核上启用 16 GiB LZ4KDS、Crystal 自动回写和运行时参数。小菜叶内核回收依赖已启用的 AppOptBridge，以及 `efficiency/runtime/xcy-control-handover.patch` 提供的旧进程启停接口。
+
 ### 自定义编译选项
 
 在工作流运行时，您可以配置以下参数：

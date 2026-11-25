@@ -1,0 +1,40 @@
+--- a/XiaoCaiYe/control_impl.sh
++++ b/XiaoCaiYe/control_impl.sh
+@@ -284,7 +284,28 @@
+     echo $! > "$RUN_DIR/smart_timer.pid"
+ }
+ 
++KERNEL_RECLAIM_START=/data/adb/modules/opd2413_kernel_efficiency/activate_xcy.sh
++
++stop_legacy_proc_guard() {
++    stop_pidfile "$RUN_DIR/proc_guard_supervisor.pid" "$PROC_GUARD_SUPERVISOR_SH"
++    stop_pidfile "$RUN_DIR/proc_guard.pid"
++    stop_proc_guard_processes
++    for attempt in 1 2 3 4 5 6 7 8 9 10; do
++        pidof proc_guardd >/dev/null 2>&1 || return 0
++        sleep 0.1
++    done
++    ! pidof proc_guardd >/dev/null 2>&1
++}
++
+ start_proc_guard() {
++    if [ -r "$KERNEL_RECLAIM_START" ] &&
++       sh "$KERNEL_RECLAIM_START" owns-startup; then
++        return 0
++    fi
++    start_legacy_proc_guard
++}
++
++start_legacy_proc_guard() {
+     if ! proc_guard_native_enabled; then
+         rm -f "$RUN_DIR/proc_guard.pid"
+         return 0
+@@ -649,6 +670,8 @@
+     start) start_all ;;
+     stop) stop_all ;;
+     restart) start_all ;;
++    start-legacy-proc-guard) load_config && start_legacy_proc_guard ;;
++    stop-legacy-proc-guard) stop_legacy_proc_guard ;;
+     status-json) status_json ;;
+     show-log) show_log "$2" ;;
+     run-task) run_task "$2" ;;

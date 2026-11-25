@@ -1,14 +1,14 @@
 # Early-only support for explicitly enrolled Crystal kernels. No auto policy.
-ACE6_CRYSTAL_STATE=/data/adb/ace6-kernel-efficiency
+ACE6_CRYSTAL_STATE=/data/adb/opd2413-kernel-efficiency
 ACE6_CRYSTAL_BACKING=$ACE6_CRYSTAL_STATE/zms-backing.img
 ACE6_CRYSTAL_NODE=/sys/block/zram0
-ACE6_CRYSTAL_CONFIG=/data/swap_config.conf
+ACE6_CRYSTAL_CONFIG=$ACE6_CRYSTAL_STATE/swap_config.conf
 
 ace6_crystal_profile_active() {
     [ -d "$ACE6_CRYSTAL_STATE" ] && [ ! -L "$ACE6_CRYSTAL_STATE" ] || return 1
     [ -f "$ACE6_CRYSTAL_STATE/crystal-writeback.enabled" ] || return 1
     [ ! -L "$ACE6_CRYSTAL_STATE/crystal-writeback.enabled" ] || return 1
-    [ "$(getprop ro.product.model)" = PLQ110 ] || return 1
+    [ "$(getprop ro.product.model)" = OPD2413 ] || return 1
     [ -f "$ACE6_CRYSTAL_NODE/zms_stat" ] || return 1
     [ -f "$ACE6_CRYSTAL_NODE/backing_dev" ] || return 1
     [ -f "$ACE6_CRYSTAL_NODE/hybridswap_core_enable" ] || return 1
