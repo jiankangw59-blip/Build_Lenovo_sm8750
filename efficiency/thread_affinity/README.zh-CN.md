@@ -11,3 +11,7 @@
 `affinityctl watch` 监听现有 Scene 状态文件和面板亮度节点。`affinityctl adapt-load 规则目录 [进程模式]` 启用前后台分核。省略进程模式时，自适应覆盖主用户应用。手工规则和实测游戏规则优先。副窗口仍可见时沿用前台分配，退出监听后回到静态规则。Android cpuset 继续限制实际可用的核。
 
 自适应部分覆盖应用焦点、可见窗口、息屏状态和普通线程角色。Winlator 专用跨组策略超出此版范围。Android ARM64 控制工具由 NDK clang 一起编译 `affinityctl.c` 与 `adaptive_watch.c`。
+
+`affinityctl watch-games` 同时监听 Scene 的 `games.xml`，把前台游戏标记交给内核。没有手工整包规则的游戏会按实际线程运行时间选出前两名，绑到 `CPU6–7`。第三名达到持续负载阈值时使用 `CPU4–7`。实测和手写线程规则优先，线程仍受 Android cpuset 限制。采样结束、游戏失焦或息屏后，定时工作停止。已导入的实测规则保留，运行时排名随游戏进程和前台会话重新计算。
+
+开机接管包把 `boot-service.sh` 安装为 KernelSU `service.sh`，在 `rules/applist.prop` 保留可编辑规则。控制进程只负责提交规则和转发 Scene 通知，绑核在内核执行。模块的操作按钮校验并重载规则。启动前检查设备接口和旧进程，失败时清除已接管策略并恢复旧模块。此入口面向线程亲和性。`uclamp`、优先级、系统服务开关和厂商频率调节继续由系统自己的配置负责。
