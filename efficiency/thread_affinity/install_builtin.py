@@ -12,6 +12,7 @@ KBUILD = "obj-y += ace6_thread_affinity.o"
 SOURCES = (
     "ace6_thread_affinity.c",
     "affinity_rules.h",
+    "adaptive_policy.h",
     "ace6_sched_affinity.h",
     "ace6_sched_affinity.inc",
 )

@@ -8,4 +8,6 @@
 
 外部模块用于现机小范围测试。内建版本通过原调度器的亲和性路径更新应用此前请求的掩码，并记录原请求供撤销。Action 的 `enable_thread_affinity` 仅供 Ace 6 6.6.118 选择，开机后仍需加载规则才会生效。
 
-这版覆盖可配置的规则分核。AppOpt 的场景自适应和 Winlator 前台跨组暂借需要单独迁移、验证。完整替换前应先核对这些场景。
+`affinityctl watch` 监听现有 Scene 状态文件和面板亮度节点。`affinityctl adapt-load 规则目录 [进程模式]` 启用前后台分核。省略进程模式时，自适应覆盖主用户应用。手工规则和实测游戏规则优先。副窗口仍可见时沿用前台分配，退出监听后回到静态规则。Android cpuset 继续限制实际可用的核。
+
+自适应部分覆盖应用焦点、可见窗口、息屏状态和普通线程角色。Winlator 专用跨组策略超出此版范围。Android ARM64 控制工具由 NDK clang 一起编译 `affinityctl.c` 与 `adaptive_watch.c`。

@@ -24,6 +24,7 @@ struct affinity_rule {
 	unsigned int process_score;
 	unsigned int thread_score;
 	unsigned int thread_order;
+	unsigned int source;
 	bool manual;
 };
 
@@ -32,6 +33,7 @@ struct affinity_policy {
 	struct hlist_head child[RULE_BUCKETS];
 	struct hlist_head patterns;
 	struct hlist_head global;
+	char adaptive_scope[PROCESS_NAME_LEN];
 	unsigned int count;
 	struct affinity_rule rules[];
 };
@@ -94,7 +96,8 @@ static int parse_rule(struct affinity_policy *policy, char *line)
 
 	if (line[0] < '0' || line[0] > '4' || line[1] != '\t')
 		return -EINVAL;
-	rule->manual = line[0] == '4';
+	rule->source = line[0] - '0';
+	rule->manual = rule->source == 4;
 	name = line + 2;
 	mask = strchr(name, '=');
 	if (!mask)
@@ -164,13 +167,28 @@ static struct affinity_policy *parse_policy(char *data, size_t size)
 	while ((line = strsep(&data, "\n")) != NULL) {
 		if (!*line)
 			continue;
-		ret = parse_rule(policy, line);
-		if (ret) {
-			kvfree(policy);
-			return ERR_PTR(ret);
+		if (!strncmp(line, "?adapt\t", 7) && !policy->count && !policy->adaptive_scope[0]) {
+			const char *scope = line + 7;
+
+			if (!*scope || strpbrk(scope, " \t\r") ||
+			    strscpy(policy->adaptive_scope, scope, sizeof(policy->adaptive_scope)) < 0) {
+				ret = -EINVAL;
+				goto invalid;
+			}
+			continue;
 		}
+		ret = parse_rule(policy, line);
+		if (ret)
+			goto invalid;
+	}
+	if (policy->adaptive_scope[0] && !policy->count) {
+		ret = -EINVAL;
+		goto invalid;
 	}
 	return policy;
+invalid:
+	kvfree(policy);
+	return ERR_PTR(ret);
 }
 
 struct affinity_match {

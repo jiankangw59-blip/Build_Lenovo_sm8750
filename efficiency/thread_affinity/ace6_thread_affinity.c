@@ -18,7 +18,7 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 
-#include "affinity_rules.h"
+#include "adaptive_policy.h"
 
 #define MAX_PENDING 4096
 #define MAX_SNAPSHOT 16384
@@ -47,13 +47,17 @@ struct task_event {
 static DEFINE_MUTEX(policy_lock);
 static DEFINE_HASHTABLE(leases, 10);
 static struct affinity_policy *policy;
+static struct scene_context *scene;
+static struct file *scene_owner;
 static struct workqueue_struct *affinity_wq;
+static struct task_struct **snapshot;
 static bool enabled;
 static unsigned int revision;
 static unsigned int validated;
 static unsigned int lease_count;
+static unsigned int context_switches;
 static atomic_t pending;
-static atomic_long_t dropped, changed, clamped, failed;
+static atomic_long_t dropped, changed, clamped, failed, adapted;
 
 static struct thread_lease *find_lease(struct task_struct *task)
 {
@@ -209,11 +213,14 @@ static void restore_lease(struct thread_lease *lease)
 	free_lease(lease);
 }
 
-static void apply_task(struct task_struct *task, struct task_struct *parent)
+static void apply_task(struct task_struct *task, struct task_struct *parent, const char *process)
 {
 	struct thread_lease *lease = find_lease(task);
 	const struct affinity_rule *rule = NULL;
-	char process[PROCESS_NAME_LEN], thread[TASK_COMM_LEN];
+	const struct cpumask *requested = NULL;
+	const struct cpumask *automatic = NULL;
+	char name[PROCESS_NAME_LEN], thread[TASK_COMM_LEN];
+	const char *thread_name;
 	struct affinity_state observed, original;
 	cpumask_t effective, allowed;
 
@@ -222,9 +229,15 @@ static void apply_task(struct task_struct *task, struct task_struct *parent)
 			free_lease(lease);
 		return;
 	}
-	if (policy && policy->count && process_name(task, process)) {
+	if (!process && process_name(task, name))
+		process = name;
+	if (policy && policy->count && process && *process) {
 		get_task_comm(thread, task);
-		rule = select_rule(policy, process, strim(thread));
+		thread_name = strim(thread);
+		rule = select_rule(policy, process, thread_name);
+		if (scene && adaptive_in_scope(policy, task, process))
+			automatic = adaptive_mask(task, scene_stage(scene, process), thread_name, rule);
+		requested = automatic ?: (rule ? &rule->mask : NULL);
 	}
 	read_affinity(task, &observed);
 	original = observed;
@@ -234,7 +247,7 @@ static void apply_task(struct task_struct *task, struct task_struct *parent)
 		if (origin && owns_affinity(&origin->applied, &observed))
 			original = origin->original;
 	}
-	if (!rule) {
+	if (!requested) {
 		if (lease)
 			restore_lease(lease);
 		else if (!same_affinity(&original, &observed) && restore_mask(task, &original))
@@ -247,7 +260,7 @@ static void apply_task(struct task_struct *task, struct task_struct *parent)
 		lease = NULL;
 	}
 	cpuset_cpus_allowed(task, &allowed);
-	if (!cpumask_and(&effective, &allowed, &rule->mask)) {
+	if (!cpumask_and(&effective, &allowed, requested)) {
 		atomic_long_inc(&clamped);
 		if (lease)
 			restore_lease(lease);
@@ -270,11 +283,13 @@ static void apply_task(struct task_struct *task, struct task_struct *parent)
 		lease_count++;
 	}
 	if (!cpumask_equal(&observed.effective, &effective)) {
-		if (apply_mask(task, &rule->mask, &rule->mask, &lease->applied)) {
+		if (apply_mask(task, requested, requested, &lease->applied)) {
 			atomic_long_inc(&failed);
 			return;
 		}
 		atomic_long_inc(&changed);
+		if (automatic)
+			atomic_long_inc(&adapted);
 	}
 }
 
@@ -289,7 +304,7 @@ static void run_event(struct work_struct *work)
 		if (lease)
 			free_lease(lease);
 	} else if (enabled) {
-		apply_task(event->task, event->parent);
+		apply_task(event->task, event->parent, NULL);
 	}
 	mutex_unlock(&policy_lock);
 	if (event->parent)
@@ -387,41 +402,78 @@ static void release_policy(void)
 	policy = NULL;
 }
 
-static int replace_policy(struct affinity_policy *next)
+static int capture_tasks(unsigned int *count)
 {
 	struct task_struct *group, *task;
-	struct task_struct **tasks = NULL;
-	struct thread_lease *lease;
-	struct hlist_node *tmp;
-	unsigned int count = 0, bucket, i;
 	int ret = 0;
 
-	if (next->count) {
-		tasks = kvmalloc_array(MAX_SNAPSHOT, sizeof(*tasks), GFP_KERNEL);
-		if (!tasks)
-			return -ENOMEM;
+	*count = 0;
+	rcu_read_lock();
+	for_each_process_thread(group, task) {
+		if (!task_eligible(task))
+			continue;
+		if (*count == MAX_SNAPSHOT) {
+			ret = -E2BIG;
+			goto finish_snapshot;
+		}
+		get_task_struct(task);
+		snapshot[(*count)++] = task;
 	}
+finish_snapshot:
+	rcu_read_unlock();
+	return ret;
+}
+
+static void release_snapshot(unsigned int count)
+{
+	while (count)
+		put_task_struct(snapshot[--count]);
+}
+
+static enum app_stage current_stage(const struct scene_context *context, const char *process)
+{
+	return context ? scene_stage(context, process) : APP_STATIC;
+}
+
+static void apply_snapshot(unsigned int count, const struct scene_context *previous,
+			   bool scene_change)
+{
+	char name[PROCESS_NAME_LEN] = "";
+	pid_t last_tgid = 0;
+	unsigned int i;
+
+	for (i = 0; i < count; i++) {
+		struct task_struct *task = snapshot[i];
+		pid_t tgid = task_tgid_nr(task);
+
+		if (tgid != last_tgid) {
+			last_tgid = tgid;
+			if (!process_name(task, name))
+				name[0] = '\0';
+		}
+		if (!scene_change ||
+		    (name[0] && adaptive_in_scope(policy, task, name) &&
+		     current_stage(previous, name) != current_stage(scene, name)))
+			apply_task(task, NULL, name);
+		cond_resched();
+	}
+}
+
+static int replace_policy(struct affinity_policy *next)
+{
+	struct thread_lease *lease;
+	struct hlist_node *tmp;
+	unsigned int count = 0, bucket;
+	int ret = 0;
+
 	mutex_lock(&policy_lock);
 	if (!next->count) {
 		release_policy();
 		kvfree(next);
 		goto out;
 	}
-	if (!enabled)
-		WRITE_ONCE(enabled, true);
-	rcu_read_lock();
-	for_each_process_thread(group, task) {
-		if (!task_eligible(task))
-			continue;
-		if (count == MAX_SNAPSHOT) {
-			ret = -E2BIG;
-			goto finish_snapshot;
-		}
-		get_task_struct(task);
-		tasks[count++] = task;
-	}
-finish_snapshot:
-	rcu_read_unlock();
+	WRITE_ONCE(enabled, true);
+	ret = capture_tasks(&count);
 	if (ret) {
 		WRITE_ONCE(enabled, policy != NULL);
 		goto out;
@@ -432,18 +484,72 @@ finish_snapshot:
 		if (READ_ONCE(lease->task->flags) & PF_EXITING)
 			free_lease(lease);
 	}
-	for (i = 0; i < count; i++) {
-		apply_task(tasks[i], NULL);
-		cond_resched();
-	}
+	apply_snapshot(count, NULL, false);
 out:
 	if (!ret)
 		revision++;
+	release_snapshot(count);
 	mutex_unlock(&policy_lock);
-	for (i = 0; i < count; i++)
-		put_task_struct(tasks[i]);
-	kvfree(tasks);
 	return ret;
+}
+
+/* A single writer owns scene state until its control fd closes. */
+static int replace_scene(struct file *file, struct scene_context *next)
+{
+	struct scene_context *previous;
+	struct thread_lease *lease;
+	struct hlist_node *tmp;
+	unsigned int count = 0;
+	unsigned int bucket;
+	bool rescan;
+	int ret = 0;
+
+	mutex_lock(&policy_lock);
+	if (scene_owner && scene_owner != file) {
+		ret = -EBUSY;
+		goto out;
+	}
+	previous = scene;
+	if (next && previous && !memcmp(next, previous, sizeof(*next)))
+		goto out;
+	rescan = policy && policy->adaptive_scope[0];
+	if (rescan) {
+		ret = capture_tasks(&count);
+		if (ret && next)
+			goto out;
+	}
+	scene = next;
+	WRITE_ONCE(scene_owner, next ? file : NULL);
+	context_switches++;
+	if (rescan && ret) {
+		/* On watcher exit, revisit existing leases even if the full
+		 * task snapshot no longer fits.
+		 */
+		hash_for_each_safe(leases, bucket, tmp, lease, node) {
+			struct task_struct *task = lease->task;
+
+			get_task_struct(task);
+			apply_task(task, NULL, NULL);
+			put_task_struct(task);
+			cond_resched();
+		}
+	} else if (rescan) {
+		apply_snapshot(count, previous, true);
+	}
+	kfree(previous);
+	next = NULL;
+out:
+	release_snapshot(count);
+	mutex_unlock(&policy_lock);
+	kfree(next);
+	return ret;
+}
+
+static int control_release(struct inode *inode, struct file *file)
+{
+	if (READ_ONCE(scene_owner) == file)
+		replace_scene(file, NULL);
+	return 0;
 }
 
 static ssize_t control_write(struct file *file, const char __user *user,
@@ -470,6 +576,22 @@ static ssize_t control_write(struct file *file, const char __user *user,
 		return -EINVAL;
 	}
 	text[size] = '\0';
+	if (size >= 9 && !memcmp(text, "?context\t", 9)) {
+		struct scene_context *next_scene = kzalloc(sizeof(*next_scene), GFP_KERNEL);
+
+		if (!next_scene) {
+			kvfree(text);
+			return -ENOMEM;
+		}
+		ret = parse_scene_context(text + 9, next_scene);
+		kvfree(text);
+		if (ret) {
+			kfree(next_scene);
+			return ret;
+		}
+		ret = replace_scene(file, next_scene);
+		return ret ? ret : size;
+	}
 	validate = size >= 7 && !memcmp(text, "?check\n", 7);
 	next = parse_policy(text + (validate ? 7 : 0), size - (validate ? 7 : 0));
 	kvfree(text);
@@ -493,16 +615,20 @@ static ssize_t control_write(struct file *file, const char __user *user,
 static ssize_t control_read(struct file *file, char __user *user,
 			    size_t size, loff_t *offset)
 {
-	char stats[240];
+	char stats[640];
 	int len;
 
 	mutex_lock(&policy_lock);
 	len = scnprintf(stats, sizeof(stats),
-		"revision=%u\nrules=%u\nvalidated=%u\nleases=%u\npending=%d\nchanged=%ld\nclamped=%ld\nfailed=%ld\ndropped=%ld\n",
+		"revision=%u\nrules=%u\nvalidated=%u\nleases=%u\npending=%d\nchanged=%ld\nclamped=%ld\nfailed=%ld\ndropped=%ld\n"
+		"adaptive=%s\nforeground=%s\ndisplay_off=%u\ncontext_switches=%u\nadapted=%ld\n",
 		revision, policy ? policy->count : 0, validated, lease_count,
 		atomic_read(&pending), atomic_long_read(&changed),
 		atomic_long_read(&clamped), atomic_long_read(&failed),
-		atomic_long_read(&dropped));
+		atomic_long_read(&dropped),
+		policy && policy->adaptive_scope[0] ? policy->adaptive_scope : "-",
+		scene && scene->foreground[0] ? scene->foreground : "-",
+		scene && scene->display_off, context_switches, atomic_long_read(&adapted));
 	mutex_unlock(&policy_lock);
 	return simple_read_from_buffer(user, size, offset, stats, len);
 }
@@ -511,6 +637,7 @@ static const struct file_operations control_ops = {
 	.owner = THIS_MODULE,
 	.read = control_read,
 	.write = control_write,
+	.release = control_release,
 	.llseek = no_llseek,
 };
 
@@ -529,6 +656,12 @@ static int __init affinity_init(void)
 	affinity_wq = alloc_ordered_workqueue("ace6_affinity", WQ_FREEZABLE | WQ_POWER_EFFICIENT);
 	if (!affinity_wq)
 		return -ENOMEM;
+	snapshot = kvmalloc_array(MAX_SNAPSHOT, sizeof(*snapshot), GFP_KERNEL);
+	if (!snapshot) {
+		destroy_workqueue(affinity_wq);
+		return -ENOMEM;
+	}
+	init_adaptive_masks();
 	for_each_kernel_tracepoint(find_hook, NULL);
 	for (i = 0; i < ARRAY_SIZE(hooks); i++) {
 		if (!hooks[i].tp) {
@@ -547,6 +680,7 @@ unregister:
 		tracepoint_probe_unregister(hooks[i].tp, hooks[i].probe, NULL);
 	tracepoint_synchronize_unregister();
 	destroy_workqueue(affinity_wq);
+	kvfree(snapshot);
 	return ret;
 }
 
@@ -560,6 +694,8 @@ static void __exit affinity_exit(void)
 	tracepoint_synchronize_unregister();
 	destroy_workqueue(affinity_wq);
 	release_policy();
+	kfree(scene);
+	kvfree(snapshot);
 }
 
 module_init(affinity_init);

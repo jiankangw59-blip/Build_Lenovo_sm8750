@@ -8,10 +8,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "adaptive_watch.h"
 
 #define DEVICE "/dev/ace6_thread_affinity"
 #define MAX_BYTES (512 * 1024)
 #define MAX_PROFILES 512
+#define SCENE_PATH "/data/user/0/com.omarea.vtools/files/xiaocaiye_a11y_state"
+#define DISPLAY_PATH "/sys/class/backlight/panel0-backlight/brightness"
 
 static const char *const sources[] = {
 	"template_rules.prop", "app_profile_rules.prop", "auto_rules.prop",
@@ -177,7 +180,7 @@ static size_t append_source(char *buffer, size_t used, const char *dir, size_t t
 
 static int status(void)
 {
-	char data[512];
+	char data[640];
 	int fd = open(DEVICE, O_RDONLY | O_CLOEXEC);
 	ssize_t n;
 
@@ -198,6 +201,7 @@ int main(int argc, char **argv)
 {
 	bool check = argc == 3 && !strcmp(argv[1], "check");
 	bool load = argc == 3 && !strcmp(argv[1], "load");
+	bool adaptive = (argc == 3 || argc == 4) && !strcmp(argv[1], "adapt-load");
 	bool dump = argc == 3 && !strcmp(argv[1], "dump");
 	bool clear = argc == 2 && !strcmp(argv[1], "clear");
 	char *buffer;
@@ -207,8 +211,14 @@ int main(int argc, char **argv)
 
 	if (argc == 2 && !strcmp(argv[1], "status"))
 		return status();
-	if (!check && !load && !dump && !clear) {
-		fprintf(stderr, "Usage: %s status | clear | {check,load,dump} RULE_DIRECTORY\n", argv[0]);
+	if ((argc == 2 || argc == 4) && !strcmp(argv[1], "watch"))
+		return watch_context(argc == 4 ? argv[2] : SCENE_PATH, argc == 4 ? argv[3] : DISPLAY_PATH);
+	if (!check && !load && !adaptive && !dump && !clear) {
+		fprintf(stderr,
+			"Usage: %s status | clear | {check,load,dump} RULE_DIRECTORY\n"
+			"       %s adapt-load RULE_DIRECTORY [PROCESS_PATTERN]\n"
+			"       %s watch [SCENE_FILE BRIGHTNESS_FILE]\n",
+			argv[0], argv[0], argv[0]);
 		return 2;
 	}
 	buffer = malloc(MAX_BYTES);
@@ -220,7 +230,17 @@ int main(int argc, char **argv)
 		memcpy(buffer, "?check\n", 7);
 		used = 7;
 	}
-	if (check || load || dump) {
+	if (adaptive) {
+		const char *scope = argc == 4 ? argv[3] : "*";
+
+		if (!*scope || strlen(scope) >= 128 || strpbrk(scope, " \t\r\n")) {
+			fprintf(stderr, "Invalid adaptive process selector\n");
+			free(buffer);
+			return 2;
+		}
+		used = snprintf(buffer, MAX_BYTES, "?adapt\t%s\n", scope);
+	}
+	if (check || load || adaptive || dump) {
 		for (tier = 0; tier < sizeof(sources) / sizeof(sources[0]); tier++)
 			used = append_source(buffer, used, argv[2], tier);
 	}
