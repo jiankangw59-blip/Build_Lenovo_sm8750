@@ -6,6 +6,8 @@
 #include <linux/cpuset.h>
 #include <linux/fs.h>
 #include <linux/hashtable.h>
+#include <linux/jiffies.h>
+#include <linux/ktime.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/module.h>
@@ -14,6 +16,7 @@
 #include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
+#include <linux/sort.h>
 #include <linux/tracepoint.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
@@ -22,6 +25,12 @@
 
 #define MAX_PENDING 4096
 #define MAX_SNAPSHOT 16384
+#define MAX_GAME_THREADS 1024
+#define GAME_GATE_HITS 3
+#define GAME_GATE_TIMEOUT (300 * HZ)
+#define GAME_ENTRY_SAMPLES 2
+#define GAME_SAMPLES 16
+#define GAME_THIRD_HITS 8
 
 struct affinity_state {
 	cpumask_t effective;
@@ -42,6 +51,24 @@ struct task_event {
 	struct task_struct *parent;
 	bool exit;
 };
+
+struct game_sample {
+	struct task_struct *task;
+	pid_t tid;
+	u64 runtime;
+	unsigned int top_three;
+};
+
+/* Two bounded snapshots retain task identity even when a TID is reused. */
+static struct game_sample *game_samples, *game_next;
+static struct task_struct *game_leader;
+static struct task_struct *game_rank[3];
+static unsigned int game_count, game_gate_hits, game_entry_samples, game_passes;
+static unsigned long game_deadline;
+static u64 game_time;
+static bool game_sampling, game_finalized;
+static void sample_game(struct work_struct *work);
+static DECLARE_DELAYED_WORK(game_work, sample_game);
 
 /* All policy swaps and affinity operations share this lock. Tracepoints only queue work. */
 static DEFINE_MUTEX(policy_lock);
@@ -221,6 +248,58 @@ static void restore_lease(struct thread_lease *lease)
 	free_lease(lease);
 }
 
+static void release_game_samples(struct game_sample *samples, unsigned int count)
+{
+	while (count)
+		put_task_struct(samples[--count].task);
+}
+
+static void stop_game(void)
+{
+	cancel_delayed_work(&game_work);
+	release_game_samples(game_samples, game_count);
+	if (game_leader)
+		put_task_struct(game_leader);
+	game_leader = NULL;
+	memset(game_rank, 0, sizeof(game_rank));
+	game_count = 0;
+	game_time = 0;
+	game_gate_hits = 0;
+	game_entry_samples = 0;
+	game_passes = 0;
+	game_sampling = false;
+	game_finalized = false;
+}
+
+static void start_game(struct task_struct *task, const char *process)
+{
+	const struct affinity_rule *rule;
+
+	if (game_leader || !scene || !scene->game || cpumask_empty(&game_top_cpus) ||
+	    task != task->group_leader || strcmp(scene->foreground, process) ||
+	    !adaptive_in_scope(policy, task, process))
+		return;
+	rule = select_rule(policy, process, "");
+	if (rule && rule->manual && !strcmp(rule->process, process))
+		return;
+	get_task_struct(task);
+	game_leader = task;
+	game_deadline = jiffies + GAME_GATE_TIMEOUT;
+	queue_delayed_work(affinity_wq, &game_work, 0);
+}
+
+static const struct cpumask *game_mask(struct task_struct *task,
+				      const struct affinity_rule *rule)
+{
+	if (game_leader != task->group_leader || (rule && rule->source >= 3))
+		return NULL;
+	if (task == game_rank[0] || task == game_rank[1])
+		return &game_top_cpus;
+	if (task == game_rank[2])
+		return &game_third_cpus;
+	return &interactive_cpus;
+}
+
 static void apply_task(struct task_struct *task, struct task_struct *parent, const char *process)
 {
 	struct thread_lease *lease = find_lease(task);
@@ -243,8 +322,16 @@ static void apply_task(struct task_struct *task, struct task_struct *parent, con
 		get_task_comm(thread, task);
 		thread_name = strim(thread);
 		rule = select_rule(policy, process, thread_name);
-		if (scene && adaptive_in_scope(policy, task, process))
+		start_game(task, process);
+		automatic = game_mask(task, rule);
+		if (!strcmp(process, "scene-daemon") && (!rule || !rule->manual)) {
+			/* This daemon is managed separately from general app templates. */
+			rule = NULL;
+			if (scene && !strcmp(policy->adaptive_scope, "*"))
+				automatic = scene->display_off ? &tiny_cpus : &little_cpus;
+		} else if (!automatic && scene && adaptive_in_scope(policy, task, process)) {
 			automatic = adaptive_mask(task, scene_stage(scene, process), thread_name, rule);
+		}
 		requested = automatic ?: (rule ? &rule->mask : NULL);
 	}
 	read_affinity(task, &observed);
@@ -301,6 +388,141 @@ static void apply_task(struct task_struct *task, struct task_struct *parent, con
 	}
 }
 
+static int compare_game_sample(const void *a, const void *b)
+{
+	return ((const struct game_sample *)a)->tid - ((const struct game_sample *)b)->tid;
+}
+
+static unsigned int capture_game_threads(void)
+{
+	struct task_struct *task;
+	unsigned int count = 0;
+
+	rcu_read_lock();
+	for_each_thread(game_leader, task) {
+		if (!task_eligible(task))
+			continue;
+		if (count == MAX_GAME_THREADS)
+			break;
+		get_task_struct(task);
+		game_next[count++] = (struct game_sample){ .task = task, .tid = task_pid_nr(task) };
+	}
+	rcu_read_unlock();
+	sort(game_next, count, sizeof(*game_next), compare_game_sample, NULL);
+	return count;
+}
+
+static bool game_thread_can_rank(struct task_struct *task)
+{
+	const struct affinity_rule *rule;
+	char name[TASK_COMM_LEN];
+	cpumask_t allowed;
+
+	get_task_comm(name, task);
+	rule = select_rule(policy, scene->foreground, strim(name));
+	if (rule && rule->source >= 3)
+		return false;
+	cpuset_cpus_allowed(task, &allowed);
+	return cpumask_intersects(&allowed, &game_top_cpus);
+}
+
+static void sample_game(struct work_struct *work)
+{
+	struct game_sample *top[3] = {};
+	struct task_struct *next_rank[3] = {};
+	u64 deltas[3] = {}, total = 0, now;
+	unsigned int i, j, old = 0, count, delay;
+	bool gate_opened = false;
+
+	mutex_lock(&policy_lock);
+	if (!game_leader || game_finalized)
+		goto out;
+	if (!task_eligible(game_leader)) {
+		stop_game();
+		goto out;
+	}
+	count = capture_game_threads();
+	now = ktime_get_ns();
+	for (i = 0; i < count; i++) {
+		struct game_sample *sample = &game_next[i];
+		u64 delta;
+
+#ifdef MODULE
+		sample->runtime = READ_ONCE(sample->task->se.sum_exec_runtime);
+#else
+		sample->runtime = task_sched_runtime(sample->task);
+#endif
+		while (old < game_count && game_samples[old].tid < sample->tid)
+			old++;
+		if (old == game_count || game_samples[old].task != sample->task ||
+		    sample->runtime < game_samples[old].runtime)
+			continue;
+		delta = sample->runtime - game_samples[old].runtime;
+		total += delta;
+		sample->top_three = game_samples[old].top_three;
+		if (!delta || delta <= deltas[2] || !game_thread_can_rank(sample->task))
+			continue;
+		for (j = ARRAY_SIZE(top) - 1; j && delta > deltas[j - 1]; j--) {
+			top[j] = top[j - 1];
+			deltas[j] = deltas[j - 1];
+		}
+		top[j] = sample;
+		deltas[j] = delta;
+	}
+	if (game_time && !game_sampling) {
+		if (total >= (now - game_time) * 9 / 10)
+			game_gate_hits++;
+		else
+			game_gate_hits = 0;
+		gate_opened = game_gate_hits >= GAME_GATE_HITS;
+		game_sampling = gate_opened;
+	}
+	if (game_time && (game_sampling || game_entry_samples < GAME_ENTRY_SAMPLES)) {
+		for (j = 0; j < 2; j++)
+			next_rank[j] = top[j] ? top[j]->task : NULL;
+		if (game_sampling && !gate_opened) {
+			game_passes++;
+			for (j = 0; j < ARRAY_SIZE(top) && top[j]; j++)
+				top[j]->top_three++;
+			if (top[2] && top[2]->top_three >= GAME_THIRD_HITS &&
+			    deltas[2] * 10 >= deltas[1] * 7)
+				next_rank[2] = top[2]->task;
+		} else if (!game_sampling) {
+			game_entry_samples++;
+		}
+	} else if (game_time) {
+		/* Preserve the entry assignment until the load gate opens. */
+		for (i = 0; i < count; i++)
+			for (j = 0; j < ARRAY_SIZE(game_rank); j++)
+				if (game_next[i].task == game_rank[j])
+					next_rank[j] = game_rank[j];
+	}
+	if (memcmp(game_rank, next_rank, sizeof(game_rank))) {
+		struct task_struct *previous[ARRAY_SIZE(game_rank)];
+
+		memcpy(previous, game_rank, sizeof(previous));
+		memcpy(game_rank, next_rank, sizeof(game_rank));
+		for (j = 0; j < ARRAY_SIZE(game_rank); j++) {
+			if (previous[j] && previous[j] != game_rank[j])
+				apply_task(previous[j], NULL, scene->foreground);
+			if (game_rank[j] && previous[j] != game_rank[j])
+				apply_task(game_rank[j], NULL, scene->foreground);
+		}
+	}
+	release_game_samples(game_samples, game_count);
+	swap(game_samples, game_next);
+	game_count = count;
+	game_time = now;
+	game_finalized = game_passes >= GAME_SAMPLES ||
+		(!game_sampling && time_after_eq(jiffies, game_deadline));
+	if (!game_finalized) {
+		delay = game_sampling ? 1500 : game_entry_samples < GAME_ENTRY_SAMPLES ? 1200 : 2000;
+		queue_delayed_work(affinity_wq, &game_work, msecs_to_jiffies(delay));
+	}
+out:
+	mutex_unlock(&policy_lock);
+}
+
 static void run_event(struct work_struct *work)
 {
 	struct task_event *event = container_of(work, struct task_event, work);
@@ -308,6 +530,21 @@ static void run_event(struct work_struct *work)
 
 	mutex_lock(&policy_lock);
 	if (event->exit) {
+		unsigned int rank;
+
+		if (event->task == game_leader) {
+			stop_game();
+		} else {
+			for (rank = 0; rank < ARRAY_SIZE(game_rank); rank++) {
+				if (event->task == game_rank[rank]) {
+					game_rank[rank] = NULL;
+					game_finalized = false;
+					game_passes = 0;
+					game_deadline = jiffies + GAME_GATE_TIMEOUT;
+					queue_delayed_work(affinity_wq, &game_work, msecs_to_jiffies(1200));
+				}
+			}
+		}
 		lease = find_lease(event->task);
 		if (lease)
 			free_lease(lease);
@@ -404,6 +641,7 @@ static void release_policy(void)
 	unsigned int bucket;
 
 	WRITE_ONCE(enabled, false);
+	stop_game();
 	hash_for_each_safe(leases, bucket, tmp, lease, node)
 		restore_lease(lease);
 	kvfree(policy);
@@ -449,6 +687,23 @@ static enum app_stage current_stage(const struct scene_context *context, const c
 	return context ? scene_stage(context, process) : APP_STATIC;
 }
 
+static bool scene_affects_task(const struct scene_context *previous,
+			       struct task_struct *task, const char *process)
+{
+	bool was_game, is_game;
+
+	if (!*process)
+		return false;
+	if (!strcmp(process, "scene-daemon"))
+		return !strcmp(policy->adaptive_scope, "*") &&
+			(!previous || !scene || previous->display_off != scene->display_off);
+	was_game = previous && previous->game && !strcmp(previous->foreground, process);
+	is_game = scene && scene->game && !strcmp(scene->foreground, process);
+	return adaptive_in_scope(policy, task, process) &&
+		(current_stage(previous, process) != current_stage(scene, process) ||
+		 was_game != is_game);
+}
+
 static void apply_snapshot(unsigned int count, const struct scene_context *previous,
 			   bool scene_change)
 {
@@ -465,9 +720,7 @@ static void apply_snapshot(unsigned int count, const struct scene_context *previ
 			if (!process_name(task, name))
 				name[0] = '\0';
 		}
-		if (!scene_change ||
-		    (name[0] && adaptive_in_scope(policy, task, name) &&
-		     current_stage(previous, name) != current_stage(scene, name)))
+		if (!scene_change || scene_affects_task(previous, task, name))
 			apply_task(task, NULL, name);
 		cond_resched();
 	}
@@ -492,6 +745,7 @@ static int replace_policy(struct affinity_policy *next)
 		WRITE_ONCE(enabled, policy != NULL);
 		goto out;
 	}
+	stop_game();
 	kvfree(policy);
 	policy = next;
 #ifndef MODULE
@@ -537,6 +791,9 @@ static int replace_scene(struct file *file, struct scene_context *next)
 		if (ret && next)
 			goto out;
 	}
+	if (game_leader && (!previous || !next || !next->game ||
+	    strcmp(previous->foreground, next->foreground)))
+		stop_game();
 	scene = next;
 	WRITE_ONCE(scene_owner, next ? file : NULL);
 	context_switches++;
@@ -634,20 +891,25 @@ static ssize_t control_write(struct file *file, const char __user *user,
 static ssize_t control_read(struct file *file, char __user *user,
 			    size_t size, loff_t *offset)
 {
-	char stats[640];
+	char stats[768];
 	int len;
 
 	mutex_lock(&policy_lock);
 	len = scnprintf(stats, sizeof(stats),
 		"revision=%u\nrules=%u\nvalidated=%u\nleases=%u\npending=%d\nchanged=%ld\nclamped=%ld\nfailed=%ld\ndropped=%ld\n"
-		"adaptive=%s\nforeground=%s\ndisplay_off=%u\ncontext_switches=%u\nadapted=%ld\n",
+		"adaptive=%s\nforeground=%s\ndisplay_off=%u\ncontext_switches=%u\nadapted=%ld\n"
+		"game_tgid=%d\ngame_top=%d,%d,%d\ngame_samples=%u\ngame_finalized=%u\n",
 		revision, policy ? policy->count : 0, validated, lease_count,
 		atomic_read(&pending), atomic_long_read(&changed),
 		atomic_long_read(&clamped), atomic_long_read(&failed),
 		atomic_long_read(&dropped),
 		policy && policy->adaptive_scope[0] ? policy->adaptive_scope : "-",
 		scene && scene->foreground[0] ? scene->foreground : "-",
-		scene && scene->display_off, context_switches, atomic_long_read(&adapted));
+		scene && scene->display_off, context_switches, atomic_long_read(&adapted),
+		game_leader ? task_pid_nr(game_leader) : 0,
+		game_rank[0] ? task_pid_nr(game_rank[0]) : 0,
+		game_rank[1] ? task_pid_nr(game_rank[1]) : 0,
+		game_rank[2] ? task_pid_nr(game_rank[2]) : 0, game_passes, game_finalized);
 	mutex_unlock(&policy_lock);
 	return simple_read_from_buffer(user, size, offset, stats, len);
 }
@@ -676,8 +938,13 @@ static int __init affinity_init(void)
 	if (!affinity_wq)
 		return -ENOMEM;
 	snapshot = kvmalloc_array(MAX_SNAPSHOT, sizeof(*snapshot), GFP_KERNEL);
-	if (!snapshot) {
+	game_samples = kvmalloc_array(MAX_GAME_THREADS, sizeof(*game_samples), GFP_KERNEL);
+	game_next = kvmalloc_array(MAX_GAME_THREADS, sizeof(*game_next), GFP_KERNEL);
+	if (!snapshot || !game_samples || !game_next) {
 		destroy_workqueue(affinity_wq);
+		kvfree(game_next);
+		kvfree(game_samples);
+		kvfree(snapshot);
 		return -ENOMEM;
 	}
 	init_adaptive_masks();
@@ -699,6 +966,8 @@ unregister:
 		tracepoint_probe_unregister(hooks[i].tp, hooks[i].probe, NULL);
 	tracepoint_synchronize_unregister();
 	destroy_workqueue(affinity_wq);
+	kvfree(game_next);
+	kvfree(game_samples);
 	kvfree(snapshot);
 	return ret;
 }
@@ -711,9 +980,14 @@ static void __exit affinity_exit(void)
 	for (i = 0; i < ARRAY_SIZE(hooks); i++)
 		tracepoint_probe_unregister(hooks[i].tp, hooks[i].probe, NULL);
 	tracepoint_synchronize_unregister();
-	destroy_workqueue(affinity_wq);
+	mutex_lock(&policy_lock);
 	release_policy();
+	mutex_unlock(&policy_lock);
+	cancel_delayed_work_sync(&game_work);
+	destroy_workqueue(affinity_wq);
 	kfree(scene);
+	kvfree(game_next);
+	kvfree(game_samples);
 	kvfree(snapshot);
 }
 

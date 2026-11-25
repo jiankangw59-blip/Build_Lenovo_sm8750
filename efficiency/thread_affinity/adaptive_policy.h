@@ -12,6 +12,7 @@ struct scene_context {
 	char foreground[PROCESS_NAME_LEN];
 	char visible[VISIBLE_PACKAGES_LEN];
 	bool display_off;
+	bool game;
 };
 
 enum app_stage {
@@ -29,6 +30,7 @@ enum thread_role {
 };
 
 static cpumask_t tiny_cpus, little_cpus, interactive_cpus, background_cpus;
+static cpumask_t game_top_cpus, game_third_cpus;
 
 static void init_adaptive_masks(void)
 {
@@ -47,6 +49,10 @@ static void init_adaptive_masks(void)
 			cpumask_set_cpu(cpu, &interactive_cpus);
 		if (index < 5)
 			cpumask_set_cpu(cpu, &background_cpus);
+		if (count == 8 && index >= 4)
+			cpumask_set_cpu(cpu, &game_third_cpus);
+		if (count == 8 && index >= 6)
+			cpumask_set_cpu(cpu, &game_top_cpus);
 		index++;
 	}
 }
@@ -60,12 +66,14 @@ static int parse_scene_context(char *data, struct scene_context *out)
 {
 	char *foreground = strsep(&data, "\t");
 	char *visible = strsep(&data, "\t");
-	char *screen = strsep(&data, "\n");
+	char *screen = strsep(&data, "\t\n");
+	char *game = strsep(&data, "\n");
 	const char *p;
 	size_t token = 0;
 
 	if (!foreground || !visible || !screen || !*foreground || !*visible ||
-	    (data && *data) || (strcmp(screen, "0") && strcmp(screen, "1")))
+	    (data && *data) || (strcmp(screen, "0") && strcmp(screen, "1")) ||
+	    (game && *game && strcmp(game, "0") && strcmp(game, "1")))
 		return -EINVAL;
 	if (strcmp(foreground, "-")) {
 		for (p = foreground; *p; p++)
@@ -89,6 +97,7 @@ static int parse_scene_context(char *data, struct scene_context *out)
 			return -E2BIG;
 	}
 	out->display_off = *screen == '1';
+	out->game = game && *game == '1' && out->foreground[0] && !out->display_off;
 	return 0;
 }
 
