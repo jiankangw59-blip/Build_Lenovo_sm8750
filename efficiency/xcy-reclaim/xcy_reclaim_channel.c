@@ -247,11 +247,7 @@ static ssize_t xcy_channel_write(struct file *file, const char __user *buffer, s
 	challenge = channel->expected;
 	mutex_unlock(&channel->challenge_lock);
 	error = xcy_reclaim_read_reply(&challenge, buffer, length, &snapshot);
-	if (error == -ESRCH) {
-		xcy_reclaim_notify(XCY_RECLAIM_NOTICE_IDENTITY, challenge.diagnostic_stage);
-		error = -ESTALE;
-	}
-	if (error)
+	if (error && error != -ESRCH)
 		goto out;
 	mutex_lock(&channel->challenge_lock);
 	if (strcmp(challenge.nonce, channel->expected.nonce) || !channel->expected.operation)
@@ -259,6 +255,16 @@ static ssize_t xcy_channel_write(struct file *file, const char __user *buffer, s
 	else
 		channel->expected.operation = 0;
 	mutex_unlock(&channel->challenge_lock);
+	if (error == -ESRCH) {
+		int finished = xcy_reclaim_runtime_finish(&channel->runtime, challenge.request,
+							 XCY_RECLAIM_SAMPLED_RETRY);
+
+		/* The publisher responded. Do not let the same round also time out. */
+		if (finished != -ESTALE)
+			xcy_reclaim_notify(XCY_RECLAIM_NOTICE_IDENTITY, challenge.diagnostic_stage);
+		channel_ops->retire(channel->context, challenge.request);
+		error = -ESTALE;
+	}
 	if (!error)
 		error = channel_ops->receive(channel, channel->context, &challenge, &snapshot);
 out:
