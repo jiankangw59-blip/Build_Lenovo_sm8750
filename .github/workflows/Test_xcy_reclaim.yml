@@ -33,6 +33,10 @@ jobs:
             efficiency/xcy-reclaim/xcy_reclaim_rank.c efficiency/xcy-reclaim/xcy_reclaim_urgent.c \
             -o "$RUNNER_TEMP/xcy-plan"
           "$RUNNER_TEMP/xcy-plan"
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
+            efficiency/xcy-reclaim/test_protection.c efficiency/xcy-reclaim/xcy_reclaim_protection.c \
+            -o "$RUNNER_TEMP/xcy-protection"
+          "$RUNNER_TEMP/xcy-protection"
       - name: Compile the components against the pinned ARM64 6.6.118 kernel
         shell: bash
         run: |
@@ -42,26 +46,13 @@ jobs:
           source_ref=65b954a773b183a9999b06bb1b2f921f12eaaf11
           kernel="$RUNNER_TEMP/xcy-kernel"
           out="$RUNNER_TEMP/xcy-kernel-out"
-          objects="$RUNNER_TEMP/xcy-objects"
-          mkdir -p "$kernel" "$out" "$objects"
+          mkdir -p "$kernel" "$out"
           curl --fail --location --retry 3 --silent --show-error \
             "https://codeload.github.com/OnePlusOSS/android_kernel_common_oneplus_sm8750/tar.gz/$source_ref" \
             | tar xz -C "$kernel" --strip-components=1
           test "$(make -s -C "$kernel" kernelversion)" = 6.6.118
+          python3 efficiency/xcy-reclaim/install_builtin.py --kernel "$kernel"
           make -s -C "$kernel" O="$out" ARCH=arm64 LLVM=1 gki_defconfig
-          make -s -C "$kernel" -j2 O="$out" ARCH=arm64 LLVM=1 prepare
-          cp efficiency/xcy-reclaim/xcy_reclaim*.[ch] "$objects/"
-          cat > "$objects/Makefile" <<'EOF'
-          obj-m := xcy_reclaim_runtime.o xcy_reclaim_psi.o xcy_reclaim_rank.o xcy_reclaim_urgent.o xcy_reclaim_importance.o xcy_reclaim_identity.o xcy_reclaim_mailbox.o xcy_reclaim_candidates.o xcy_reclaim_plan.o xcy_reclaim_reply.o
-          obj-m += xcy_reclaim_channel.o xcy_reclaim_engine.o xcy_reclaim_signal.o
-          CFLAGS_REMOVE_xcy_reclaim_urgent.o := -mgeneral-regs-only $(CC_FLAGS_LTO)
-          CFLAGS_xcy_reclaim_urgent.o := -fno-lto
-          EOF
-          make -s -C "$kernel" -j2 O="$out" ARCH=arm64 LLVM=1 M="$objects" \
-            xcy_reclaim_runtime.o xcy_reclaim_psi.o xcy_reclaim_rank.o \
-            xcy_reclaim_urgent.o xcy_reclaim_importance.o xcy_reclaim_identity.o \
-            xcy_reclaim_mailbox.o xcy_reclaim_candidates.o xcy_reclaim_plan.o xcy_reclaim_reply.o \
-            xcy_reclaim_channel.o xcy_reclaim_engine.o xcy_reclaim_signal.o
-          for component in "$objects"/*.o; do
-            llvm-readelf -h "$component" | grep -E 'Machine:.*AArch64'
-          done
+          grep -qx 'CONFIG_XCY_RECLAIM=y' "$out/.config"
+          make -s -C "$kernel" -j2 O="$out" ARCH=arm64 LLVM=1 mm/xcy-reclaim/built-in.a
+          llvm-ar t "$out/mm/xcy-reclaim/built-in.a" | grep -E '(^|/)xcy_reclaim_sources.o$'

@@ -13,6 +13,9 @@ struct xcy_reclaim_source_view {
 /* A view is immutable while held. `valid_now` compares its generation with
  * the latest Scene/Audio/PMS/allowlist inputs using bounded kernel reads. */
 struct xcy_reclaim_sources {
+	void (*reset)(void);
+	int (*publish)(const struct xcy_reclaim_reply *reply, const char *frame, size_t length);
+	void (*observe)(const xcy_memory_snapshot_t *snapshot, const struct xcy_reclaim_source_view *view);
 	int (*get)(const struct xcy_reclaim_reply *reply, struct xcy_reclaim_source_view *view);
 	void (*put)(struct xcy_reclaim_source_view *view);
 	bool (*valid_now)(const struct xcy_reclaim_source_view *view, u64 now_ms);

@@ -20,6 +20,7 @@ struct xcy_reclaim_channel_ops {
 	int (*open)(struct xcy_reclaim_channel *channel, void **context);
 	void (*close)(void *context);
 	void (*retire)(void *context, u64 request);
+	int (*publish)(const struct xcy_reclaim_reply *reply, const char *frame, size_t length);
 	int (*receive)(struct xcy_reclaim_channel *channel, void *context,
 		       const struct xcy_reclaim_reply *reply, xcy_memory_snapshot_t *snapshot);
 };

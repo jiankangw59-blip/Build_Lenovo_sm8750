@@ -14,6 +14,7 @@
 
 #include "xcy_reclaim_channel.h"
 #include "xcy_reclaim_mailbox.h"
+#include "xcy_reclaim_protection.h"
 
 struct xcy_reclaim_channel {
 	struct xcy_reclaim_runtime runtime;
@@ -232,15 +233,50 @@ static ssize_t xcy_channel_read(struct file *file, char __user *buffer, size_t l
 	return xcy_reclaim_mailbox_read(&channel->mailbox, buffer, length, file->f_flags & O_NONBLOCK);
 }
 
+static ssize_t xcy_channel_protection(struct xcy_reclaim_channel *channel,
+				       const char __user *buffer, size_t length)
+{
+	struct xcy_reclaim_reply expected;
+	char *frame;
+	int error;
+
+	if (length > XCY_RECLAIM_STATE_BYTES)
+		return -EMSGSIZE;
+	frame = vmemdup_user(buffer, length);
+	if (IS_ERR(frame))
+		return PTR_ERR(frame);
+	if ((length >= sizeof(XCY_RECLAIM_SCENE_PREFIX) - 1 &&
+	     !memcmp(frame, XCY_RECLAIM_SCENE_PREFIX, sizeof(XCY_RECLAIM_SCENE_PREFIX) - 1)) ||
+	    (length == sizeof(XCY_RECLAIM_SCENE_LOST) - 1 &&
+	     !memcmp(frame, XCY_RECLAIM_SCENE_LOST, length))) {
+		error = channel_ops->publish(NULL, frame, length);
+	} else {
+		mutex_lock(&channel->challenge_lock);
+		expected = channel->expected;
+		mutex_unlock(&channel->challenge_lock);
+		error = expected.operation == 'I' ? channel_ops->publish(&expected, frame, length) : -ESTALE;
+	}
+	xcy_snapshot_free(frame);
+	return error ? error : length;
+}
+
 static ssize_t xcy_channel_write(struct file *file, const char __user *buffer, size_t length, loff_t *pos)
 {
 	struct xcy_reclaim_channel *channel = file->private_data;
 	struct xcy_reclaim_reply challenge;
 	xcy_memory_snapshot_t snapshot = {0};
+	char prefix[sizeof(XCY_RECLAIM_SCENE_LOST) - 1];
 	int error;
 
 	if (!xcy_is_owner(channel->root_publisher, channel->publisher_secid))
 		return -EACCES;
+	if (length >= sizeof(prefix)) {
+		if (copy_from_user(prefix, buffer, sizeof(prefix)))
+			return -EFAULT;
+		if (!memcmp(prefix, XCY_RECLAIM_STATE_PREFIX, sizeof(XCY_RECLAIM_STATE_PREFIX) - 1) ||
+		    !memcmp(prefix, XCY_RECLAIM_SCENE_LOST, sizeof(prefix)))
+			return xcy_channel_protection(channel, buffer, length);
+	}
 	if (mutex_lock_interruptible(&channel->reply_lock))
 		return -EINTR;
 	mutex_lock(&channel->challenge_lock);
@@ -389,7 +425,7 @@ int xcy_reclaim_channel_register(const struct xcy_reclaim_channel_ops *ops)
 {
 	int error;
 
-	if (!ops || !ops->open || !ops->close || !ops->retire || !ops->receive || channel_ops)
+	if (!ops || !ops->open || !ops->close || !ops->retire || !ops->publish || !ops->receive || channel_ops)
 		return -EINVAL;
 	channel_ops = ops;
 	error = misc_register(&xcy_notice_device);

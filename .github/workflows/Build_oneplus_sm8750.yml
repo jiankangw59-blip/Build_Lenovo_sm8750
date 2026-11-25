@@ -80,6 +80,11 @@ on:
         type: boolean
         default: false
 
+      enable_xcy_reclaim:
+        description: "Build the event-driven XiaoCaiYe controller (Ace 6 6.6.118)"
+        type: boolean
+        default: false
+
       custom_kernel_suffix:
         description: "✏️ 自定义内核名称- (-开头 留空则默认官方）"
         required: false
@@ -984,6 +989,14 @@ jobs:
           test "$DEVICES_NAME:$KERNEL_VERSION:$KERNEL_SOURCE_REF" = "oneplus_ace_6:6.6.118:65b954a773b183a9999b06bb1b2f921f12eaaf11"
           python3 efficiency/thread_affinity/install_builtin.py --kernel kernel_workspace/common
 
+      - name: Attach Ace 6 XiaoCaiYe event-driven reclaim
+        if: ${{ inputs.enable_xcy_reclaim }}
+        run: |
+          set -euo pipefail
+          test "$DEVICES_NAME:$KERNEL_VERSION:$KERNEL_SOURCE_REF" = "oneplus_ace_6:6.6.118:65b954a773b183a9999b06bb1b2f921f12eaaf11"
+          python3 efficiency/xcy-reclaim/install_builtin.py --kernel kernel_workspace/common \
+            --report kernel_workspace/preflash/efficiency/xcy-reclaim-source.json
+
       - name: 🔧 Set Kernel name (设置内核名称)
         run: |
           cd kernel_workspace
@@ -1076,6 +1089,13 @@ jobs:
               echo "::error::XiaoCaiYe selection interface did not resolve to CONFIG_XCY_LMK_POLICY=y"
               exit 1
             fi
+          fi
+
+          if [ '${{ inputs.enable_xcy_reclaim }}' = 'true' ]; then
+            grep -qx 'CONFIG_XCY_RECLAIM=y' out/.config || {
+              echo "::error::XiaoCaiYe controller did not resolve to a built-in"
+              exit 1
+            }
           fi
 
           if [ "$EFFICIENCY_PROFILE" != off ]; then
@@ -1196,6 +1216,12 @@ jobs:
               exit 1
             }
             cat ../preflash/efficiency/xcy-lmk-build.txt
+          fi
+
+          if [ "${{ inputs.enable_xcy_reclaim }}" = true ]; then
+            grep -E '[[:space:]]__initcall__.*_xcy_reclaim_init7$' out/System.map \
+              | tee ../preflash/efficiency/xcy-reclaim-initcall.txt
+            test -s ../preflash/efficiency/xcy-reclaim-initcall.txt
           fi
 
           if [ "$EFFICIENCY_PROFILE" != off ]; then

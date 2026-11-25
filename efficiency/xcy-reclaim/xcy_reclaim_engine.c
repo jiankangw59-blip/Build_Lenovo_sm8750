@@ -50,6 +50,8 @@ static void xcy_engine_clear(struct xcy_engine_round *round)
 static int xcy_engine_open(struct xcy_reclaim_channel *channel, void **context)
 {
 	*context = xcy_snapshot_calloc(1, sizeof(struct xcy_engine_round));
+	if (*context)
+		engine_sources->reset();
 	return *context ? 0 : -ENOMEM;
 }
 
@@ -58,6 +60,7 @@ static void xcy_engine_close(void *context)
 	struct xcy_engine_round *round = context;
 
 	xcy_engine_clear(round);
+	engine_sources->reset();
 	xcy_snapshot_free(round);
 }
 
@@ -100,6 +103,7 @@ static int xcy_initial_reply(struct xcy_reclaim_channel *channel, struct xcy_eng
 
 	if (error)
 		return xcy_stop_round(channel, round, XCY_RECLAIM_SAMPLED_RETRY);
+	engine_sources->observe(snapshot, &view);
 	error = xcy_reclaim_plan_build(&round->plan, snapshot, &view.protection, xcy_now(), xcy_age, NULL);
 	engine_sources->put(&view);
 	if (error || !round->plan.member_count)
@@ -165,6 +169,7 @@ static int xcy_final_reply(struct xcy_reclaim_channel *channel, struct xcy_engin
 	error = engine_sources->get(reply, &view);
 	if (error)
 		return xcy_stop_round(channel, round, XCY_RECLAIM_SAMPLED_RETRY);
+	engine_sources->observe(snapshot, &view);
 	error = xcy_reclaim_plan_revalidate(&round->plan, round->selected, &round->initial,
 					   snapshot, &view.protection, xcy_now(), xcy_is_urgent(), xcy_age, NULL);
 	if (error) {
@@ -199,10 +204,16 @@ static int xcy_engine_receive(struct xcy_reclaim_channel *channel, void *context
 	return -ESTALE;
 }
 
+static int xcy_engine_publish(const struct xcy_reclaim_reply *reply, const char *frame, size_t length)
+{
+	return engine_sources->publish(reply, frame, length);
+}
+
 static const struct xcy_reclaim_channel_ops engine_ops = {
 	.open = xcy_engine_open,
 	.close = xcy_engine_close,
 	.retire = xcy_engine_retire,
+	.publish = xcy_engine_publish,
 	.receive = xcy_engine_receive,
 };
 
@@ -210,7 +221,8 @@ int xcy_reclaim_engine_register(const struct xcy_reclaim_sources *sources)
 {
 	int error;
 
-	if (!sources || !sources->get || !sources->put || !sources->valid_now || !sources->age || engine_sources)
+	if (!sources || !sources->reset || !sources->publish || !sources->observe ||
+	    !sources->get || !sources->put || !sources->valid_now || !sources->age || engine_sources)
 		return -EINVAL;
 	engine_sources = sources;
 	error = xcy_reclaim_channel_register(&engine_ops);

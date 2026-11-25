@@ -1,0 +1,8 @@
+config XCY_RECLAIM
+	bool "Event-driven XiaoCaiYe memory pressure controller"
+	depends on MMU && PSI && ARM64 && KERNEL_MODE_NEON && SECURITY_SELINUX
+	help
+	  Allow the Ace 6 controller to consume Framework PSS and application
+	  protection observations from the existing Android system process.
+	  It uses kernel PSI to request new observations only under pressure.
+	  Without a publisher and fresh protection data it cannot send signals.
