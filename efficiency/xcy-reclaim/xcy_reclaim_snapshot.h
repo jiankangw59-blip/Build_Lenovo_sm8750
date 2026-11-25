@@ -438,6 +438,17 @@ invalid:
     return 0;
 }
 
+/* Keep ownership metadata so a vanished row still vetoes its app's group.
+ * Its identity and sample can no longer support any decision. */
+static inline void xcy_memory_discard_identity(xcy_memory_process_t *row)
+{
+    row->flags &= ~(XCY_MEMORY_IDENTITY_VALID | XCY_MEMORY_PSS_VALID);
+    row->classification = XCY_MEMORY_CLASS_UNKNOWN;
+    row->starttime = 0;
+    row->sampled_elapsed_ms = 0;
+    row->pss_kb = 0;
+}
+
 /* Unknown/shared/system/module ownership remains visible in the accepted inventory
  * but never becomes a third-party bucket. An unknown identity-valid process
  * on an otherwise eligible UID prevents publishing a partial UID bucket. */

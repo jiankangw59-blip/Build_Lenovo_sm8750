@@ -118,10 +118,10 @@ static int xcy_initial_reply(struct xcy_reclaim_channel *channel, struct xcy_eng
 }
 
 static int xcy_pss_reply(struct xcy_reclaim_channel *channel, struct xcy_engine_round *round,
-			 const xcy_memory_snapshot_t *snapshot)
+			 const struct xcy_reclaim_reply *reply, const xcy_memory_snapshot_t *snapshot)
 {
 	size_t i, picked;
-	bool departed = false;
+	bool departed = reply->identity_changed;
 	int error;
 
 	for (i = 0; i < round->plan.group_count; ++i) {
@@ -166,6 +166,8 @@ static int xcy_final_reply(struct xcy_reclaim_channel *channel, struct xcy_engin
 		xcy_reclaim_notify(XCY_RECLAIM_NOTICE_IDENTITY, 'F');
 		return xcy_stop_round(channel, round, XCY_RECLAIM_NO_CANDIDATE);
 	}
+	if (reply->identity_changed)
+		xcy_reclaim_notify(XCY_RECLAIM_NOTICE_IDENTITY, 'F');
 	error = engine_sources->get(reply, &view);
 	if (error)
 		return xcy_stop_round(channel, round, XCY_RECLAIM_SAMPLED_RETRY);
@@ -173,7 +175,7 @@ static int xcy_final_reply(struct xcy_reclaim_channel *channel, struct xcy_engin
 	error = xcy_reclaim_plan_revalidate(&round->plan, round->selected, &round->initial,
 					   snapshot, &view.protection, xcy_now(), xcy_is_urgent(), xcy_age, NULL);
 	if (error) {
-		if (error == -ESRCH)
+		if (error == -ESRCH && !reply->identity_changed)
 			xcy_reclaim_notify(XCY_RECLAIM_NOTICE_IDENTITY, 'F');
 		engine_sources->put(&view);
 		return xcy_stop_round(channel, round, XCY_RECLAIM_NO_CANDIDATE);
@@ -195,10 +197,13 @@ static int xcy_engine_receive(struct xcy_reclaim_channel *channel, void *context
 		round->request = reply->request;
 		round->stage = XCY_ENGINE_INITIAL;
 	}
-	if (round->stage == XCY_ENGINE_INITIAL && reply->operation == 'I')
+	if (round->stage == XCY_ENGINE_INITIAL && reply->operation == 'I') {
+		if (reply->identity_changed)
+			xcy_reclaim_notify(XCY_RECLAIM_NOTICE_IDENTITY, 'I');
 		return xcy_initial_reply(channel, round, reply, snapshot);
+	}
 	if (round->stage == XCY_ENGINE_PSS && reply->operation == 'P')
-		return xcy_pss_reply(channel, round, snapshot);
+		return xcy_pss_reply(channel, round, reply, snapshot);
 	if (round->stage == XCY_ENGINE_FINAL && reply->operation == 'I')
 		return xcy_final_reply(channel, round, reply, snapshot);
 	return -ESTALE;

@@ -56,6 +56,17 @@ int main(void)
 	assert(plan.members[0].pid == 20 && plan.members[1].pid == 21);
 	assert(!xcy_reclaim_plan_pick(&plan, &initial, &pss, 150000, 0, background, &recent, &picked));
 	assert(picked == 1);
+	/* A departed child remains in its owner's inventory, with no usable PSS. */
+	xcy_memory_discard_identity(&measured_rows[0]);
+	assert(measured_rows[0].uid == 10000 && !strcmp(measured_rows[0].pkg, "org.example.large"));
+	assert(!measured_rows[0].pss_kb && !measured_rows[0].sampled_elapsed_ms);
+	assert(!xcy_reclaim_plan_pick(&plan, &initial, &pss, 150000, 1, background, &recent, &picked));
+	assert(picked == 1);
+	measured_rows[0] = initial_rows[2];
+	xcy_memory_discard_identity(&final_rows[0]);
+	assert(xcy_reclaim_plan_revalidate(&plan, 0, &initial, &final, &protection, 150010,
+					   1, background, &recent) != 0);
+	final_rows[0] = initial_rows[2];
 	assert(!xcy_reclaim_plan_revalidate(&plan, picked, &initial, &final, &protection, 150010,
 					    0, background, &recent));
 	protection.visible = (struct xcy_reclaim_names){visible, 1};
