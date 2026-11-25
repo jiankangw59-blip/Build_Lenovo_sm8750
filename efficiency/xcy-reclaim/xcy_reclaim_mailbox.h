@@ -18,6 +18,7 @@ struct xcy_reclaim_mailbox {
 
 int xcy_reclaim_mailbox_init(struct xcy_reclaim_mailbox *mailbox);
 void xcy_reclaim_mailbox_close(struct xcy_reclaim_mailbox *mailbox);
+void xcy_reclaim_mailbox_cancel(struct xcy_reclaim_mailbox *mailbox);
 void xcy_reclaim_mailbox_destroy(struct xcy_reclaim_mailbox *mailbox);
 int xcy_reclaim_mailbox_publish(struct xcy_reclaim_mailbox *mailbox, char operation,
 				const struct xcy_reclaim_member *members, size_t count,

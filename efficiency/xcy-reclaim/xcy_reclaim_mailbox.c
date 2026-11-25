@@ -21,6 +21,13 @@ void xcy_reclaim_mailbox_close(struct xcy_reclaim_mailbox *mailbox)
 	wake_up_interruptible_all(&mailbox->wait);
 }
 
+void xcy_reclaim_mailbox_cancel(struct xcy_reclaim_mailbox *mailbox)
+{
+	mutex_lock(&mailbox->lock);
+	WRITE_ONCE(mailbox->length, 0);
+	mutex_unlock(&mailbox->lock);
+}
+
 /* Call after the publisher and the producer have both stopped. */
 void xcy_reclaim_mailbox_destroy(struct xcy_reclaim_mailbox *mailbox)
 {
