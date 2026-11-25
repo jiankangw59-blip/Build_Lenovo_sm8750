@@ -1000,9 +1000,14 @@ jobs:
           fi
 
           if [ "$ENABLE_SUSFS" = 'true' ]; then
+            audit_flags=()
+            if [ "$EFFICIENCY_PROFILE" != off ]; then
+              # The disassembly gate needs ELF. The Image build recompiles with ThinLTO.
+              audit_flags+=('KCFLAGS+=-fno-lto')
+            fi
             make -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
               CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out \
-              KCFLAGS+=-O2 KCFLAGS+=-Wno-error \
+              KCFLAGS+=-O2 KCFLAGS+=-Wno-error "${audit_flags[@]}" \
               security/selinux/selinuxfs.o security/selinux/status.o security/selinux/ss/services.o \
               security/selinux/hooks.o security/selinux/hooks.i \
               drivers/kernelsu/selinux/rules.o drivers/kernelsu/feature/selinux_hide.o \
