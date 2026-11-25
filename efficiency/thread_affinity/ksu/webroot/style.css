@@ -1,0 +1,92 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  background: #eff3f1;
+  color: #16231e;
+  --panel: #fbfdfb;
+  --editor: #f3f7f5;
+  --border: #cad8d0;
+  --muted: #485a52;
+  --accent: #14684a;
+  --accent-text: #fff;
+  --error: #ab2734;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    background: #101a15;
+    color: #e4f0e8;
+    --panel: #17241d;
+    --editor: #111d17;
+    --border: #344d40;
+    --muted: #b0c7ba;
+    --accent: #91d6ad;
+    --accent-text: #11241a;
+    --error: #ffb1ba;
+  }
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 760px; margin: auto; padding: 24px 16px; }
+header, .editor-title, .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+header, .editor-title { justify-content: space-between; }
+h1 { margin: 0; font-size: 25px; letter-spacing: -.03em; }
+
+.state {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin: 16px 0;
+}
+
+.state div, .editor {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 13px;
+}
+
+.state div { flex: 1 1 105px; min-width: 0; padding: 10px 12px; }
+.state div:last-child { flex-grow: 2; }
+dt, #line-count, #syntax { color: var(--muted); font-size: 13px; }
+dd { margin: 5px 0 0; font-size: 17px; font-weight: 650; overflow-wrap: anywhere; }
+#foreground { font-size: 14px; }
+.editor { padding: 14px; }
+.editor-title label { font-weight: 650; }
+#syntax { margin: 8px 0 12px; line-height: 1.5; }
+code, textarea { font-family: ui-monospace, monospace; }
+code { overflow-wrap: anywhere; }
+
+textarea {
+  width: 100%;
+  display: block;
+  min-height: 255px;
+  height: 47vh;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--editor);
+  color: inherit;
+  padding: 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.actions { margin-top: 12px; }
+button {
+  min-height: 42px;
+  padding: 8px 13px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+}
+
+button.primary { margin-inline-start: auto; background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button:disabled { opacity: .5; }
+button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#feedback { margin: 9px 0 0; min-height: 1.5em; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
+#feedback[data-error="true"] { color: var(--error); }

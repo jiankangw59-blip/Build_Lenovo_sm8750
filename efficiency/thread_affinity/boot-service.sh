@@ -9,9 +9,9 @@ scene=/data/user/0/com.omarea.vtools/files/xiaocaiye_a11y_state
 games=/data/user/0/com.omarea.vtools/shared_prefs/games.xml
 display=/sys/class/backlight/panel0-backlight/brightness
 
-# Both markers are set during the tested handover. Keeping the old module
-# installed lets a failed startup or a rollback boot restore its policy.
-[ -f "$module/active" ] && [ -f "$legacy/disable" ] || exit 0
+# The retired AppOpt module can supply a fallback if still installed.
+[ -f "$module/active" ] || exit 0
+[ ! -d "$legacy" ] || [ -f "$legacy/disable" ] || exit 0
 
 if [ "${1:-}" = reload ]; then
 	[ -f "$module/ready" ] && ! pidof AppOpt >/dev/null || exit 1

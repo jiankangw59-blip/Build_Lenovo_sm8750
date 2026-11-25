@@ -273,5 +273,7 @@ int main(int argc, char **argv)
 	free(buffer);
 	if (n < 0 || (size_t)n != used)
 		return 1;
-	return status();
+	/* The write is committed even if the subsequent status read fails. */
+	status();
+	return 0;
 }

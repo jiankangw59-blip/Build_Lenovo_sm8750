@@ -1,0 +1,6 @@
+id=ace6_thread_affinity
+name=Ace 6 内核线程分配
+version=1.2
+versionCode=3
+author=Codex
+description=配置 Ace 6 内核的线程绑核规则，支持导入 AppOpt 手写规则和热重载。
