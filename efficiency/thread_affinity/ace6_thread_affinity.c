@@ -85,6 +85,7 @@ static struct task_struct **snapshot;
 static bool enabled;
 static unsigned int revision;
 static unsigned int validated;
+static unsigned int validated_unique;
 static unsigned int lease_count;
 static unsigned int context_switches;
 static atomic_t pending;
@@ -872,7 +873,8 @@ static ssize_t control_write(struct file *file, const char __user *user,
 		return PTR_ERR(next);
 	if (validate) {
 		mutex_lock(&policy_lock);
-		validated = next->count;
+		validated = next->input_count;
+		validated_unique = next->count;
 		mutex_unlock(&policy_lock);
 		kvfree(next);
 		return size;
@@ -894,12 +896,15 @@ static ssize_t control_read(struct file *file, char __user *user,
 	mutex_lock(&policy_lock);
 	len = scnprintf(stats, sizeof(stats),
 		"revision=%u\nrules=%u\nvalidated=%u\nleases=%u\npending=%d\nchanged=%ld\nclamped=%ld\nfailed=%ld\ndropped=%ld\n"
+		"input_rules=%u\ndeduplicated=%u\nvalidated_unique=%u\n"
 		"adaptive=%s\nforeground=%s\ndisplay_off=%u\ncontext_switches=%u\nadapted=%ld\n"
 		"game_tgid=%d\ngame_top=%d,%d,%d\ngame_samples=%u\ngame_finalized=%u\n",
 		revision, policy ? policy->count : 0, validated, lease_count,
 		atomic_read(&pending), atomic_long_read(&changed),
 		atomic_long_read(&clamped), atomic_long_read(&failed),
 		atomic_long_read(&dropped),
+		policy ? policy->input_count : 0, policy ? policy->input_count - policy->count : 0,
+		validated_unique,
 		policy && policy->adaptive_scope[0] ? policy->adaptive_scope : "-",
 		scene && scene->foreground[0] ? scene->foreground : "-",
 		scene && scene->display_off, context_switches, atomic_long_read(&adapted),

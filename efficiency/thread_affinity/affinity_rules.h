@@ -34,8 +34,15 @@ struct affinity_policy {
 	struct hlist_head patterns;
 	struct hlist_head global;
 	char adaptive_scope[PROCESS_NAME_LEN];
+	unsigned int input_count;
 	unsigned int count;
 	struct affinity_rule rules[];
+};
+
+enum match_scope {
+	PROCESS_EXACT,
+	PROCESS_PATTERN,
+	PROCESS_GLOBAL,
 };
 
 static bool has_glob(const char *pattern)
@@ -89,7 +96,9 @@ static unsigned int wildcard_order(const char *pattern)
 static int parse_rule(struct affinity_policy *policy, char *line)
 {
 	struct affinity_rule *rule = &policy->rules[policy->count];
+	struct affinity_rule *existing;
 	struct hlist_head *head;
+	enum match_scope scope;
 	char *comment, *name, *mask, *thread, *end;
 	ssize_t len;
 	int ret;
@@ -131,18 +140,39 @@ static int parse_rule(struct affinity_policy *policy, char *line)
 		return len;
 	if (!strcmp(name, "*")) {
 		head = &policy->global;
+		scope = PROCESS_GLOBAL;
 	} else if (!has_glob(name)) {
 		head = &policy->exact[process_bucket(name, len)];
-	} else if (len > 2 && strchr(name, ':') == name + len - 2 && name[len - 1] == '*' &&
-		   strpbrk(name, "*?[") == name + len - 1) {
-		head = &policy->child[process_bucket(name, len - 2)];
+		scope = PROCESS_EXACT;
 	} else {
-		head = &policy->patterns;
+		scope = PROCESS_PATTERN;
+		if (len > 2 && strchr(name, ':') == name + len - 2 && name[len - 1] == '*' &&
+		    strpbrk(name, "*?[") == name + len - 1)
+			head = &policy->child[process_bucket(name, len - 2)];
+		else
+			head = &policy->patterns;
+	}
+	rule->index = policy->input_count++;
+	/* Identical selectors always match together. Preserve the winner and
+	 * its original index for ties with other matching patterns.
+	 */
+	hlist_for_each_entry(existing, head, node) {
+		if (strcmp(existing->process, rule->process) || strcmp(existing->thread, rule->thread))
+			continue;
+		if (scope != PROCESS_PATTERN &&
+		    (scope != PROCESS_EXACT || rule->manual || !existing->manual)) {
+			cpumask_copy(&existing->mask, &rule->mask);
+			existing->source = rule->source;
+			existing->manual = rule->manual;
+			existing->index = rule->index;
+		}
+		memset(rule, 0, sizeof(*rule));
+		return 0;
 	}
 	rule->process_score = specificity(name);
 	rule->thread_score = specificity(rule->thread);
 	rule->thread_order = wildcard_order(rule->thread);
-	rule->index = policy->count++;
+	policy->count++;
 	hlist_add_head(&rule->node, head);
 	return 0;
 }
@@ -194,12 +224,6 @@ invalid:
 struct affinity_match {
 	const struct affinity_rule *rule;
 	unsigned int score;
-};
-
-enum match_scope {
-	PROCESS_EXACT,
-	PROCESS_PATTERN,
-	PROCESS_GLOBAL,
 };
 
 static void match_bucket(const struct hlist_head *head, const char *process,
