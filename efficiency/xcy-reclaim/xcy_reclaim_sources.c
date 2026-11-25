@@ -6,6 +6,7 @@
 #include <linux/slab.h>
 #include <linux/xarray.h>
 
+#include "xcy_reclaim_cooldown.h"
 #include "xcy_reclaim_engine.h"
 #include "xcy_reclaim_policy.h"
 #include "xcy_reclaim_protection.h"
@@ -28,6 +29,7 @@ struct xcy_history_row {
 
 static DEFINE_MUTEX(source_lock);
 static DEFINE_XARRAY(history);
+static xcy_kill_cooldown_entry_t cooldown[128];
 static size_t history_count;
 static u64 observations;
 static u64 latest_grace_ms;
@@ -65,6 +67,7 @@ static void xcy_sources_reset(void)
 	scene_observed_ms = 0;
 	scene_valid_ms = 0;
 	latest_grace_ms = 0;
+	memset(cooldown, 0, sizeof(cooldown));
 	xcy_clear_history();
 	mutex_unlock(&source_lock);
 	xcy_payload_put(protection);
@@ -281,12 +284,21 @@ static struct xcy_reclaim_age xcy_sources_age(const xcy_memory_process_t *owner,
 	if (!row || row->visible || strcmp(row->package, owner->pkg) ||
 	    !row->background_since || row->background_since > now)
 		goto out;
+	if (xcy_kill_cooldown_blocked(cooldown, ARRAY_SIZE(cooldown), owner->uid, owner->pkg, now, row->last_used))
+		goto out;
 	age.background_since_ms = row->background_since;
 	age.recent = row->last_used > now ||
 		now - max(row->background_since, row->last_used) < latest_grace_ms;
 out:
 	mutex_unlock(&source_lock);
 	return age;
+}
+
+static void xcy_sources_remember_kill(const xcy_memory_process_t *owner, u64 now)
+{
+	mutex_lock(&source_lock);
+	xcy_kill_cooldown_record(cooldown, ARRAY_SIZE(cooldown), owner->uid, owner->pkg, now);
+	mutex_unlock(&source_lock);
 }
 
 static const struct xcy_reclaim_sources xcy_sources = {
@@ -297,6 +309,7 @@ static const struct xcy_reclaim_sources xcy_sources = {
 	.put = xcy_sources_put,
 	.valid_now = xcy_sources_valid,
 	.age = xcy_sources_age,
+	.remember_kill = xcy_sources_remember_kill,
 };
 
 static int __init xcy_reclaim_init(void)

@@ -23,6 +23,7 @@ struct xcy_reclaim_sources {
 	void (*put)(struct xcy_reclaim_source_view *view);
 	bool (*valid_now)(const struct xcy_reclaim_source_view *view, u64 now_ms);
 	struct xcy_reclaim_age (*age)(const xcy_memory_process_t *owner, u64 now_ms);
+	void (*remember_kill)(const xcy_memory_process_t *owner, u64 now_ms);
 };
 
 int xcy_reclaim_engine_register(const struct xcy_reclaim_sources *sources);

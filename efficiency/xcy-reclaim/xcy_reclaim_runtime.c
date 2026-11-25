@@ -204,14 +204,14 @@ int xcy_reclaim_runtime_renew(struct xcy_reclaim_runtime *runtime, u64 request,
 
 /* act() uses the already validated state without calling Framework. */
 int xcy_reclaim_runtime_act(struct xcy_reclaim_runtime *runtime, u64 request,
-			     enum xcy_reclaim_outcome (*act)(void *context), void *context)
+			     enum xcy_reclaim_outcome (*act)(void *context, u64 expires_ms), void *context)
 {
 	int error;
 
 	mutex_lock(&runtime->lock);
 	error = xcy_check_request(runtime, request, xcy_now_ms());
 	if (!error) {
-		enum xcy_reclaim_outcome outcome = act(context);
+		enum xcy_reclaim_outcome outcome = act(context, runtime->expires_ms);
 
 		xcy_finish_request(runtime, outcome, xcy_now_ms());
 	}

@@ -85,26 +85,38 @@ struct xcy_signal_round {
 	const struct xcy_reclaim_member *members;
 	struct pid *const *pids;
 	size_t count;
+	u64 first_signal_ms;
 	xcy_reclaim_guard_fn valid_guard;
 	void *context;
 };
 
-static enum xcy_reclaim_outcome xcy_send_signals(void *data)
+static enum xcy_reclaim_outcome xcy_send_signals(void *data, u64 expires_ms)
 {
 	struct xcy_signal_round *round = data;
 	enum xcy_reclaim_outcome outcome = XCY_RECLAIM_NO_CANDIDATE;
-	size_t i;
+	size_t i, j;
 
 	for (i = 0; i < round->count; ++i) {
 		s64 total = totalram_pages();
 		s64 available = si_mem_available();
 		u64 now = ktime_to_ms(ktime_get_boottime());
+		size_t end = i ? i + 1 : round->count;
 
 		if (xcy_system_ram_pressure_classify(total, available) != XCY_SYSTEM_PRESSURE_CRITICAL ||
 		    !round->valid_guard(round->context, now, xcy_reclaim_urgent(total, available)))
 			break;
-		if (!xcy_reclaim_member_current(round->pids[i], &round->members[i])) {
+		/* Confirm the complete group immediately before its first action.
+		 * Subsequent checks cover the remaining target without requiring
+		 * already-signalled members to stay alive. */
+		for (j = i; j < end; ++j)
+			if (!xcy_reclaim_member_current(round->pids[j], &round->members[j]))
+				break;
+		if (j < end) {
 			xcy_reclaim_notify(XCY_RECLAIM_NOTICE_IDENTITY, 'K');
+			break;
+		}
+		if (ktime_to_ms(ktime_get_boottime()) >= expires_ms) {
+			xcy_reclaim_notify(XCY_RECLAIM_NOTICE_TIMEOUT, 'K');
 			break;
 		}
 		if (kill_pid(round->pids[i], SIGKILL, 1)) {
@@ -112,6 +124,8 @@ static enum xcy_reclaim_outcome xcy_send_signals(void *data)
 				outcome = XCY_RECLAIM_ACTION_FAILED;
 			break;
 		}
+		if (!round->first_signal_ms)
+			round->first_signal_ms = ktime_to_ms(ktime_get_boottime());
 		outcome = XCY_RECLAIM_ACTION_SENT;
 	}
 	return outcome;
@@ -119,10 +133,12 @@ static enum xcy_reclaim_outcome xcy_send_signals(void *data)
 
 int xcy_reclaim_execute(struct xcy_reclaim_runtime *runtime, u64 request,
 			const struct xcy_reclaim_plan *plan, const struct xcy_reclaim_targets *targets,
-			size_t selected, xcy_reclaim_guard_fn valid_guard, void *context)
+			size_t selected, xcy_reclaim_guard_fn valid_guard, void *context,
+			u64 *first_signal_ms)
 {
 	const struct xcy_reclaim_group *group;
 	struct xcy_signal_round round;
+	int error;
 
 	if (!targets->pids || !valid_guard || selected >= plan->group_count)
 		return -EINVAL;
@@ -134,5 +150,7 @@ int xcy_reclaim_execute(struct xcy_reclaim_runtime *runtime, u64 request,
 		.count = group->count,
 		.valid_guard = valid_guard, .context = context,
 	};
-	return xcy_reclaim_runtime_act(runtime, request, xcy_send_signals, &round);
+	error = xcy_reclaim_runtime_act(runtime, request, xcy_send_signals, &round);
+	*first_signal_ms = round.first_signal_ms;
+	return error;
 }

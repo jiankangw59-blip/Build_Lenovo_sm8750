@@ -160,6 +160,7 @@ static int xcy_final_reply(struct xcy_reclaim_channel *channel, struct xcy_engin
 	const struct xcy_reclaim_group *group = &round->plan.groups[round->selected];
 	struct xcy_reclaim_source_view view = {0};
 	struct xcy_final_guard guard = {.view = &view, .owner = &round->initial.items[group->representative]};
+	u64 first_signal_ms = 0;
 	int error;
 
 	if (!xcy_reclaim_group_current(&round->plan, round->selected, &round->targets)) {
@@ -181,7 +182,9 @@ static int xcy_final_reply(struct xcy_reclaim_channel *channel, struct xcy_engin
 		return xcy_stop_round(channel, round, XCY_RECLAIM_NO_CANDIDATE);
 	}
 	error = xcy_reclaim_execute(xcy_reclaim_channel_runtime(channel), round->request, &round->plan,
-				    &round->targets, round->selected, xcy_guard_current, &guard);
+				    &round->targets, round->selected, xcy_guard_current, &guard, &first_signal_ms);
+	if (first_signal_ms)
+		engine_sources->remember_kill(guard.owner, first_signal_ms);
 	engine_sources->put(&view);
 	xcy_engine_clear(round);
 	return error;
@@ -227,7 +230,8 @@ int xcy_reclaim_engine_register(const struct xcy_reclaim_sources *sources)
 	int error;
 
 	if (!sources || !sources->reset || !sources->publish || !sources->observe ||
-	    !sources->get || !sources->put || !sources->valid_now || !sources->age || engine_sources)
+	    !sources->get || !sources->put || !sources->valid_now || !sources->age ||
+	    !sources->remember_kill || engine_sources)
 		return -EINVAL;
 	engine_sources = sources;
 	error = xcy_reclaim_channel_register(&engine_ops);

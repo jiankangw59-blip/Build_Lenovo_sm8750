@@ -2,7 +2,20 @@
 #include <errno.h>
 #include <stdio.h>
 
+#include "xcy_reclaim_cooldown.h"
 #include "xcy_reclaim_plan.h"
+
+static void test_respawn_cooldown(void)
+{
+	xcy_kill_cooldown_entry_t holds[2] = {0};
+	const char app[] = "org.example.large";
+
+	assert(xcy_kill_cooldown_record(holds, 2, 10000, app, 1000));
+	assert(xcy_kill_cooldown_blocked(holds, 2, 10000, app, 120999, 0));
+	assert(!xcy_kill_cooldown_blocked(holds, 2, 10000, app, 121000, 0));
+	assert(xcy_kill_cooldown_record(holds, 2, 10000, app, 122000));
+	assert(!xcy_kill_cooldown_blocked(holds, 2, 10000, app, 124000, 123000));
+}
 
 static void fill(xcy_memory_process_t *row, unsigned int pid, unsigned int uid,
 		 const char *package, uint64_t pss)
@@ -44,6 +57,7 @@ int main(void)
 	size_t picked;
 	int recent = 0;
 
+	test_respawn_cooldown();
 	fill(&initial_rows[0], 20, 10000, "org.example.large", 800);
 	fill(&initial_rows[1], 30, 10001, "org.example.older", 600);
 	fill(&initial_rows[2], 21, 10000, "org.example.large", 200);
