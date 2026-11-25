@@ -9,8 +9,8 @@ HERE = Path(__file__).resolve().parent
 CRYSTAL = HERE.parent / "scene_crystal"
 MODULE_PROP = """id=opd2413_kernel_efficiency
 name=OPD2413 Kernel Efficiency
-version=1.0
-versionCode=1
+version=1.1
+versionCode=2
 author=Codex
 description=ZRAM, Crystal kernel writeback, workqueue and TCP settings for the enrolled OPD2413 kernel.
 """
@@ -35,6 +35,7 @@ def main():
         "action.sh": HERE / "opd2413-action.sh",
         "apply_network_and_workqueue.sh": HERE / "service.sh",
         "customize.sh": HERE / "customize.sh",
+        "provision_crystal_backing.sh": HERE / "provision_crystal_backing.sh",
         "activate_xcy.sh": HERE / "activate_xcy.sh",
         "prepare_xcy_devices.sh": HERE / "prepare_xcy_devices.sh",
         "xcy_sepolicy.rule": HERE / "xcy_sepolicy.rule",

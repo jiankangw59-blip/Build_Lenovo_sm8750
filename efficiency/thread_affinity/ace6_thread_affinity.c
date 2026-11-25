@@ -24,7 +24,11 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 
+#include "ace6_cpuset_affinity.h"
 #include "adaptive_policy.h"
+
+DEFINE_TRACE(ace6_cpuset_attach_task, TP_PROTO(struct task_struct *task),
+	     TP_ARGS(task));
 
 #define MAX_PENDING 4096
 #define INITIAL_SNAPSHOT 16384
@@ -619,8 +623,7 @@ static void on_exit(void *data, struct task_struct *task)
 	queue_event(task, NULL, true);
 }
 
-static void on_cpuset(void *data, struct cgroup_subsys_state *css,
-		      struct task_struct *task)
+static void on_cpuset(void *data, struct task_struct *task)
 {
 	queue_event(task, NULL, false);
 }
@@ -634,7 +637,6 @@ static struct {
 	{ "task_rename", on_rename },
 	{ "sched_process_exec", on_exec },
 	{ "sched_process_exit", on_exit },
-	{ "android_vh_cpuset_attach_task", on_cpuset },
 };
 
 static void find_hook(struct tracepoint *tp, void *data)
@@ -1096,15 +1098,25 @@ static int __init affinity_init(void)
 	for (i = 0; i < ARRAY_SIZE(hooks); i++) {
 		if (!hooks[i].tp) {
 			ret = -ENOENT;
+			pr_err("ace6_affinity: missing tracepoint %s\n", hooks[i].name);
 			goto unregister;
 		}
 		ret = tracepoint_probe_register(hooks[i].tp, hooks[i].probe, NULL);
-		if (ret)
+		if (ret) {
+			pr_err("ace6_affinity: cannot register %s: %d\n", hooks[i].name, ret);
 			goto unregister;
+		}
+	}
+	ret = register_trace_ace6_cpuset_attach_task(on_cpuset, NULL);
+	if (ret) {
+		pr_err("ace6_affinity: cannot register cpuset migration: %d\n", ret);
+		goto unregister;
 	}
 	ret = misc_register(&control);
 	if (!ret)
 		return 0;
+	pr_err("ace6_affinity: cannot register control device: %d\n", ret);
+	unregister_trace_ace6_cpuset_attach_task(on_cpuset, NULL);
 unregister:
 	while (i--)
 		tracepoint_probe_unregister(hooks[i].tp, hooks[i].probe, NULL);
@@ -1122,6 +1134,7 @@ static void __exit affinity_exit(void)
 	unsigned int i;
 
 	misc_deregister(&control);
+	unregister_trace_ace6_cpuset_attach_task(on_cpuset, NULL);
 	for (i = 0; i < ARRAY_SIZE(hooks); i++)
 		tracepoint_probe_unregister(hooks[i].tp, hooks[i].probe, NULL);
 	tracepoint_synchronize_unregister();
