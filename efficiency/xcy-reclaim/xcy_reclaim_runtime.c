@@ -21,11 +21,9 @@ static xcy_system_pressure_level_t xcy_ram_pressure(void)
 static void xcy_schedule_deadline(struct xcy_reclaim_runtime *runtime, s64 now)
 {
 	s64 deadline = runtime->pending ? runtime->expires_ms :
-		xcy_system_reclaim_deadline(&runtime->policy);
+		xcy_reclaim_wakeup_deadline(&runtime->policy);
 
-	/* Rate wait gates the next pressure event. It does not start another
-	 * scan by itself after an empty candidate set or a lost publisher. */
-	if (!deadline || (!runtime->pending && runtime->policy.phase == XCY_SYSTEM_RECLAIM_RATE_WAIT)) {
+	if (!deadline) {
 		cancel_delayed_work(&runtime->deadline);
 		return;
 	}
@@ -164,7 +162,8 @@ static void xcy_finish_request(struct xcy_reclaim_runtime *runtime, enum xcy_rec
 	if (outcome == XCY_RECLAIM_NO_CANDIDATE || outcome == XCY_RECLAIM_SAMPLED_RETRY)
 		xcy_retry_later(runtime, now);
 	else
-		xcy_system_reclaim_complete(&runtime->policy, now, outcome == XCY_RECLAIM_ACTION_SENT);
+		xcy_reclaim_complete_without_pageout(&runtime->policy, now,
+						    outcome == XCY_RECLAIM_ACTION_SENT);
 	xcy_schedule_deadline(runtime, now);
 }
 

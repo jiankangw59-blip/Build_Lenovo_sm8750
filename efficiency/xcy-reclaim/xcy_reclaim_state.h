@@ -286,6 +286,7 @@ static inline xcy_system_reclaim_decision_t xcy_system_reclaim_observe(
         episode->deadline_ms = 0;
         episode->pending_pressure = pressure;
         /* RATE_WAIT also starts a new bounded round after caller cooldown. */
+        episode->episode_actions = 0;
         episode->critical_reclaim_handled = 0;
         episode->critical_reclaim_rounds = 0;
         episode->last_reclaim_succeeded = 0;
@@ -386,8 +387,8 @@ static inline xcy_system_reclaim_decision_t xcy_system_reclaim_skip_reclaim(
     return XCY_SYSTEM_RECLAIM_READY;
 }
 
-/* Proactive PAGEOUT is disabled. Use the same pressure and action budget as
- * the original controller's path with no eligible swap backing. */
+/* Proactive PAGEOUT is disabled. Keep the same RAM gate independent of
+ * the available swap backing. */
 static inline xcy_system_reclaim_decision_t xcy_reclaim_observe_without_pageout(
         xcy_system_reclaim_episode_t *episode,
         xcy_system_pressure_level_t pressure, xcy_reclaim_s64 now_ms)
@@ -438,6 +439,34 @@ static inline xcy_reclaim_s64 xcy_system_reclaim_deadline(
          episode->phase != XCY_SYSTEM_RECLAIM_OBSERVING))
         return 0;
     return episode->deadline_ms;
+}
+
+/* Give a still-critical system another bounded batch after the last signal's
+ * cooldown. Genuine failures still use the base controller's fallback. */
+static inline xcy_system_reclaim_decision_t xcy_reclaim_complete_without_pageout(
+        xcy_system_reclaim_episode_t *episode, xcy_reclaim_s64 now_ms,
+        int action_succeeded) {
+    xcy_system_reclaim_decision_t decision =
+        xcy_system_reclaim_complete(episode, now_ms, action_succeeded);
+
+    if (decision != XCY_SYSTEM_RECLAIM_WAIT ||
+        episode->episode_actions < XCY_SYSTEM_RECLAIM_MAX_ACTIONS)
+        return decision;
+    if (!xcy_system_reclaim_set_deadline(episode, now_ms,
+                                        XCY_SYSTEM_RECLAIM_EPISODE_GAP_MS))
+        return XCY_SYSTEM_RECLAIM_INVALID;
+    episode->phase = XCY_SYSTEM_RECLAIM_RATE_WAIT;
+    return XCY_SYSTEM_RECLAIM_WAIT;
+}
+
+static inline xcy_reclaim_s64 xcy_reclaim_wakeup_deadline(
+        const xcy_system_reclaim_episode_t *episode) {
+    /* A completed batch earns one fresh observation. The other rate waits
+     * only limit future PSI events, including retries after an empty round. */
+    if (episode && episode->phase == XCY_SYSTEM_RECLAIM_RATE_WAIT &&
+        episode->episode_actions < XCY_SYSTEM_RECLAIM_MAX_ACTIONS)
+        return 0;
+    return xcy_system_reclaim_deadline(episode);
 }
 
 #endif
