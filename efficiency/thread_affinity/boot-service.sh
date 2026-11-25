@@ -31,6 +31,9 @@ owned=
 rollback() {
 	trap - EXIT HUP INT TERM
 	rm -f "$module/ready"
+	case "$(getprop sys.powerctl)" in
+		reboot*|shutdown*) return 0 ;;
+	esac
 	if [ -n "$watcher" ]; then
 		kill "$watcher" 2>/dev/null
 		wait "$watcher"
@@ -52,6 +55,11 @@ rm -f "$module/ready"
 grep -qx 'game_tgid=0' "$node" || exit 1
 ! pidof AppOpt >/dev/null || exit 1
 "$controller" check "$rules" >/dev/null || exit 1
+
+# Wait for Android's initial cpuset setup and service launches to finish.
+until [ "$(getprop sys.boot_completed)" = 1 ]; do
+	sleep 2
+done
 
 # Load the static configuration while the credential-encrypted Scene state is
 # unavailable. Once the watcher publishes context, adaptive rules take effect.
