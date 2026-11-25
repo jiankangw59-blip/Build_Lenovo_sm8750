@@ -69,6 +69,12 @@ on:
         default: false
         type: boolean
 
+      enable_xcy_lmk_policy:
+        description: "Build the Ace 6 6.6.118 XiaoCaiYe selection interface"
+        required: false
+        default: false
+        type: boolean
+
       custom_kernel_suffix:
         description: "✏️ 自定义内核名称- (-开头 留空则默认官方）"
         required: false
@@ -879,6 +885,20 @@ jobs:
           #Remove check_defconfig
           sudo sed -i 's/check_defconfig//' ./common/build.config.gki
 
+      - name: Apply Ace 6 XiaoCaiYe selection interface
+        if: ${{ inputs.enable_xcy_lmk_policy }}
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          if [ "$DEVICES_NAME:$KERNEL_VERSION:$KERNEL_SOURCE_REF" != "oneplus_ace_6:6.6.118:65b954a773b183a9999b06bb1b2f921f12eaaf11" ]; then
+            echo "::error::XiaoCaiYe selection interface requires the pinned Ace 6 6.6.118 tree"
+            exit 1
+          fi
+          patch="$GITHUB_WORKSPACE/efficiency/patches/xcy-lmk-policy-6.6.118.patch"
+          git apply --check "$patch"
+          git apply "$patch"
+          scripts/config --file arch/arm64/configs/gki_defconfig --enable XCY_LMK_POLICY
+
       - name: Apply reviewed Ace 6 efficiency patch series
         if: ${{ env.EFFICIENCY_PROFILE != 'off' }}
         run: |
@@ -1086,6 +1106,15 @@ jobs:
           fi
 
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image 2>&1 | tee build.log
+
+          if [ "${{ inputs.enable_xcy_lmk_policy }}" = true ]; then
+            mkdir -p ../preflash/efficiency
+            {
+              grep -x 'CONFIG_XCY_LMK_POLICY=y' out/.config
+              grep -E '[[:space:]]__initcall__.*_xcy_lmk_init6$' out/System.map
+              grep -E '[[:space:]]xcy_lmk_ioctl(\.llvm\.[0-9]+)?$' out/System.map
+            } | tee ../preflash/efficiency/xcy-lmk-build.txt
+          fi
 
           if [ "$EFFICIENCY_PROFILE" != off ]; then
             SYMVERS=out/Module.symvers
