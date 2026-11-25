@@ -1,0 +1,54 @@
+name: Test event-driven XiaoCaiYe kernel components
+
+on:
+  push:
+    branches: [codex/ace6-118-xcy-reclaim]
+    paths:
+      - .github/workflows/Test_xcy_reclaim.yml
+      - efficiency/xcy-reclaim/**
+
+permissions:
+  contents: read
+
+jobs:
+  verify-port:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify pressure transitions with proactive PAGEOUT disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
+            efficiency/xcy-reclaim/test_without_pageout.c -o "$RUNNER_TEMP/xcy-kill-only"
+          "$RUNNER_TEMP/xcy-kill-only"
+      - name: Compile the components against the pinned ARM64 6.6.118 kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq --no-install-recommends bc bison clang flex libelf-dev lld llvm
+          source_ref=65b954a773b183a9999b06bb1b2f921f12eaaf11
+          kernel="$RUNNER_TEMP/xcy-kernel"
+          out="$RUNNER_TEMP/xcy-kernel-out"
+          objects="$RUNNER_TEMP/xcy-objects"
+          mkdir -p "$kernel" "$out" "$objects"
+          curl --fail --location --retry 3 --silent --show-error \
+            "https://codeload.github.com/OnePlusOSS/android_kernel_common_oneplus_sm8750/tar.gz/$source_ref" \
+            | tar xz -C "$kernel" --strip-components=1
+          test "$(make -s -C "$kernel" kernelversion)" = 6.6.118
+          make -s -C "$kernel" O="$out" ARCH=arm64 LLVM=1 gki_defconfig
+          make -s -C "$kernel" -j2 O="$out" ARCH=arm64 LLVM=1 prepare
+          cp efficiency/xcy-reclaim/xcy_reclaim*.[ch] "$objects/"
+          cat > "$objects/Makefile" <<'EOF'
+          obj-m := xcy_reclaim_runtime.o xcy_reclaim_psi.o xcy_reclaim_rank.o xcy_reclaim_urgent.o xcy_reclaim_importance.o xcy_reclaim_identity.o
+          CFLAGS_REMOVE_xcy_reclaim_urgent.o := -mgeneral-regs-only $(CC_FLAGS_LTO)
+          CFLAGS_xcy_reclaim_urgent.o := -fno-lto
+          EOF
+          make -s -C "$kernel" -j2 O="$out" ARCH=arm64 LLVM=1 M="$objects" \
+            xcy_reclaim_runtime.o xcy_reclaim_psi.o xcy_reclaim_rank.o \
+            xcy_reclaim_urgent.o xcy_reclaim_importance.o xcy_reclaim_identity.o
+          for component in "$objects"/*.o; do
+            llvm-readelf -h "$component" | grep -E 'Machine:.*AArch64'
+          done
