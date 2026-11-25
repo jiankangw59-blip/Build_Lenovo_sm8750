@@ -987,6 +987,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$DEVICES_NAME:$KERNEL_VERSION:$KERNEL_SOURCE_REF" = "oneplus_ace_6:6.6.118:65b954a773b183a9999b06bb1b2f921f12eaaf11"
+          python3 efficiency/thread_affinity/test_snapshot_growth.py
           python3 efficiency/thread_affinity/install_builtin.py --kernel kernel_workspace/common
 
       - name: Attach Ace 6 XiaoCaiYe event-driven reclaim
