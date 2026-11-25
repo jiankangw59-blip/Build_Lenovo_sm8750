@@ -41,6 +41,11 @@ kernel_policy_active() {
     [ "$(cat "$ACE6_CRYSTAL_NODE/hybridswap_core_enable")" = "hybridswap enable reclaim_in enable" ]
 }
 
+writeback_budget_available() {
+    [ "$(cat "$ACE6_CRYSTAL_NODE/writeback_limit_enable")" = 1 ] &&
+    awk 'NR==1 && $1 ~ /^[0-9]+$/ && $1>0 {ok=1} END {exit !ok}' "$ACE6_CRYSTAL_NODE/writeback_limit"
+}
+
 if ! grep -Fqx "boot_id=$boot_id" "$early_status" ||
    ! grep -Fqx 'result=complete' "$early_status" ||
    ! ace6_crystal_read_config ||
@@ -51,9 +56,13 @@ if ! grep -Fqx "boot_id=$boot_id" "$early_status" ||
     exit 0
 fi
 
+# The performance HAL can briefly pause swapd during startup.
+if [ "$(cat "$ACE6_CRYSTAL_NODE/hybridswap_swapd_pause")" = 1 ] &&
+   writeback_budget_available; then
+    sleep 3
+fi
 if [ "$(cat "$ACE6_CRYSTAL_NODE/hybridswap_swapd_pause")" != 0 ] ||
-   [ "$(cat "$ACE6_CRYSTAL_NODE/writeback_limit_enable")" != 1 ] ||
-   ! awk 'NR==1 && $1 ~ /^[0-9]+$/ && $1>0 {ok=1} END {exit !ok}' "$ACE6_CRYSTAL_NODE/writeback_limit"; then
+   ! writeback_budget_available; then
     record_status deferred paused_or_no_writeback_budget
     exit 0
 fi
@@ -92,4 +101,13 @@ if ! kernel_policy_active; then
         exit 1
     fi
 fi
+
+# ColorOS boot services can reset the global value while apps keep Scene's setting.
+swappiness=$(awk -F= '$1=="swappiness" && $2 ~ /^[0-9]+$/ {print $2}' /data/swap_config.conf)
+if [ -n "$swappiness" ] && [ "$swappiness" -le 200 ] 2>/dev/null &&
+   [ "$(cat /dev/memcg/apps/memory.swappiness 2>/dev/null)" = "$swappiness" ] &&
+   [ "$(cat /proc/sys/vm/swappiness)" != "$swappiness" ]; then
+    printf '%s\n' "$swappiness" > /proc/sys/vm/swappiness || true
+fi
+
 record_status enabled configured
