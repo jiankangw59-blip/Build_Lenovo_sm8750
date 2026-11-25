@@ -14,6 +14,7 @@ struct xcy_reclaim_group {
 	uint32_t representative;
 	uint16_t first;
 	uint16_t count;
+	bool departed;
 };
 
 struct xcy_reclaim_plan {

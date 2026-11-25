@@ -26,6 +26,7 @@ static inline void xcy_snapshot_free(void *ptr)
 	kvfree(ptr);
 }
 #else
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>

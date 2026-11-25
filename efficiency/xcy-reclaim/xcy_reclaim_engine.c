@@ -18,6 +18,7 @@ struct xcy_engine_round {
 	struct xcy_reclaim_plan plan;
 	xcy_memory_snapshot_t initial;
 	struct xcy_reclaim_targets targets;
+	size_t selected;
 	u64 request;
 	enum xcy_engine_stage stage;
 };
@@ -103,6 +104,9 @@ static int xcy_initial_reply(struct xcy_reclaim_channel *channel, struct xcy_eng
 	engine_sources->put(&view);
 	if (error || !round->plan.member_count)
 		return xcy_stop_round(channel, round, XCY_RECLAIM_NO_CANDIDATE);
+	error = xcy_reclaim_targets_pin(&round->plan, &round->targets);
+	if (error || !round->plan.member_count)
+		return xcy_stop_round(channel, round, XCY_RECLAIM_NO_CANDIDATE);
 	round->initial = *snapshot;
 	memset(snapshot, 0, sizeof(*snapshot));
 	return xcy_continue_round(channel, round, XCY_ENGINE_PSS, 'P', round->plan.members,
@@ -112,12 +116,23 @@ static int xcy_initial_reply(struct xcy_reclaim_channel *channel, struct xcy_eng
 static int xcy_pss_reply(struct xcy_reclaim_channel *channel, struct xcy_engine_round *round,
 			 const xcy_memory_snapshot_t *snapshot)
 {
-	size_t picked;
-	int error = xcy_reclaim_plan_pick(&round->plan, &round->initial, snapshot, xcy_now(),
-					  xcy_is_urgent(), xcy_age, NULL, &picked);
+	size_t i, picked;
+	bool departed = false;
+	int error;
 
-	if (error || picked == SIZE_MAX || xcy_reclaim_targets_pin(&round->plan, picked, &round->targets))
+	for (i = 0; i < round->plan.group_count; ++i) {
+		if (!xcy_reclaim_group_current(&round->plan, i, &round->targets)) {
+			round->plan.groups[i].departed = true;
+			departed = true;
+		}
+	}
+	if (departed)
+		xcy_reclaim_notify(XCY_RECLAIM_NOTICE_IDENTITY, 'P');
+	error = xcy_reclaim_plan_pick(&round->plan, &round->initial, snapshot, xcy_now(),
+				      xcy_is_urgent(), xcy_age, NULL, &picked);
+	if (error || picked == SIZE_MAX)
 		return xcy_stop_round(channel, round, XCY_RECLAIM_NO_CANDIDATE);
+	round->selected = picked;
 	return xcy_continue_round(channel, round, XCY_ENGINE_FINAL, 'I', NULL, 0);
 }
 
@@ -138,21 +153,28 @@ static bool xcy_guard_current(void *data, u64 now, bool urgent)
 static int xcy_final_reply(struct xcy_reclaim_channel *channel, struct xcy_engine_round *round,
 			   const struct xcy_reclaim_reply *reply, const xcy_memory_snapshot_t *snapshot)
 {
-	const struct xcy_reclaim_group *group = &round->plan.groups[round->targets.selected];
+	const struct xcy_reclaim_group *group = &round->plan.groups[round->selected];
 	struct xcy_reclaim_source_view view = {0};
 	struct xcy_final_guard guard = {.view = &view, .owner = &round->initial.items[group->representative]};
-	int error = engine_sources->get(reply, &view);
+	int error;
 
+	if (!xcy_reclaim_group_current(&round->plan, round->selected, &round->targets)) {
+		xcy_reclaim_notify(XCY_RECLAIM_NOTICE_IDENTITY, 'F');
+		return xcy_stop_round(channel, round, XCY_RECLAIM_NO_CANDIDATE);
+	}
+	error = engine_sources->get(reply, &view);
 	if (error)
 		return xcy_stop_round(channel, round, XCY_RECLAIM_SAMPLED_RETRY);
-	error = xcy_reclaim_plan_revalidate(&round->plan, round->targets.selected, &round->initial,
+	error = xcy_reclaim_plan_revalidate(&round->plan, round->selected, &round->initial,
 					   snapshot, &view.protection, xcy_now(), xcy_is_urgent(), xcy_age, NULL);
 	if (error) {
+		if (error == -ESRCH)
+			xcy_reclaim_notify(XCY_RECLAIM_NOTICE_IDENTITY, 'F');
 		engine_sources->put(&view);
 		return xcy_stop_round(channel, round, XCY_RECLAIM_NO_CANDIDATE);
 	}
 	error = xcy_reclaim_execute(xcy_reclaim_channel_runtime(channel), round->request, &round->plan,
-				    &round->targets, xcy_guard_current, &guard);
+				    &round->targets, round->selected, xcy_guard_current, &guard);
 	engine_sources->put(&view);
 	xcy_engine_clear(round);
 	return error;

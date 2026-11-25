@@ -9,6 +9,13 @@
 struct xcy_reclaim_channel;
 struct xcy_reclaim_member;
 
+enum xcy_reclaim_notice {
+	XCY_RECLAIM_NOTICE_TIMEOUT,
+	XCY_RECLAIM_NOTICE_IDENTITY,
+};
+
+void xcy_reclaim_notify(enum xcy_reclaim_notice notice, char operation);
+
 struct xcy_reclaim_channel_ops {
 	int (*open)(struct xcy_reclaim_channel *channel, void **context);
 	void (*close)(void *context);

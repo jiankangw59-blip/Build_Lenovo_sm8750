@@ -21,7 +21,7 @@ struct xcy_reclaim_runtime {
 	struct delayed_work deadline;
 	xcy_system_reclaim_episode_t policy;
 	int (*request_state)(void *owner, u64 request, s64 expires_ms);
-	void (*retire_state)(void *owner, u64 request);
+	void (*retire_state)(void *owner, u64 request, bool timed_out);
 	void *owner;
 	u64 sequence;
 	u64 pending;
@@ -33,7 +33,7 @@ struct xcy_reclaim_runtime {
  * under the runtime mutex and may wake the publisher without waiting for it. */
 int xcy_reclaim_runtime_start(struct xcy_reclaim_runtime *runtime, struct file *publisher,
 			      int (*request_state)(void *owner, u64 request, s64 expires_ms),
-			      void (*retire_state)(void *owner, u64 request),
+			      void (*retire_state)(void *owner, u64 request, bool timed_out),
 			      void *owner);
 void xcy_reclaim_runtime_stop(struct xcy_reclaim_runtime *runtime);
 void xcy_reclaim_runtime_notify(struct xcy_reclaim_runtime *runtime);

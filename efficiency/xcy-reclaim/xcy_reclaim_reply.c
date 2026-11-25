@@ -6,12 +6,23 @@
 #include "xcy_reclaim_identity.h"
 #include "xcy_reclaim_reply.h"
 
+static int xcy_reply_validate_identity(const xcy_memory_process_t *process, void *context)
+{
+	bool *changed = context;
+
+	if (xcy_reclaim_validate_identity(process, NULL))
+		return 1;
+	*changed = true;
+	return 0;
+}
+
 int xcy_reclaim_read_reply(const struct xcy_reclaim_reply *expected,
 			   const char __user *body, size_t length, xcy_memory_snapshot_t *snapshot)
 {
 	u64 now = ktime_to_ms(ktime_get_boottime());
 	xcy_memory_snapshot_t accepted = {0};
 	char *copy;
+	bool identity_changed = false;
 	int error = -ESTALE;
 
 	if (!expected->request || now >= expected->expires_ms || now < expected->published_ms ||
@@ -25,8 +36,11 @@ int xcy_reclaim_read_reply(const struct xcy_reclaim_reply *expected,
 
 	if (!xcy_memory_snapshot_parse(copy, length, expected->nonce, expected->epoch,
 				       now, now - expected->published_ms,
-				       xcy_reclaim_validate_identity, NULL, &accepted))
+				       xcy_reply_validate_identity, &identity_changed, &accepted)) {
+		if (identity_changed)
+			error = -ESRCH;
 		goto out;
+	}
 	if (accepted.wire_version != 4 || ktime_to_ms(ktime_get_boottime()) >= expected->expires_ms)
 		goto out;
 	/* An initial or final AMS inventory is metadata, not a PSS measurement. */

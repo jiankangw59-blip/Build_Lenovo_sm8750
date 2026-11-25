@@ -64,8 +64,15 @@ int main(void)
 	protection.visible.count = 0;
 	++final_rows[1].starttime;
 	assert(xcy_reclaim_plan_revalidate(&plan, picked, &initial, &final, &protection, 150010,
-					   0, background, &recent) == -ESTALE);
+					   0, background, &recent) == -ESRCH);
 	--final_rows[1].starttime;
+	plan.groups[picked].departed = true;
+	assert(xcy_reclaim_plan_revalidate(&plan, picked, &initial, &final, &protection, 150010,
+					   0, background, &recent) == -ESRCH);
+	assert(!xcy_reclaim_plan_pick(&plan, &initial, &pss, 150000, 0, background, &recent, &picked));
+	assert(picked == 0);
+	plan.groups[1].departed = false;
+	picked = 1;
 	recent = 10001;
 	assert(xcy_reclaim_plan_revalidate(&plan, picked, &initial, &final, &protection, 150010,
 					   0, background, &recent) == -ESTALE);

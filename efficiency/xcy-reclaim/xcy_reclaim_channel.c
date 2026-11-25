@@ -4,9 +4,12 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/ktime.h>
+#include <linux/poll.h>
 #include <linux/random.h>
 #include <linux/security.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/uaccess.h>
 #include <linux/user_namespace.h>
 
 #include "xcy_reclaim_channel.h"
@@ -22,6 +25,7 @@ struct xcy_reclaim_channel {
 	struct xcy_reclaim_reply expected;
 	u64 nonce_sequence;
 	u64 boot_session;
+	char last_operation;
 	u32 publisher_secid;
 	bool root_publisher;
 	void *context;
@@ -29,6 +33,23 @@ struct xcy_reclaim_channel {
 
 static const struct xcy_reclaim_channel_ops *channel_ops;
 static atomic_t channel_open = ATOMIC_INIT(0);
+static DECLARE_WAIT_QUEUE_HEAD(notice_wait);
+static DEFINE_SPINLOCK(notice_lock);
+static atomic64_t notice_generation = ATOMIC64_INIT(0);
+static u64 notice_count[2];
+static char notice_operation[2] = {'-', '-'};
+
+void xcy_reclaim_notify(enum xcy_reclaim_notice notice, char operation)
+{
+	unsigned long irq;
+
+	spin_lock_irqsave(&notice_lock, irq);
+	++notice_count[notice];
+	notice_operation[notice] = operation;
+	atomic64_inc(&notice_generation);
+	spin_unlock_irqrestore(&notice_lock, irq);
+	wake_up_interruptible_poll(&notice_wait, EPOLLIN | EPOLLRDNORM);
+}
 
 static bool xcy_check_publisher_label(u32 *secid)
 {
@@ -48,26 +69,27 @@ static bool xcy_check_publisher_label(u32 *secid)
 	return allowed;
 }
 
-static bool xcy_is_owner(const struct xcy_reclaim_channel *channel)
+static bool xcy_is_owner(bool root_publisher, u32 publisher_secid)
 {
 	u32 secid;
 
 	if (current_user_ns() != &init_user_ns)
 		return false;
-	if (channel->root_publisher)
+	if (root_publisher)
 		return uid_eq(current_euid(), GLOBAL_ROOT_UID) && capable(CAP_SYS_ADMIN);
 	if (__kuid_val(current_euid()) != 1000)
 		return false;
 	security_current_getsecid_subj(&secid);
-	return secid == channel->publisher_secid;
+	return secid == publisher_secid;
 }
 
 static int xcy_publish_challenge(struct xcy_reclaim_channel *channel, u64 request,
-				 s64 expires_ms, char operation,
+				 s64 expires_ms, char operation, char diagnostic_stage,
 				 const struct xcy_reclaim_member *members, size_t count)
 {
 	struct xcy_reclaim_reply next = {
 		.request = request, .expires_ms = expires_ms, .operation = operation,
+		.diagnostic_stage = diagnostic_stage,
 		.published_ms = ktime_to_ms(ktime_get_boottime()),
 	};
 	int error;
@@ -83,8 +105,10 @@ static int xcy_publish_challenge(struct xcy_reclaim_channel *channel, u64 reques
 	snprintf(next.epoch, sizeof(next.epoch), "%016llx", (unsigned long long)channel->boot_session);
 	error = xcy_reclaim_mailbox_publish(&channel->mailbox, operation, members, count,
 					   next.nonce, next.epoch);
-	if (!error)
+	if (!error) {
 		channel->expected = next;
+		WRITE_ONCE(channel->last_operation, diagnostic_stage);
+	}
 out:
 	mutex_unlock(&channel->challenge_lock);
 	return error;
@@ -92,7 +116,7 @@ out:
 
 static int xcy_begin_round(void *owner, u64 request, s64 expires_ms)
 {
-	return xcy_publish_challenge(owner, request, expires_ms, 'I', NULL, 0);
+	return xcy_publish_challenge(owner, request, expires_ms, 'I', 'I', NULL, 0);
 }
 
 static void xcy_retire_work(struct work_struct *work)
@@ -112,10 +136,12 @@ static void xcy_retire_work(struct work_struct *work)
 	mutex_unlock(&channel->reply_lock);
 }
 
-static void xcy_retire_round(void *owner, u64 request)
+static void xcy_retire_round(void *owner, u64 request, bool timed_out)
 {
 	struct xcy_reclaim_channel *channel = owner;
 
+	if (timed_out)
+		xcy_reclaim_notify(XCY_RECLAIM_NOTICE_TIMEOUT, READ_ONCE(channel->last_operation));
 	atomic64_set(&channel->retired_request, request);
 	queue_work(system_freezable_power_efficient_wq, &channel->retire_work);
 }
@@ -133,7 +159,8 @@ int xcy_reclaim_channel_next(struct xcy_reclaim_channel *channel, u64 request, c
 
 	if (error)
 		return error;
-	return xcy_publish_challenge(channel, request, expires_ms, operation, members, count);
+	return xcy_publish_challenge(channel, request, expires_ms, operation,
+				     operation == 'I' ? 'F' : operation, members, count);
 }
 
 static int xcy_channel_open(struct inode *inode, struct file *file)
@@ -200,7 +227,7 @@ static ssize_t xcy_channel_read(struct file *file, char __user *buffer, size_t l
 {
 	struct xcy_reclaim_channel *channel = file->private_data;
 
-	if (!xcy_is_owner(channel))
+	if (!xcy_is_owner(channel->root_publisher, channel->publisher_secid))
 		return -EACCES;
 	return xcy_reclaim_mailbox_read(&channel->mailbox, buffer, length, file->f_flags & O_NONBLOCK);
 }
@@ -212,7 +239,7 @@ static ssize_t xcy_channel_write(struct file *file, const char __user *buffer, s
 	xcy_memory_snapshot_t snapshot = {0};
 	int error;
 
-	if (!xcy_is_owner(channel))
+	if (!xcy_is_owner(channel->root_publisher, channel->publisher_secid))
 		return -EACCES;
 	if (mutex_lock_interruptible(&channel->reply_lock))
 		return -EINTR;
@@ -220,6 +247,10 @@ static ssize_t xcy_channel_write(struct file *file, const char __user *buffer, s
 	challenge = channel->expected;
 	mutex_unlock(&channel->challenge_lock);
 	error = xcy_reclaim_read_reply(&challenge, buffer, length, &snapshot);
+	if (error == -ESRCH) {
+		xcy_reclaim_notify(XCY_RECLAIM_NOTICE_IDENTITY, challenge.diagnostic_stage);
+		error = -ESTALE;
+	}
 	if (error)
 		goto out;
 	mutex_lock(&channel->challenge_lock);
@@ -254,6 +285,100 @@ static struct miscdevice xcy_channel_device = {
 	.mode = 0660,
 };
 
+struct xcy_notice_reader {
+	struct mutex lock;
+	atomic64_t cursor;
+	u32 secid;
+	bool root;
+};
+
+static int xcy_notice_open(struct inode *inode, struct file *file)
+{
+	struct xcy_notice_reader *reader;
+	u32 secid = 0;
+	bool root = uid_eq(current_euid(), GLOBAL_ROOT_UID);
+
+	if ((file->f_mode & FMODE_WRITE) || current_user_ns() != &init_user_ns ||
+	    !(root ? capable(CAP_SYS_ADMIN) : xcy_check_publisher_label(&secid)))
+		return -EACCES;
+	reader = kzalloc(sizeof(*reader), GFP_KERNEL);
+	if (!reader)
+		return -ENOMEM;
+	mutex_init(&reader->lock);
+	reader->root = root;
+	reader->secid = secid;
+	file->private_data = reader;
+	return nonseekable_open(inode, file);
+}
+
+static int xcy_notice_release(struct inode *inode, struct file *file)
+{
+	kfree(file->private_data);
+	return 0;
+}
+
+static __poll_t xcy_notice_poll(struct file *file, poll_table *wait)
+{
+	struct xcy_notice_reader *reader = file->private_data;
+
+	if (!xcy_is_owner(reader->root, reader->secid))
+		return EPOLLERR;
+	poll_wait(file, &notice_wait, wait);
+	return atomic64_read(&reader->cursor) != atomic64_read(&notice_generation) ? EPOLLIN | EPOLLRDNORM : 0;
+}
+
+static ssize_t xcy_notice_read(struct file *file, char __user *target, size_t count, loff_t *pos)
+{
+	struct xcy_notice_reader *reader = file->private_data;
+	char buffer[96];
+	unsigned long irq;
+	u64 generation, timeouts, identities;
+	char timeout_op, identity_op;
+	ssize_t result;
+
+	if (!xcy_is_owner(reader->root, reader->secid))
+		return -EACCES;
+	if (mutex_lock_interruptible(&reader->lock))
+		return -EINTR;
+	spin_lock_irqsave(&notice_lock, irq);
+	generation = atomic64_read(&notice_generation);
+	timeouts = notice_count[XCY_RECLAIM_NOTICE_TIMEOUT];
+	identities = notice_count[XCY_RECLAIM_NOTICE_IDENTITY];
+	timeout_op = notice_operation[XCY_RECLAIM_NOTICE_TIMEOUT];
+	identity_op = notice_operation[XCY_RECLAIM_NOTICE_IDENTITY];
+	spin_unlock_irqrestore(&notice_lock, irq);
+	if (generation == atomic64_read(&reader->cursor)) {
+		result = -EAGAIN;
+		goto out;
+	}
+	result = scnprintf(buffer, sizeof(buffer), "XCY_NOTICE_V1 %llu %llu %c %c\n",
+			   (unsigned long long)timeouts, (unsigned long long)identities, timeout_op, identity_op);
+	if (count < result)
+		result = -EMSGSIZE;
+	else if (copy_to_user(target, buffer, result))
+		result = -EFAULT;
+	else
+		atomic64_set(&reader->cursor, generation);
+out:
+	mutex_unlock(&reader->lock);
+	return result;
+}
+
+static const struct file_operations xcy_notice_fops = {
+	.open = xcy_notice_open,
+	.release = xcy_notice_release,
+	.read = xcy_notice_read,
+	.poll = xcy_notice_poll,
+	.llseek = no_llseek,
+};
+
+static struct miscdevice xcy_notice_device = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "xcy_reclaim_events",
+	.fops = &xcy_notice_fops,
+	.mode = 0440,
+};
+
 int xcy_reclaim_channel_register(const struct xcy_reclaim_channel_ops *ops)
 {
 	int error;
@@ -261,7 +386,12 @@ int xcy_reclaim_channel_register(const struct xcy_reclaim_channel_ops *ops)
 	if (!ops || !ops->open || !ops->close || !ops->retire || !ops->receive || channel_ops)
 		return -EINVAL;
 	channel_ops = ops;
-	error = misc_register(&xcy_channel_device);
+	error = misc_register(&xcy_notice_device);
+	if (!error) {
+		error = misc_register(&xcy_channel_device);
+		if (error)
+			misc_deregister(&xcy_notice_device);
+	}
 	if (error)
 		channel_ops = NULL;
 	return error;

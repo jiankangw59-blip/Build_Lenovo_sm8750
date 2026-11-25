@@ -10,6 +10,7 @@ struct xcy_reclaim_reply {
 	char nonce[XCY_MEMORY_TOKEN_BYTES];
 	char epoch[XCY_MEMORY_TOKEN_BYTES];
 	char operation;
+	char diagnostic_stage;
 };
 
 /* Take a stable copy of the outstanding challenge before entering the parser.

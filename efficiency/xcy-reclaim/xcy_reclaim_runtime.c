@@ -40,12 +40,12 @@ static void xcy_retry_later(struct xcy_reclaim_runtime *runtime, s64 now)
 	xcy_system_reclaim_set_deadline(&runtime->policy, now, XCY_SYSTEM_RECLAIM_EPISODE_GAP_MS);
 }
 
-static void xcy_retire_pending(struct xcy_reclaim_runtime *runtime)
+static void xcy_retire_pending(struct xcy_reclaim_runtime *runtime, bool timed_out)
 {
 	u64 pending = runtime->pending;
 
 	runtime->pending = 0;
-	runtime->retire_state(runtime->owner, pending);
+	runtime->retire_state(runtime->owner, pending, timed_out);
 }
 
 static void xcy_observe(struct xcy_reclaim_runtime *runtime)
@@ -61,10 +61,10 @@ static void xcy_observe(struct xcy_reclaim_runtime *runtime)
 	pressure = xcy_ram_pressure();
 	if (runtime->pending) {
 		if (pressure != XCY_SYSTEM_PRESSURE_CRITICAL) {
-			xcy_retire_pending(runtime);
+			xcy_retire_pending(runtime, false);
 			xcy_system_reclaim_observe(&runtime->policy, pressure, now);
 		} else if (now >= runtime->expires_ms) {
-			xcy_retire_pending(runtime);
+			xcy_retire_pending(runtime, true);
 			xcy_retry_later(runtime, now);
 		}
 		goto schedule;
@@ -104,7 +104,7 @@ static void xcy_deadline_work(struct work_struct *work)
 
 int xcy_reclaim_runtime_start(struct xcy_reclaim_runtime *runtime, struct file *publisher,
 			      int (*request_state)(void *owner, u64 request, s64 expires_ms),
-			      void (*retire_state)(void *owner, u64 request),
+			      void (*retire_state)(void *owner, u64 request, bool timed_out),
 			      void *owner)
 {
 	int error;
@@ -152,7 +152,7 @@ static int xcy_check_request(struct xcy_reclaim_runtime *runtime, u64 request, s
 	pressure = xcy_ram_pressure();
 	if (pressure == XCY_SYSTEM_PRESSURE_CRITICAL)
 		return 0;
-	xcy_retire_pending(runtime);
+	xcy_retire_pending(runtime, false);
 	xcy_system_reclaim_observe(&runtime->policy, pressure, now);
 	xcy_schedule_deadline(runtime, now);
 	return -EAGAIN;

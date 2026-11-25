@@ -181,8 +181,11 @@ int xcy_reclaim_plan_pick(const struct xcy_reclaim_plan *plan,
 	for (i = 0; i < plan->group_count; ++i) {
 		const struct xcy_reclaim_group *group = &plan->groups[i];
 		const xcy_memory_process_t *row = &inventory->items[group->representative];
-		struct xcy_reclaim_age observed = age(row, now_ms, context);
+		struct xcy_reclaim_age observed;
 
+		if (group->departed)
+			continue;
+		observed = age(row, now_ms, context);
 		if (!observed.background_since_ms || observed.background_since_ms > now_ms)
 			continue;
 		rank[i].pss_kb = group_pss(plan, group, pss, keys, row->pkg);
@@ -215,12 +218,14 @@ int xcy_reclaim_plan_revalidate(const struct xcy_reclaim_plan *plan, size_t sele
 	    strcmp(first->epoch, fresh->epoch))
 		return -ESTALE;
 	group = &plan->groups[selected];
+	if (group->departed)
+		return -ESRCH;
 	owner = &first->items[group->representative];
 	for (i = 0; i < fresh->count; ++i)
 		if (fresh->items[i].uid == owner->uid)
 			break;
 	if (i == fresh->count || strcmp(fresh->items[i].pkg, owner->pkg))
-		return -ESTALE;
+		return -ESRCH;
 	observed = age(&fresh->items[i], now_ms, context);
 	if (!observed.background_since_ms || observed.background_since_ms > now_ms ||
 	    (!urgent && observed.recent))
@@ -232,17 +237,22 @@ int xcy_reclaim_plan_revalidate(const struct xcy_reclaim_plan *plan, size_t sele
 		goto out;
 	}
 	if (!xcy_policy_snapshot(fresh, policy, fresh->count) ||
-	    !xcy_reclaim_collect_package(fresh, policy, protection, now_ms, i, candidate) ||
-	    candidate->count != group->count)
+	    !xcy_reclaim_collect_package(fresh, policy, protection, now_ms, i, candidate))
 		goto out;
+	if (candidate->count != group->count) {
+		error = -ESRCH;
+		goto out;
+	}
 	for (i = 0; i < candidate->count; ++i) {
 		const xcy_memory_process_t *row = &fresh->items[candidate->members[i]];
 
 		for (j = 0; j < group->count; ++j)
 			if (same_member(&plan->members[group->first + j], row))
 				break;
-		if (j == group->count)
+		if (j == group->count) {
+			error = -ESRCH;
 			goto out;
+		}
 	}
 	error = 0;
 out:
