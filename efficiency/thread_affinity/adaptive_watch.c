@@ -176,6 +176,33 @@ static int submit_context(int ctl, const char *node, const char *brightness, con
 	return 0;
 }
 
+static int refresh_context(int *ctl, const char *node, const char *brightness, const char *games,
+			   char last[NOTICE_SIZE], bool *deferred)
+{
+	if (*ctl < 0) {
+		*ctl = open(DEVICE, O_WRONLY | O_CLOEXEC);
+		if (*ctl < 0)
+			return -1;
+	}
+	if (!submit_context(*ctl, node, brightness, games, last)) {
+		if (*deferred)
+			fprintf(stderr, "Scene context recovered\n");
+		*deferred = false;
+		return 0;
+	}
+	if (errno != E2BIG && errno != ENOMEM)
+		return -1;
+
+	if (!*deferred)
+		fprintf(stderr, "Scene context deferred (%s); static rules remain active\n", strerror(errno));
+	/* Drop the previous adaptive scene. The next event supplies a fresh one. */
+	close(*ctl);
+	*ctl = -1;
+	last[0] = '\0';
+	*deferred = true;
+	return 0;
+}
+
 static int watch_parent(int inotify, const char *path, struct source *source)
 {
 	const char *slash = strrchr(path, '/');
@@ -227,6 +254,7 @@ int watch_context(const char *node, const char *brightness, const char *games)
 	struct pollfd events[2];
 	sigset_t signals;
 	char last[NOTICE_SIZE] = "";
+	bool deferred = false;
 	int notification = -1, signal_fd = -1, ctl = -1, panel_watch = -2;
 	int ret = 1;
 
@@ -250,8 +278,7 @@ int watch_context(const char *node, const char *brightness, const char *games)
 		if (watch >= 0)
 			panel_watch = watch;
 	}
-	ctl = open(DEVICE, O_WRONLY | O_CLOEXEC);
-	if (ctl < 0 || submit_context(ctl, node, brightness, games, last) < 0)
+	if (refresh_context(&ctl, node, brightness, games, last, &deferred) < 0)
 		goto out;
 	events[0] = (struct pollfd){ .fd = notification, .events = POLLIN };
 	events[1] = (struct pollfd){ .fd = signal_fd, .events = POLLIN };
@@ -273,7 +300,7 @@ int watch_context(const char *node, const char *brightness, const char *games)
 		if (events[0].revents & POLLIN) {
 			int dirty = read_events(notification, &scene, &panel, &game_list, panel_watch);
 
-			if (dirty < 0 || (dirty && submit_context(ctl, node, brightness, games, last) < 0))
+			if (dirty < 0 || (dirty && refresh_context(&ctl, node, brightness, games, last, &deferred) < 0))
 				goto out;
 		}
 	}

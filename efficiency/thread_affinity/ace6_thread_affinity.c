@@ -18,6 +18,7 @@
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
 #include <linux/sort.h>
+#include <linux/threads.h>
 #include <linux/tracepoint.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
@@ -25,7 +26,7 @@
 #include "adaptive_policy.h"
 
 #define MAX_PENDING 4096
-#define MAX_SNAPSHOT 16384
+#define INITIAL_SNAPSHOT 16384
 #define MAX_GAME_THREADS 1024
 #define GAME_GATE_HITS 3
 #define GAME_GATE_TIMEOUT (300 * HZ)
@@ -82,6 +83,8 @@ static struct scene_context *scene;
 static struct file *scene_owner;
 static struct workqueue_struct *affinity_wq;
 static struct task_struct **snapshot;
+static unsigned int snapshot_capacity = INITIAL_SNAPSHOT;
+static unsigned int snapshot_growths;
 static bool enabled;
 static unsigned int revision;
 static unsigned int validated;
@@ -654,7 +657,13 @@ static void release_policy(void)
 #endif
 }
 
-static int capture_tasks(unsigned int *count)
+static void release_snapshot(unsigned int count)
+{
+	while (count)
+		put_task_struct(snapshot[--count]);
+}
+
+static int capture_task_refs(unsigned int *count)
 {
 	struct task_struct *group, *task;
 	int ret = 0;
@@ -664,7 +673,7 @@ static int capture_tasks(unsigned int *count)
 	for_each_process_thread(group, task) {
 		if (!task_eligible(task))
 			continue;
-		if (*count == MAX_SNAPSHOT) {
+		if (*count == snapshot_capacity) {
 			ret = -E2BIG;
 			goto finish_snapshot;
 		}
@@ -676,10 +685,28 @@ finish_snapshot:
 	return ret;
 }
 
-static void release_snapshot(unsigned int count)
+static int capture_tasks(unsigned int *count, bool grow)
 {
-	while (count)
-		put_task_struct(snapshot[--count]);
+	while (true) {
+		struct task_struct **larger;
+		unsigned int capacity;
+		int ret = capture_task_refs(count);
+
+		if (ret != -E2BIG || !grow || snapshot_capacity >= PID_MAX_LIMIT)
+			return ret;
+
+		/* Drop all references before growing outside of the RCU section. */
+		release_snapshot(*count);
+		*count = 0;
+		capacity = min_t(unsigned int, snapshot_capacity * 2, PID_MAX_LIMIT);
+		larger = kvmalloc_array(capacity, sizeof(*larger), GFP_KERNEL | __GFP_NOWARN);
+		if (!larger)
+			return -ENOMEM;
+		kvfree(snapshot);
+		snapshot = larger;
+		snapshot_capacity = capacity;
+		snapshot_growths++;
+	}
 }
 
 static enum app_stage current_stage(const struct scene_context *context, const char *process)
@@ -740,7 +767,7 @@ static int replace_policy(struct affinity_policy *next)
 		goto out;
 	}
 	WRITE_ONCE(enabled, true);
-	ret = capture_tasks(&count);
+	ret = capture_tasks(&count, true);
 	if (ret) {
 		WRITE_ONCE(enabled, policy != NULL);
 		goto out;
@@ -787,7 +814,7 @@ static int replace_scene(struct file *file, struct scene_context *next)
 		goto out;
 	rescan = policy && policy->adaptive_scope[0];
 	if (rescan) {
-		ret = capture_tasks(&count);
+		ret = capture_tasks(&count, next != NULL);
 		if (ret && next)
 			goto out;
 	}
@@ -899,7 +926,8 @@ static ssize_t control_read(struct file *file, char __user *user,
 		"revision=%u\nrules=%u\nvalidated=%u\nleases=%u\npending=%d\nchanged=%ld\nclamped=%ld\nfailed=%ld\ndropped=%ld\n"
 		"profile_wire=1\nwire_lines=%u\nstored_rules=%u\nprofiles=%u\nprofile_bindings=%u\n"
 		"adaptive=%s\nforeground=%s\ndisplay_off=%u\ncontext_switches=%u\nadapted=%ld\n"
-		"game_tgid=%d\ngame_top=%d,%d,%d\ngame_samples=%u\ngame_finalized=%u\n",
+		"game_tgid=%d\ngame_top=%d,%d,%d\ngame_samples=%u\ngame_finalized=%u\n"
+		"snapshot_capacity=%u\nsnapshot_growths=%u\n",
 		revision, policy ? policy->count : 0, validated, lease_count,
 		atomic_read(&pending), atomic_long_read(&changed),
 		atomic_long_read(&clamped), atomic_long_read(&failed),
@@ -912,7 +940,8 @@ static ssize_t control_read(struct file *file, char __user *user,
 		game_leader ? task_pid_nr(game_leader) : 0,
 		game_rank[0] ? task_pid_nr(game_rank[0]) : 0,
 		game_rank[1] ? task_pid_nr(game_rank[1]) : 0,
-		game_rank[2] ? task_pid_nr(game_rank[2]) : 0, game_passes, game_finalized);
+		game_rank[2] ? task_pid_nr(game_rank[2]) : 0, game_passes, game_finalized,
+		snapshot_capacity, snapshot_growths);
 	mutex_unlock(&policy_lock);
 	return simple_read_from_buffer(user, size, offset, stats, len);
 }
@@ -940,7 +969,7 @@ static int __init affinity_init(void)
 	affinity_wq = alloc_ordered_workqueue("ace6_affinity", WQ_FREEZABLE | WQ_POWER_EFFICIENT);
 	if (!affinity_wq)
 		return -ENOMEM;
-	snapshot = kvmalloc_array(MAX_SNAPSHOT, sizeof(*snapshot), GFP_KERNEL);
+	snapshot = kvmalloc_array(snapshot_capacity, sizeof(*snapshot), GFP_KERNEL);
 	game_samples = kvmalloc_array(MAX_GAME_THREADS, sizeof(*game_samples), GFP_KERNEL);
 	game_next = kvmalloc_array(MAX_GAME_THREADS, sizeof(*game_next), GFP_KERNEL);
 	if (!snapshot || !game_samples || !game_next) {
