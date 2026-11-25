@@ -35,6 +35,7 @@ jobs:
           "$RUNNER_TEMP/xcy-plan"
           cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
             efficiency/xcy-reclaim/test_protection.c efficiency/xcy-reclaim/xcy_reclaim_protection.c \
+            efficiency/xcy-reclaim/xcy_reclaim_lease.c \
             -o "$RUNNER_TEMP/xcy-protection"
           "$RUNNER_TEMP/xcy-protection"
       - name: Compile the components against the pinned ARM64 6.6.118 kernel
@@ -55,4 +56,7 @@ jobs:
           make -s -C "$kernel" O="$out" ARCH=arm64 LLVM=1 gki_defconfig
           grep -qx 'CONFIG_XCY_RECLAIM=y' "$out/.config"
           make -s -C "$kernel" -j2 O="$out" ARCH=arm64 LLVM=1 mm/xcy-reclaim/built-in.a
-          llvm-ar t "$out/mm/xcy-reclaim/built-in.a" | grep -E '(^|/)xcy_reclaim_sources.o$'
+          objects="$(llvm-ar t "$out/mm/xcy-reclaim/built-in.a")"
+          for source in sources policy lease; do
+            grep -E "(^|/)xcy_reclaim_${source}\.o$" <<< "$objects"
+          done

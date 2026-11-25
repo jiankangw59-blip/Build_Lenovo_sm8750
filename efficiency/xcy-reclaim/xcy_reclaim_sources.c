@@ -7,6 +7,7 @@
 #include <linux/xarray.h>
 
 #include "xcy_reclaim_engine.h"
+#include "xcy_reclaim_policy.h"
 #include "xcy_reclaim_protection.h"
 
 #define XCY_HISTORY_MAX 512U
@@ -28,6 +29,7 @@ static DEFINE_MUTEX(source_lock);
 static DEFINE_XARRAY(history);
 static size_t history_count;
 static u64 observations;
+static u64 latest_grace_ms;
 static struct xcy_payload *latest_scene;
 static struct xcy_payload *latest_protection;
 
@@ -59,6 +61,7 @@ static void xcy_sources_reset(void)
 	scene = latest_scene;
 	protection = latest_protection;
 	latest_scene = latest_protection = NULL;
+	latest_grace_ms = 0;
 	xcy_clear_history();
 	mutex_unlock(&source_lock);
 	xcy_payload_put(scene);
@@ -197,6 +200,7 @@ static int xcy_sources_get(const struct xcy_reclaim_reply *reply, struct xcy_rec
 		goto out;
 	view->protection = latest_protection->frame.view;
 	view->generation = latest_protection->frame.scene_generation;
+	view->scene_observed_ms = latest_protection->frame.scene_observed_ms;
 	view->reference = latest_protection;
 	if (!xcy_view_current(view, now))
 		goto out;
@@ -204,11 +208,23 @@ static int xcy_sources_get(const struct xcy_reclaim_reply *reply, struct xcy_rec
 	error = 0;
 out:
 	mutex_unlock(&source_lock);
+	if (error)
+		return error;
+	error = xcy_reclaim_policy_get(&view->protection, &view->grace_ms, &view->scene_valid_ms,
+				       &view->policy);
+	if (!error && now - view->scene_observed_ms > view->scene_valid_ms)
+		error = -ESTALE;
+	if (error) {
+		xcy_reclaim_policy_put(view->policy);
+		xcy_payload_put(view->reference);
+		memset(view, 0, sizeof(*view));
+	}
 	return error;
 }
 
 static void xcy_sources_put(struct xcy_reclaim_source_view *view)
 {
+	xcy_reclaim_policy_put(view->policy);
 	xcy_payload_put(view->reference);
 }
 
@@ -216,8 +232,11 @@ static bool xcy_sources_valid(const struct xcy_reclaim_source_view *view, u64 no
 {
 	bool valid;
 
+	if (!xcy_reclaim_policy_current(view->policy))
+		return false;
+	now = ktime_to_ms(ktime_get_boottime());
 	mutex_lock(&source_lock);
-	valid = xcy_view_current(view, now);
+	valid = xcy_view_current(view, now) && now - view->scene_observed_ms <= view->scene_valid_ms;
 	mutex_unlock(&source_lock);
 	return valid;
 }
@@ -232,6 +251,7 @@ static void xcy_sources_observe(const xcy_memory_snapshot_t *snapshot, const str
 	mutex_lock(&source_lock);
 	if (!xcy_view_current(view, now))
 		goto out;
+	latest_grace_ms = view->grace_ms;
 	++observations;
 	for (i = 0; i < snapshot->count; ++i) {
 		const xcy_memory_process_t *process = &snapshot->items[i];
@@ -292,7 +312,7 @@ static struct xcy_reclaim_age xcy_sources_age(const xcy_memory_process_t *owner,
 		goto out;
 	age.background_since_ms = row->background_since;
 	age.recent = row->last_used > now ||
-		now - max(row->background_since, row->last_used) < latest_protection->frame.grace_ms;
+		now - max(row->background_since, row->last_used) < latest_grace_ms;
 out:
 	mutex_unlock(&source_lock);
 	return age;
@@ -310,6 +330,13 @@ static const struct xcy_reclaim_sources xcy_sources = {
 
 static int __init xcy_reclaim_init(void)
 {
-	return xcy_reclaim_engine_register(&xcy_sources);
+	int error = xcy_reclaim_policy_register();
+
+	if (error)
+		return error;
+	error = xcy_reclaim_engine_register(&xcy_sources);
+	if (error)
+		xcy_reclaim_policy_unregister();
+	return error;
 }
 late_initcall(xcy_reclaim_init);

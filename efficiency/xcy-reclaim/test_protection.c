@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <stdio.h>
 
+#include "xcy_reclaim_lease.h"
 #include "xcy_reclaim_protection.h"
 
 static const char complete[] =
@@ -12,6 +13,28 @@ static const char complete[] =
 static const char scene[] =
 	"XCY_PROTECT_V1 scene 1000 5100 900 8 180000 0 0 1 1 0 0 0 0 0 180000 -\n"
 	"V org.example.visible\nA org.example.active\nEND scene\n";
+
+static void test_sync_lease(void)
+{
+	const char boot[] = "01234567-89ab-cdef-0123-456789abcdef";
+	const char previous_boot[] = "01234567-89ab-cdef-0123-456789abcdee";
+	const char active[] =
+		"{\"version\":1,\"uid\":10123,\"pid\":120,\"startTime\":\"95\","
+		"\"expiresAt\":3000,\"owner\":\"headless\",\"state\":\"active\","
+		"\"bootId\":\"01234567-89ab-cdef-0123-456789abcdef\",\"token\":\"opaque\"}";
+	char malformed[sizeof(active) + 9];
+	xcy_sync_lease_t lease;
+	size_t size = sizeof(active) - 1;
+
+	assert(xcy_parse_sync_lease(active, size, boot, 2000, &lease) == 1);
+	assert(lease.uid == 10123 && lease.pid == 120 && lease.start_ticks == 95);
+	assert(lease.expires_ms == 3000 && lease.headless);
+	assert(xcy_parse_sync_lease(active, size, boot, 3000, &lease) == 2);
+	assert(xcy_parse_sync_lease(active, size, previous_boot, 100, &lease) == 2);
+	assert(xcy_parse_sync_lease(active, size - 1, boot, 2000, &lease) == 0);
+	snprintf(malformed, sizeof(malformed), "%.*s,\"pid\":1}", (int)size - 1, active);
+	assert(xcy_parse_sync_lease(malformed, strlen(malformed), boot, 2000, &lease) == 0);
+}
 
 int main(void)
 {
@@ -40,6 +63,7 @@ int main(void)
 	assert(!xcy_reclaim_protection_parse(scene, sizeof(scene) - 1, "scene", 0, 1020, &frame));
 	assert(!frame.view.ready && frame.view.visible.count == 1 && frame.view.active.count == 1);
 	xcy_reclaim_protection_free(&frame);
+	test_sync_lease();
 	puts("protection frame rejects stale, partial and mismatched sources; Scene-only data cannot arm selection");
 	return 0;
 }
