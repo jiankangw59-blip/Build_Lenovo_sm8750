@@ -53,6 +53,7 @@ static DEFINE_MUTEX(policy_lock);
 static const struct cred *policy_cred;
 static struct path policy_root;
 static u64 policy_generation;
+static bool allow_signals;
 static struct fsnotify_group *scene_watch;
 static void (*scene_changed)(const struct xcy_reclaim_protection_frame *frame);
 
@@ -497,7 +498,7 @@ bool xcy_reclaim_policy_current(const struct xcy_reclaim_policy *policy)
 	bool valid = false;
 
 	mutex_lock(&policy_lock);
-	if (policy_cred && policy->authority == policy_generation) {
+	if (policy_cred && allow_signals && policy->authority == policy_generation) {
 		previous = override_creds(policy_cred);
 		valid = xcy_policy_files_current(policy) &&
 			ktime_to_ms(ktime_get_boottime()) - policy->scene.scene_observed_ms <= policy->scene.scene_valid_ms;
@@ -512,7 +513,7 @@ static ssize_t xcy_policy_write(struct file *file, const char __user *buffer,
 {
 	struct fsnotify_group *old_watch;
 	char command[8];
-	bool enable;
+	bool enable, observe;
 	int error = 0;
 
 	if (!uid_eq(current_euid(), GLOBAL_ROOT_UID) || current_user_ns() != &init_user_ns ||
@@ -523,17 +524,19 @@ static ssize_t xcy_policy_write(struct file *file, const char __user *buffer,
 	if (copy_from_user(command, buffer, length))
 		return -EFAULT;
 	enable = length == 7 && !memcmp(command, "enable\n", 7);
-	if (!enable && (length != 8 || memcmp(command, "disable\n", 8)))
+	observe = length == 8 && !memcmp(command, "observe\n", 8);
+	if (!enable && !observe && (length != 8 || memcmp(command, "disable\n", 8)))
 		return -EINVAL;
 	mutex_lock(&policy_lock);
 	old_watch = scene_watch;
 	scene_watch = NULL;
+	allow_signals = false;
 	if (policy_cred) {
 		put_cred(policy_cred);
 		path_put(&policy_root);
 		policy_cred = NULL;
 	}
-	if (enable) {
+	if (enable || observe) {
 		get_fs_root(current->fs, &policy_root);
 		scene_watch = xcy_watch_scene();
 		if (IS_ERR(scene_watch)) {
@@ -542,6 +545,7 @@ static ssize_t xcy_policy_write(struct file *file, const char __user *buffer,
 			path_put(&policy_root);
 		} else {
 			policy_cred = get_current_cred();
+			allow_signals = enable;
 		}
 	}
 	++policy_generation;
@@ -549,7 +553,7 @@ static ssize_t xcy_policy_write(struct file *file, const char __user *buffer,
 	mutex_unlock(&policy_lock);
 	if (old_watch)
 		fsnotify_destroy_group(old_watch);
-	if (enable && !error)
+	if ((enable || observe) && !error)
 		queue_work(system_freezable_power_efficient_wq, &scene_work);
 	return error ? error : length;
 }
