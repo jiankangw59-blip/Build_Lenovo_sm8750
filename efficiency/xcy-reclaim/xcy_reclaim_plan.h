@@ -42,6 +42,7 @@ int xcy_reclaim_plan_pick(const struct xcy_reclaim_plan *plan,
 			  xcy_reclaim_age_fn age, void *context, size_t *selected);
 int xcy_reclaim_plan_revalidate(const struct xcy_reclaim_plan *plan, size_t selected,
 			       const xcy_memory_snapshot_t *first, const xcy_memory_snapshot_t *fresh,
-			       const struct xcy_reclaim_protection *protection, uint64_t now_ms);
+			       const struct xcy_reclaim_protection *protection, uint64_t now_ms,
+			       int urgent, xcy_reclaim_age_fn age, void *context);
 
 #endif

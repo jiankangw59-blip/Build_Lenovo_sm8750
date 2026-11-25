@@ -200,16 +200,18 @@ out:
 
 int xcy_reclaim_plan_revalidate(const struct xcy_reclaim_plan *plan, size_t selected,
 			       const xcy_memory_snapshot_t *first, const xcy_memory_snapshot_t *fresh,
-			       const struct xcy_reclaim_protection *protection, uint64_t now_ms)
+			       const struct xcy_reclaim_protection *protection, uint64_t now_ms,
+			       int urgent, xcy_reclaim_age_fn age, void *context)
 {
 	const struct xcy_reclaim_group *group;
 	const xcy_memory_process_t *owner;
 	struct xcy_reclaim_candidate *candidate;
+	struct xcy_reclaim_age observed;
 	xcy_policy_result_t *policy;
 	size_t i, j;
 	int error = -ESTALE;
 
-	if (selected >= plan->group_count || !valid_frame(first) || !valid_frame(fresh) ||
+	if (selected >= plan->group_count || !valid_frame(first) || !valid_frame(fresh) || !age ||
 	    strcmp(first->epoch, fresh->epoch))
 		return -ESTALE;
 	group = &plan->groups[selected];
@@ -218,6 +220,10 @@ int xcy_reclaim_plan_revalidate(const struct xcy_reclaim_plan *plan, size_t sele
 		if (fresh->items[i].uid == owner->uid)
 			break;
 	if (i == fresh->count || strcmp(fresh->items[i].pkg, owner->pkg))
+		return -ESTALE;
+	observed = age(&fresh->items[i], now_ms, context);
+	if (!observed.background_since_ms || observed.background_since_ms > now_ms ||
+	    (!urgent && observed.recent))
 		return -ESTALE;
 	candidate = xcy_snapshot_calloc(1, sizeof(*candidate));
 	policy = xcy_snapshot_calloc(fresh->count, sizeof(*policy));

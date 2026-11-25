@@ -56,14 +56,21 @@ int main(void)
 	assert(plan.members[0].pid == 20 && plan.members[1].pid == 21);
 	assert(!xcy_reclaim_plan_pick(&plan, &initial, &pss, 150000, 0, background, &recent, &picked));
 	assert(picked == 1);
-	assert(!xcy_reclaim_plan_revalidate(&plan, picked, &initial, &final, &protection, 150010));
+	assert(!xcy_reclaim_plan_revalidate(&plan, picked, &initial, &final, &protection, 150010,
+					    0, background, &recent));
 	protection.visible = (struct xcy_reclaim_names){visible, 1};
-	assert(xcy_reclaim_plan_revalidate(&plan, picked, &initial, &final, &protection, 150010) == -ESTALE);
+	assert(xcy_reclaim_plan_revalidate(&plan, picked, &initial, &final, &protection, 150010,
+					   0, background, &recent) == -ESTALE);
 	protection.visible.count = 0;
 	++final_rows[1].starttime;
-	assert(xcy_reclaim_plan_revalidate(&plan, picked, &initial, &final, &protection, 150010) == -ESTALE);
+	assert(xcy_reclaim_plan_revalidate(&plan, picked, &initial, &final, &protection, 150010,
+					   0, background, &recent) == -ESTALE);
 	--final_rows[1].starttime;
 	recent = 10001;
+	assert(xcy_reclaim_plan_revalidate(&plan, picked, &initial, &final, &protection, 150010,
+					   0, background, &recent) == -ESTALE);
+	assert(!xcy_reclaim_plan_revalidate(&plan, picked, &initial, &final, &protection, 150010,
+					    1, background, &recent));
 	assert(!xcy_reclaim_plan_pick(&plan, &initial, &pss, 150000, 0, background, &recent, &picked));
 	assert(picked == 0);
 	measured_rows[0].flags = XCY_MEMORY_IDENTITY_VALID;
