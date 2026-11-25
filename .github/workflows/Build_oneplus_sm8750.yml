@@ -69,6 +69,11 @@ on:
         default: false
         type: boolean
 
+      enable_thread_affinity:
+        description: "Build the opt-in thread affinity backend (Ace 6 6.6.118)"
+        type: boolean
+        default: false
+
       custom_kernel_suffix:
         description: "✏️ 自定义内核名称- (-开头 留空则默认官方）"
         required: false
@@ -950,6 +955,13 @@ jobs:
             --profile "$EFFICIENCY_PROFILE"
           python3 efficiency/apply_profile.py configure --kernel kernel_workspace/common \
             --profile "$EFFICIENCY_PROFILE"
+
+      - name: Attach Ace 6 thread affinity backend
+        if: ${{ inputs.enable_thread_affinity }}
+        run: |
+          set -euo pipefail
+          test "$DEVICES_NAME:$KERNEL_VERSION:$KERNEL_SOURCE_REF" = "oneplus_ace_6:6.6.118:65b954a773b183a9999b06bb1b2f921f12eaaf11"
+          python3 efficiency/thread_affinity/install_builtin.py --kernel kernel_workspace/common
 
       - name: 🔧 Set Kernel name (设置内核名称)
         run: |
