@@ -4,11 +4,16 @@
 #include "xcy_reclaim_snapshot.h"
 
 /* The original emergency cutoff is independent of the 12% kill admission. */
+static inline int64_t xcy_reclaim_urgent_reserve(int64_t total)
+{
+    return (total / 100) * 6 + ((total % 100) * 6 + 99) / 100;
+}
+
 static inline int xcy_reclaim_urgent(int64_t total, int64_t available)
 {
     if (total <= 0 || available < 0 || available > total)
         return 0;
-    return available < (total / 100) * 6 + ((total % 100) * 6 + 99) / 100;
+    return available < xcy_reclaim_urgent_reserve(total);
 }
 
 /* Pure batch-response join. Every requested member must retain its exact

@@ -19,11 +19,10 @@ void xcy_reclaim_targets_put(struct xcy_reclaim_targets *targets);
 
 /* The guard checks whether the protection/history generation is unchanged.
  * It must only inspect kernel-owned state and must not wait for Framework. */
-typedef bool (*xcy_reclaim_guard_fn)(void *context, u64 now_ms, bool urgent);
+typedef bool (*xcy_reclaim_guard_fn)(void *context, size_t group, u64 now_ms, bool urgent);
 
 int xcy_reclaim_execute(struct xcy_reclaim_runtime *runtime, u64 request,
 			const struct xcy_reclaim_plan *plan, const struct xcy_reclaim_targets *targets,
-			size_t selected, xcy_reclaim_guard_fn valid_guard, void *context,
-			u64 *first_signal_ms);
+			struct xcy_reclaim_batch *batch, xcy_reclaim_guard_fn valid_guard, void *context);
 
 #endif

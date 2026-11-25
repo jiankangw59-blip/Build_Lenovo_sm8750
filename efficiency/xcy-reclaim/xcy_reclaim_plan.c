@@ -154,18 +154,21 @@ static uint64_t group_pss(const struct xcy_reclaim_plan *plan,
 
 int xcy_reclaim_plan_pick(const struct xcy_reclaim_plan *plan,
 			  const xcy_memory_snapshot_t *inventory,
-			  const xcy_memory_snapshot_t *pss, uint64_t now_ms, int urgent,
-			  xcy_reclaim_age_fn age, void *context, size_t *selected)
+			  const xcy_memory_snapshot_t *pss, uint64_t now_ms,
+			  xcy_reclaim_age_fn age, void *context, uint64_t needed_kb, uint64_t urgent_above_kb,
+			  struct xcy_reclaim_batch *batch)
 {
 	struct xcy_reclaim_rank_entry *rank;
 	struct xcy_plan_key *keys;
 	size_t i;
 	int error = -ENOMEM;
 
-	*selected = SIZE_MAX;
+	batch->count = 0;
 	if (!valid_frame(inventory) || !valid_frame(pss) || !age ||
 	    strcmp(inventory->epoch, pss->epoch) || pss->count > plan->member_count)
 		return -EINVAL;
+	if (!needed_kb)
+		return 0;
 	rank = xcy_snapshot_calloc(plan->group_count, sizeof(*rank));
 	keys = xcy_snapshot_calloc(pss->count, sizeof(*keys));
 	if (!rank || !keys)
@@ -193,7 +196,16 @@ int xcy_reclaim_plan_pick(const struct xcy_reclaim_plan *plan,
 		rank[i].age_ms = now_ms - observed.background_since_ms;
 		rank[i].recent = observed.recent;
 	}
-	*selected = xcy_reclaim_rank(rank, plan->group_count, urgent);
+	/* Rank only the remaining entries from the same PSS snapshot. */
+	while ((i = xcy_reclaim_rank(rank, plan->group_count, needed_kb > urgent_above_kb)) != SIZE_MAX) {
+		batch->picks[batch->count++] = (struct xcy_reclaim_pick){
+			.pss_kb = rank[i].pss_kb, .group = i,
+		};
+		if (rank[i].pss_kb >= needed_kb)
+			break;
+		needed_kb -= rank[i].pss_kb;
+		rank[i].valid = false;
+	}
 	error = 0;
 out:
 	xcy_snapshot_free(keys);
@@ -201,21 +213,18 @@ out:
 	return error;
 }
 
-int xcy_reclaim_plan_revalidate(const struct xcy_reclaim_plan *plan, size_t selected,
-			       const xcy_memory_snapshot_t *first, const xcy_memory_snapshot_t *fresh,
-			       const struct xcy_reclaim_protection *protection, uint64_t now_ms,
-			       int urgent, xcy_reclaim_age_fn age, void *context)
+static int xcy_revalidate_group(const struct xcy_reclaim_plan *plan, size_t selected,
+				const xcy_memory_snapshot_t *first, const xcy_memory_snapshot_t *fresh,
+				const struct xcy_reclaim_protection *protection, uint64_t now_ms,
+				int urgent, xcy_reclaim_age_fn age, void *context,
+				const xcy_policy_result_t *policy, struct xcy_reclaim_candidate *candidate)
 {
 	const struct xcy_reclaim_group *group;
 	const xcy_memory_process_t *owner;
-	struct xcy_reclaim_candidate *candidate;
 	struct xcy_reclaim_age observed;
-	xcy_policy_result_t *policy;
 	size_t i, j;
-	int error = -ESTALE;
 
-	if (selected >= plan->group_count || !valid_frame(first) || !valid_frame(fresh) || !age ||
-	    strcmp(first->epoch, fresh->epoch))
+	if (selected >= plan->group_count)
 		return -ESTALE;
 	group = &plan->groups[selected];
 	if (group->departed)
@@ -232,30 +241,55 @@ int xcy_reclaim_plan_revalidate(const struct xcy_reclaim_plan *plan, size_t sele
 	if (!observed.background_since_ms || observed.background_since_ms > now_ms ||
 	    (!urgent && observed.recent))
 		return -ESTALE;
-	candidate = xcy_snapshot_calloc(1, sizeof(*candidate));
-	policy = xcy_snapshot_calloc(fresh->count, sizeof(*policy));
-	if (!candidate || !policy) {
-		error = -ENOMEM;
-		goto out;
-	}
-	if (!xcy_policy_snapshot(fresh, policy, fresh->count) ||
-	    !xcy_reclaim_collect_package(fresh, policy, protection, now_ms, i, candidate))
-		goto out;
-	if (candidate->count != group->count) {
-		error = -ESRCH;
-		goto out;
-	}
+	if (!xcy_reclaim_collect_package(fresh, policy, protection, now_ms, i, candidate))
+		return -ESTALE;
+	if (candidate->count != group->count)
+		return -ESRCH;
 	for (i = 0; i < candidate->count; ++i) {
 		const xcy_memory_process_t *row = &fresh->items[candidate->members[i]];
 
 		for (j = 0; j < group->count; ++j)
 			if (same_member(&plan->members[group->first + j], row))
 				break;
-		if (j == group->count) {
-			error = -ESRCH;
-			goto out;
-		}
+		if (j == group->count)
+			return -ESRCH;
 	}
+	return 0;
+}
+
+int xcy_reclaim_plan_revalidate(const struct xcy_reclaim_plan *plan,
+			       struct xcy_reclaim_batch *batch,
+			       const xcy_memory_snapshot_t *first, const xcy_memory_snapshot_t *fresh,
+			       const struct xcy_reclaim_protection *protection, uint64_t now_ms,
+			       int urgent, xcy_reclaim_age_fn age, void *context, bool *identity_changed)
+{
+	struct xcy_reclaim_candidate *candidate;
+	xcy_policy_result_t *policy;
+	size_t i, kept = 0;
+	int error = -ENOMEM;
+
+	if (!valid_frame(first) || !valid_frame(fresh) || !age ||
+	    strcmp(first->epoch, fresh->epoch) || batch->count > plan->group_count)
+		return -ESTALE;
+	candidate = xcy_snapshot_calloc(1, sizeof(*candidate));
+	policy = xcy_snapshot_calloc(fresh->count, sizeof(*policy));
+	if (!candidate || !policy)
+		goto out;
+	if (!xcy_policy_snapshot(fresh, policy, fresh->count)) {
+		error = -EINVAL;
+		goto out;
+	}
+	for (i = 0; i < batch->count; ++i) {
+		int status = xcy_revalidate_group(plan, batch->picks[i].group, first, fresh,
+						  protection, now_ms, urgent, age, context,
+						  policy, candidate);
+
+		if (status == -ESRCH)
+			*identity_changed = true;
+		if (!status)
+			batch->picks[kept++] = batch->picks[i];
+	}
+	batch->count = kept;
 	error = 0;
 out:
 	xcy_snapshot_free(policy);

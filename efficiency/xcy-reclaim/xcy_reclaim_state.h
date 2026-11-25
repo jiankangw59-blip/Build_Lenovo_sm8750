@@ -64,6 +64,22 @@ static inline xcy_system_pressure_level_t xcy_system_pressure_classify(
     return XCY_SYSTEM_PRESSURE_HEALTHY;
 }
 
+static inline xcy_reclaim_s64 xcy_system_ram_reserve(xcy_reclaim_s64 total)
+{
+    return (total / 100) * 12 + ((total % 100) * 12 + 99) / 100;
+}
+
+/* Both values use the caller's unit, including pages in the kernel. */
+static inline xcy_reclaim_s64 xcy_system_ram_deficit(xcy_reclaim_s64 total,
+                                                    xcy_reclaim_s64 available)
+{
+    xcy_reclaim_s64 reserve;
+    if (total <= 0 || available < 0 || available > total)
+        return 0;
+    reserve = xcy_system_ram_reserve(total);
+    return available < reserve ? reserve - available : 0;
+}
+
 /* Action gate: RAM only. PSI is an event source/diagnostic, not a condition
  * for PAGEOUT or kill. HEALTHY means available >= 30%; STRESS is [12%, 30%);
  * CRITICAL is strictly below 12%. Missing/invalid meminfo is UNKNOWN.
@@ -76,7 +92,7 @@ static inline xcy_system_pressure_level_t xcy_system_ram_pressure_classify(
         return XCY_SYSTEM_PRESSURE_UNKNOWN;
     hundreds = total_kb / 100;
     remainder = total_kb % 100;
-    if (available_kb < hundreds * 12 + (remainder * 12 + 99) / 100)
+    if (available_kb < xcy_system_ram_reserve(total_kb))
         return XCY_SYSTEM_PRESSURE_CRITICAL;
     if (available_kb < hundreds * 30 + (remainder * 30 + 99) / 100)
         return XCY_SYSTEM_PRESSURE_STRESS;
@@ -440,13 +456,12 @@ static inline xcy_reclaim_s64 xcy_system_reclaim_deadline(
     return episode->deadline_ms;
 }
 
-/* Each successful kill earns one fresh RAM check after the feedback delay.
- * The kernel can continue while RAM is critical and safe targets remain. */
-static inline xcy_system_reclaim_decision_t xcy_reclaim_complete_without_pageout(
-        xcy_system_reclaim_episode_t *episode, xcy_reclaim_s64 now_ms,
-        int action_succeeded) {
+/* One RAM feedback check follows a successful batch. A system still under
+ * critical pressure can build another batch from fresh data. */
+static inline xcy_system_reclaim_decision_t xcy_reclaim_complete_batch(
+        xcy_system_reclaim_episode_t *episode, xcy_reclaim_s64 now_ms) {
     xcy_system_reclaim_decision_t decision =
-        xcy_system_reclaim_complete(episode, now_ms, action_succeeded);
+        xcy_system_reclaim_complete(episode, now_ms, 1);
 
     if (decision == XCY_SYSTEM_RECLAIM_WAIT)
         episode->episode_actions = 0;

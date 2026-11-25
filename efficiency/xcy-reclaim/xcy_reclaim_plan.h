@@ -25,6 +25,17 @@ struct xcy_reclaim_plan {
 	size_t member_count;
 };
 
+struct xcy_reclaim_pick {
+	uint64_t pss_kb;
+	uint64_t first_signal_ms;
+	size_t group;
+};
+
+struct xcy_reclaim_batch {
+	struct xcy_reclaim_pick picks[XCY_RECLAIM_MEMBERS_MAX];
+	size_t count;
+};
+
 /* These observations come from the kernel's event-driven visibility history. */
 struct xcy_reclaim_age {
 	uint64_t background_since_ms;
@@ -40,11 +51,13 @@ int xcy_reclaim_plan_build(struct xcy_reclaim_plan *plan,
 			   xcy_reclaim_age_fn age, void *context);
 int xcy_reclaim_plan_pick(const struct xcy_reclaim_plan *plan,
 			  const xcy_memory_snapshot_t *inventory,
-			  const xcy_memory_snapshot_t *pss, uint64_t now_ms, int urgent,
-			  xcy_reclaim_age_fn age, void *context, size_t *selected);
-int xcy_reclaim_plan_revalidate(const struct xcy_reclaim_plan *plan, size_t selected,
+			  const xcy_memory_snapshot_t *pss, uint64_t now_ms,
+			  xcy_reclaim_age_fn age, void *context, uint64_t needed_kb, uint64_t urgent_above_kb,
+			  struct xcy_reclaim_batch *batch);
+int xcy_reclaim_plan_revalidate(const struct xcy_reclaim_plan *plan,
+			       struct xcy_reclaim_batch *batch,
 			       const xcy_memory_snapshot_t *first, const xcy_memory_snapshot_t *fresh,
 			       const struct xcy_reclaim_protection *protection, uint64_t now_ms,
-			       int urgent, xcy_reclaim_age_fn age, void *context);
+			       int urgent, xcy_reclaim_age_fn age, void *context, bool *identity_changed);
 
 #endif

@@ -16,13 +16,17 @@ int main(void)
 	assert(stress == XCY_SYSTEM_PRESSURE_STRESS);
 	assert(critical == XCY_SYSTEM_PRESSURE_CRITICAL);
 	assert(healthy == XCY_SYSTEM_PRESSURE_HEALTHY);
+	assert(xcy_system_ram_deficit(10001, 1200) == 1);
+	assert(xcy_system_ram_deficit(10001, 1201) == 0);
+	assert(xcy_system_ram_deficit(10000, 900) == 300);
+	assert(xcy_system_ram_deficit(10000, -1) == 0);
 	assert(xcy_reclaim_observe_without_pageout(&episode, stress, 1000) == XCY_SYSTEM_RECLAIM_NONE);
 	assert(xcy_system_reclaim_deadline(&episode) == 0);
 	assert(episode.critical_reclaim_rounds == 0);
 	for (action = 0; action < 4; ++action) {
 		assert(xcy_reclaim_observe_without_pageout(&episode, critical, now) == XCY_SYSTEM_RECLAIM_READY);
 		assert(episode.phase == XCY_SYSTEM_RECLAIM_ACTION_PENDING);
-		assert(xcy_reclaim_complete_without_pageout(&episode, ++now, 1) == XCY_SYSTEM_RECLAIM_WAIT);
+		assert(xcy_reclaim_complete_batch(&episode, ++now) == XCY_SYSTEM_RECLAIM_WAIT);
 		now += XCY_SYSTEM_RECLAIM_OBSERVE_MS;
 		assert(xcy_system_reclaim_deadline(&episode) == now);
 		assert(xcy_reclaim_observe_without_pageout(&episode, critical, now - 1) == XCY_SYSTEM_RECLAIM_WAIT);
@@ -33,7 +37,7 @@ int main(void)
 	assert(xcy_reclaim_observe_without_pageout(&episode, stress, now) == XCY_SYSTEM_RECLAIM_NONE);
 	assert(xcy_system_reclaim_deadline(&episode) == 0);
 	assert(xcy_reclaim_observe_without_pageout(&episode, critical, now + 1) == XCY_SYSTEM_RECLAIM_READY);
-	assert(xcy_reclaim_complete_without_pageout(&episode, now + 2, 0) == XCY_SYSTEM_RECLAIM_FALLBACK);
+	assert(xcy_system_reclaim_complete(&episode, now + 2, 0) == XCY_SYSTEM_RECLAIM_FALLBACK);
 	assert(xcy_system_reclaim_deadline(&episode) == 0);
 	assert(xcy_reclaim_observe_without_pageout(&episode, critical, now + 60000) == XCY_SYSTEM_RECLAIM_FALLBACK);
 

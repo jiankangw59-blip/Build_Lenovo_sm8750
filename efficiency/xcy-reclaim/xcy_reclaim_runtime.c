@@ -23,7 +23,8 @@ static void xcy_schedule_deadline(struct xcy_reclaim_runtime *runtime, s64 now)
 	s64 deadline = runtime->pending ? runtime->expires_ms :
 		xcy_system_reclaim_deadline(&runtime->policy);
 
-	/* An empty or interrupted round waits for the next eligible PSI event. */
+	/* A successful batch gets one feedback timer. Rate waits after empty or
+	 * interrupted rounds rely on the next eligible PSI event. */
 	if (!deadline || (!runtime->pending && runtime->policy.phase == XCY_SYSTEM_RECLAIM_RATE_WAIT)) {
 		cancel_delayed_work(&runtime->deadline);
 		return;
@@ -160,11 +161,10 @@ static int xcy_check_request(struct xcy_reclaim_runtime *runtime, u64 request, s
 static void xcy_finish_request(struct xcy_reclaim_runtime *runtime, enum xcy_reclaim_outcome outcome, s64 now)
 {
 	runtime->pending = 0;
-	if (outcome == XCY_RECLAIM_NO_CANDIDATE || outcome == XCY_RECLAIM_SAMPLED_RETRY)
-		xcy_retry_later(runtime, now);
+	if (outcome == XCY_RECLAIM_ACTION_SENT)
+		xcy_reclaim_complete_batch(&runtime->policy, now);
 	else
-		xcy_reclaim_complete_without_pageout(&runtime->policy, now,
-						    outcome == XCY_RECLAIM_ACTION_SENT);
+		xcy_retry_later(runtime, now);
 	xcy_schedule_deadline(runtime, now);
 }
 
