@@ -137,7 +137,7 @@ static enum app_stage scene_stage(const struct scene_context *scene, const char 
 		return APP_FOREGROUND;
 	for (name = scene->visible; *name; name = end + 1) {
 		end = strchr(name, ',');
-		if (same_package(process, name, end ? end - name : strlen(name)))
+		if (same_package(process, name, end ? (size_t)(end - name) : strlen(name)))
 			return APP_FOREGROUND;
 		if (!end)
 			break;

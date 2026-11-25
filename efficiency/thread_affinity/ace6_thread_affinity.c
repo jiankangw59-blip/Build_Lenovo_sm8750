@@ -16,6 +16,7 @@
 #include <linux/sched/cputime.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
+#include <linux/sched/stat.h>
 #include <linux/sched/task.h>
 #include <linux/sort.h>
 #include <linux/threads.h>
@@ -27,6 +28,9 @@
 
 #define MAX_PENDING 4096
 #define INITIAL_SNAPSHOT 16384
+#define INITIAL_SCENE_GROUPS 512
+#define SNAPSHOT_RETRIES 3
+#define SNAPSHOT_HEADROOM 256
 #define MAX_GAME_THREADS 1024
 #define GAME_GATE_HITS 3
 #define GAME_GATE_TIMEOUT (300 * HZ)
@@ -82,14 +86,20 @@ static const struct cred *policy_cred;
 static struct scene_context *scene;
 static struct file *scene_owner;
 static struct workqueue_struct *affinity_wq;
-static struct task_struct **snapshot;
-static unsigned int snapshot_capacity = INITIAL_SNAPSHOT;
-static unsigned int snapshot_growths;
+struct task_snapshot {
+	struct task_struct **tasks;
+	unsigned int capacity;
+	unsigned int count;
+	unsigned int growths;
+};
+static struct task_snapshot snapshot = { .capacity = INITIAL_SNAPSHOT };
+static struct task_snapshot scene_groups = { .capacity = INITIAL_SCENE_GROUPS };
 static bool enabled;
 static unsigned int revision;
 static unsigned int validated;
 static unsigned int lease_count;
 static unsigned int context_switches;
+static unsigned int scene_captured_groups, scene_captured_threads;
 static atomic_t pending;
 static atomic_long_t dropped, changed, clamped, failed, adapted;
 
@@ -657,56 +667,49 @@ static void release_policy(void)
 #endif
 }
 
-static void release_snapshot(unsigned int count)
+static void release_snapshot(struct task_snapshot *buffer)
 {
-	while (count)
-		put_task_struct(snapshot[--count]);
+	while (buffer->count)
+		put_task_struct(buffer->tasks[--buffer->count]);
 }
 
-static int capture_task_refs(unsigned int *count)
+static bool snapshot_task(struct task_snapshot *buffer, struct task_struct *task)
+{
+	if (buffer->count >= buffer->capacity)
+		return false;
+	get_task_struct(task);
+	buffer->tasks[buffer->count++] = task;
+	return true;
+}
+
+static int capture_task_refs(struct task_snapshot *buffer, bool groups_only)
 {
 	struct task_struct *group, *task;
 	int ret = 0;
 
-	*count = 0;
 	rcu_read_lock();
-	for_each_process_thread(group, task) {
-		if (!task_eligible(task))
+	for_each_process(group) {
+		if (groups_only && task_eligible(group)) {
+			if (!snapshot_task(buffer, group)) {
+				ret = -E2BIG;
+				goto finish_snapshot;
+			}
 			continue;
-		if (*count == snapshot_capacity) {
-			ret = -E2BIG;
-			goto finish_snapshot;
 		}
-		get_task_struct(task);
-		snapshot[(*count)++] = task;
+		for_each_thread(group, task) {
+			if (!task_eligible(task))
+				continue;
+			if (!snapshot_task(buffer, task)) {
+				ret = -E2BIG;
+				goto finish_snapshot;
+			}
+			if (groups_only)
+				break;
+		}
 	}
 finish_snapshot:
 	rcu_read_unlock();
 	return ret;
-}
-
-static int capture_tasks(unsigned int *count, bool grow)
-{
-	while (true) {
-		struct task_struct **larger;
-		unsigned int capacity;
-		int ret = capture_task_refs(count);
-
-		if (ret != -E2BIG || !grow || snapshot_capacity >= PID_MAX_LIMIT)
-			return ret;
-
-		/* Drop all references before growing outside of the RCU section. */
-		release_snapshot(*count);
-		*count = 0;
-		capacity = min_t(unsigned int, snapshot_capacity * 2, PID_MAX_LIMIT);
-		larger = kvmalloc_array(capacity, sizeof(*larger), GFP_KERNEL | __GFP_NOWARN);
-		if (!larger)
-			return -ENOMEM;
-		kvfree(snapshot);
-		snapshot = larger;
-		snapshot_capacity = capacity;
-		snapshot_growths++;
-	}
 }
 
 static enum app_stage current_stage(const struct scene_context *context, const char *process)
@@ -714,8 +717,9 @@ static enum app_stage current_stage(const struct scene_context *context, const c
 	return context ? scene_stage(context, process) : APP_STATIC;
 }
 
-static bool scene_affects_task(const struct scene_context *previous,
-			       struct task_struct *task, const char *process)
+static bool scene_affects_process(const struct scene_context *previous,
+				  const struct scene_context *next,
+				  const char *process)
 {
 	bool was_game, is_game;
 
@@ -723,23 +727,121 @@ static bool scene_affects_task(const struct scene_context *previous,
 		return false;
 	if (!strcmp(process, "scene-daemon"))
 		return !strcmp(policy->adaptive_scope, "*") &&
-			(!previous || !scene || previous->display_off != scene->display_off);
+			(!previous || !next || previous->display_off != next->display_off);
 	was_game = previous && previous->game && !strcmp(previous->foreground, process);
-	is_game = scene && scene->game && !strcmp(scene->foreground, process);
-	return adaptive_in_scope(policy, task, process) &&
-		(current_stage(previous, process) != current_stage(scene, process) ||
-		 was_game != is_game);
+	is_game = next && next->game && !strcmp(next->foreground, process);
+	return current_stage(previous, process) != current_stage(next, process) ||
+	       was_game != is_game;
 }
 
-static void apply_snapshot(unsigned int count, const struct scene_context *previous,
-			   bool scene_change)
+static bool scene_task_in_scope(struct task_struct *task, const char *process)
+{
+	return !strcmp(process, "scene-daemon") || adaptive_in_scope(policy, task, process);
+}
+
+static int capture_scene_refs(struct task_snapshot *buffer,
+			      const struct scene_context *previous,
+			      const struct scene_context *next)
+{
+	char process[PROCESS_NAME_LEN];
+	unsigned int i;
+
+	for (i = 0; i < scene_groups.count; i++) {
+		struct task_struct *representative = scene_groups.tasks[i];
+		struct task_struct *task;
+
+		/* Reading argv can sleep. The pinned representative keeps its
+		 * signal struct and thread-group list alive across this step.
+		 */
+		if (process_name(representative, process) &&
+		    scene_affects_process(previous, next, process)) {
+			rcu_read_lock();
+			for_each_thread(representative, task) {
+				if (!task_eligible(task) || !scene_task_in_scope(task, process))
+					continue;
+				if (!snapshot_task(buffer, task)) {
+					rcu_read_unlock();
+					return -E2BIG;
+				}
+			}
+			rcu_read_unlock();
+		}
+		cond_resched();
+	}
+	return 0;
+}
+
+static int reserve_snapshot(struct task_snapshot *buffer, unsigned int capacity)
+{
+	struct task_struct **tasks;
+
+	tasks = kvmalloc_array(capacity, sizeof(*tasks), GFP_KERNEL | __GFP_NOWARN);
+	if (!tasks)
+		return -ENOMEM;
+	kvfree(buffer->tasks);
+	buffer->tasks = tasks;
+	buffer->capacity = capacity;
+	buffer->growths++;
+	return 0;
+}
+
+static unsigned int current_thread_count(void)
+{
+#ifndef MODULE
+	return READ_ONCE(nr_threads);
+#else
+	return 0;
+#endif
+}
+
+static int capture_snapshot(struct task_snapshot *buffer,
+			    const struct scene_context *previous,
+			    const struct scene_context *next, bool grow)
+{
+	bool context = previous || next;
+	bool groups_only = buffer == &scene_groups;
+	const char *kind = groups_only ? "scene-groups" : context ? "scene-threads" : "full";
+	unsigned int attempt, collected, estimate = 0;
+	int ret;
+
+	if (!groups_only && grow &&
+	    (!context || !previous || !next || previous->display_off != next->display_off)) {
+		unsigned int threads = current_thread_count();
+
+		estimate = min_t(unsigned int, threads + SNAPSHOT_HEADROOM, PID_MAX_LIMIT);
+		if (estimate > buffer->capacity && reserve_snapshot(buffer, estimate))
+			pr_debug("ace6 affinity: deferred capacity estimate %u\n", estimate);
+	}
+	for (attempt = 0; ; attempt++) {
+		ret = context ? capture_scene_refs(buffer, previous, next) :
+			capture_task_refs(buffer, groups_only);
+		if (ret != -E2BIG || !grow || attempt >= SNAPSHOT_RETRIES ||
+		    buffer->capacity >= PID_MAX_LIMIT)
+			break;
+		/* Never allocate or free task references under RCU. */
+		collected = buffer->count;
+		release_snapshot(buffer);
+		ret = reserve_snapshot(buffer, min_t(unsigned int, buffer->capacity * 2,
+						     PID_MAX_LIMIT));
+		if (ret)
+			goto report;
+	}
+	collected = buffer->count;
+report:
+	if (ret)
+		pr_warn_ratelimited("ace6 affinity: %s snapshot failed: err=%d threads=%u collected=%u capacity=%u\n",
+				    kind, ret, current_thread_count(), collected, buffer->capacity);
+	return ret;
+}
+
+static void apply_snapshot(const struct scene_context *previous, bool scene_change)
 {
 	char name[PROCESS_NAME_LEN] = "";
 	pid_t last_tgid = 0;
 	unsigned int i;
 
-	for (i = 0; i < count; i++) {
-		struct task_struct *task = snapshot[i];
+	for (i = 0; i < snapshot.count; i++) {
+		struct task_struct *task = snapshot.tasks[i];
 		pid_t tgid = task_tgid_nr(task);
 
 		if (tgid != last_tgid) {
@@ -747,7 +849,8 @@ static void apply_snapshot(unsigned int count, const struct scene_context *previ
 			if (!process_name(task, name))
 				name[0] = '\0';
 		}
-		if (!scene_change || scene_affects_task(previous, task, name))
+		if (!scene_change || (scene_affects_process(previous, scene, name) &&
+				      scene_task_in_scope(task, name)))
 			apply_task(task, NULL, name);
 		cond_resched();
 	}
@@ -757,7 +860,7 @@ static int replace_policy(struct affinity_policy *next)
 {
 	struct thread_lease *lease;
 	struct hlist_node *tmp;
-	unsigned int count = 0, bucket;
+	unsigned int bucket;
 	int ret = 0;
 
 	mutex_lock(&policy_lock);
@@ -767,7 +870,7 @@ static int replace_policy(struct affinity_policy *next)
 		goto out;
 	}
 	WRITE_ONCE(enabled, true);
-	ret = capture_tasks(&count, true);
+	ret = capture_snapshot(&snapshot, NULL, NULL, true);
 	if (ret) {
 		WRITE_ONCE(enabled, policy != NULL);
 		goto out;
@@ -784,11 +887,11 @@ static int replace_policy(struct affinity_policy *next)
 		if (READ_ONCE(lease->task->flags) & PF_EXITING)
 			free_lease(lease);
 	}
-	apply_snapshot(count, NULL, false);
+	apply_snapshot(NULL, false);
 out:
 	if (!ret)
 		revision++;
-	release_snapshot(count);
+	release_snapshot(&snapshot);
 	mutex_unlock(&policy_lock);
 	return ret;
 }
@@ -799,7 +902,6 @@ static int replace_scene(struct file *file, struct scene_context *next)
 	struct scene_context *previous;
 	struct thread_lease *lease;
 	struct hlist_node *tmp;
-	unsigned int count = 0;
 	unsigned int bucket;
 	bool rescan;
 	int ret = 0;
@@ -814,9 +916,13 @@ static int replace_scene(struct file *file, struct scene_context *next)
 		goto out;
 	rescan = policy && policy->adaptive_scope[0];
 	if (rescan) {
-		ret = capture_tasks(&count, next != NULL);
+		ret = capture_snapshot(&scene_groups, NULL, NULL, next != NULL);
+		if (!ret)
+			ret = capture_snapshot(&snapshot, previous, next, next != NULL);
 		if (ret && next)
 			goto out;
+		scene_captured_groups = scene_groups.count;
+		scene_captured_threads = snapshot.count;
 	}
 	if (game_leader && (!previous || !next || !next->game ||
 	    strcmp(previous->foreground, next->foreground)))
@@ -837,12 +943,13 @@ static int replace_scene(struct file *file, struct scene_context *next)
 			cond_resched();
 		}
 	} else if (rescan) {
-		apply_snapshot(count, previous, true);
+		apply_snapshot(previous, true);
 	}
 	kfree(previous);
 	next = NULL;
 out:
-	release_snapshot(count);
+	release_snapshot(&snapshot);
+	release_snapshot(&scene_groups);
 	mutex_unlock(&policy_lock);
 	kfree(next);
 	return ret;
@@ -927,7 +1034,8 @@ static ssize_t control_read(struct file *file, char __user *user,
 		"profile_wire=1\nwire_lines=%u\nstored_rules=%u\nprofiles=%u\nprofile_bindings=%u\n"
 		"adaptive=%s\nforeground=%s\ndisplay_off=%u\ncontext_switches=%u\nadapted=%ld\n"
 		"game_tgid=%d\ngame_top=%d,%d,%d\ngame_samples=%u\ngame_finalized=%u\n"
-		"snapshot_capacity=%u\nsnapshot_growths=%u\n",
+		"snapshot_capacity=%u\nsnapshot_growths=%u\nscene_group_capacity=%u\n"
+		"scene_captured_groups=%u\nscene_captured_threads=%u\n",
 		revision, policy ? policy->count : 0, validated, lease_count,
 		atomic_read(&pending), atomic_long_read(&changed),
 		atomic_long_read(&clamped), atomic_long_read(&failed),
@@ -941,7 +1049,8 @@ static ssize_t control_read(struct file *file, char __user *user,
 		game_rank[0] ? task_pid_nr(game_rank[0]) : 0,
 		game_rank[1] ? task_pid_nr(game_rank[1]) : 0,
 		game_rank[2] ? task_pid_nr(game_rank[2]) : 0, game_passes, game_finalized,
-		snapshot_capacity, snapshot_growths);
+		snapshot.capacity, snapshot.growths, scene_groups.capacity,
+		scene_captured_groups, scene_captured_threads);
 	mutex_unlock(&policy_lock);
 	return simple_read_from_buffer(user, size, offset, stats, len);
 }
@@ -969,14 +1078,17 @@ static int __init affinity_init(void)
 	affinity_wq = alloc_ordered_workqueue("ace6_affinity", WQ_FREEZABLE | WQ_POWER_EFFICIENT);
 	if (!affinity_wq)
 		return -ENOMEM;
-	snapshot = kvmalloc_array(snapshot_capacity, sizeof(*snapshot), GFP_KERNEL);
+	snapshot.tasks = kvmalloc_array(snapshot.capacity, sizeof(*snapshot.tasks), GFP_KERNEL);
+	scene_groups.tasks = kvmalloc_array(scene_groups.capacity, sizeof(*scene_groups.tasks),
+					    GFP_KERNEL);
 	game_samples = kvmalloc_array(MAX_GAME_THREADS, sizeof(*game_samples), GFP_KERNEL);
 	game_next = kvmalloc_array(MAX_GAME_THREADS, sizeof(*game_next), GFP_KERNEL);
-	if (!snapshot || !game_samples || !game_next) {
+	if (!snapshot.tasks || !scene_groups.tasks || !game_samples || !game_next) {
 		destroy_workqueue(affinity_wq);
 		kvfree(game_next);
 		kvfree(game_samples);
-		kvfree(snapshot);
+		kvfree(scene_groups.tasks);
+		kvfree(snapshot.tasks);
 		return -ENOMEM;
 	}
 	init_adaptive_masks();
@@ -1000,7 +1112,8 @@ unregister:
 	destroy_workqueue(affinity_wq);
 	kvfree(game_next);
 	kvfree(game_samples);
-	kvfree(snapshot);
+	kvfree(scene_groups.tasks);
+	kvfree(snapshot.tasks);
 	return ret;
 }
 
@@ -1020,7 +1133,8 @@ static void __exit affinity_exit(void)
 	kfree(scene);
 	kvfree(game_next);
 	kvfree(game_samples);
-	kvfree(snapshot);
+	kvfree(scene_groups.tasks);
+	kvfree(snapshot.tasks);
 }
 
 module_init(affinity_init);
