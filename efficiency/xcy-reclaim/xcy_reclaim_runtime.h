@@ -37,5 +37,9 @@ void xcy_reclaim_runtime_stop(struct xcy_reclaim_runtime *runtime);
 void xcy_reclaim_runtime_notify(struct xcy_reclaim_runtime *runtime);
 int xcy_reclaim_runtime_finish(struct xcy_reclaim_runtime *runtime, u64 request,
 			       enum xcy_reclaim_outcome outcome);
+int xcy_reclaim_runtime_renew(struct xcy_reclaim_runtime *runtime, u64 request,
+			      s64 *expires_ms);
+int xcy_reclaim_runtime_act(struct xcy_reclaim_runtime *runtime, u64 request,
+			     enum xcy_reclaim_outcome (*act)(void *context), void *context);
 
 #endif

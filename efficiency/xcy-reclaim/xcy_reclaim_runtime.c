@@ -133,29 +133,78 @@ void xcy_reclaim_runtime_stop(struct xcy_reclaim_runtime *runtime)
 	cancel_delayed_work_sync(&runtime->deadline);
 }
 
-int xcy_reclaim_runtime_finish(struct xcy_reclaim_runtime *runtime, u64 request,
-			       enum xcy_reclaim_outcome outcome)
+static int xcy_check_request(struct xcy_reclaim_runtime *runtime, u64 request, s64 now)
 {
-	s64 now;
-	int error = 0;
+	xcy_system_pressure_level_t pressure;
 
-	mutex_lock(&runtime->lock);
-	now = xcy_now_ms();
-	if (!request || !runtime->running || runtime->pending != request || now >= runtime->expires_ms) {
-		error = -ESTALE;
-		goto out;
-	}
-	if (outcome < XCY_RECLAIM_NO_CANDIDATE || outcome > XCY_RECLAIM_ACTION_SENT) {
-		error = -EINVAL;
-		goto out;
-	}
+	if (!request || !runtime->running || runtime->pending != request || now >= runtime->expires_ms)
+		return -ESTALE;
+	pressure = xcy_ram_pressure();
+	if (pressure == XCY_SYSTEM_PRESSURE_CRITICAL)
+		return 0;
+	runtime->pending = 0;
+	xcy_system_reclaim_observe(&runtime->policy, pressure, now);
+	xcy_schedule_deadline(runtime, now);
+	return -EAGAIN;
+}
+
+static void xcy_finish_request(struct xcy_reclaim_runtime *runtime, enum xcy_reclaim_outcome outcome, s64 now)
+{
 	runtime->pending = 0;
 	if (outcome == XCY_RECLAIM_NO_CANDIDATE || outcome == XCY_RECLAIM_SAMPLED_RETRY)
 		xcy_retry_later(runtime, now);
 	else
 		xcy_system_reclaim_complete(&runtime->policy, now, outcome == XCY_RECLAIM_ACTION_SENT);
 	xcy_schedule_deadline(runtime, now);
-out:
+}
+
+int xcy_reclaim_runtime_finish(struct xcy_reclaim_runtime *runtime, u64 request,
+			       enum xcy_reclaim_outcome outcome)
+{
+	s64 now;
+	int error;
+
+	if (outcome < XCY_RECLAIM_NO_CANDIDATE || outcome >= XCY_RECLAIM_ACTION_SENT)
+		return -EINVAL;
+	mutex_lock(&runtime->lock);
+	now = xcy_now_ms();
+	error = xcy_check_request(runtime, request, now);
+	if (!error)
+		xcy_finish_request(runtime, outcome, now);
+	mutex_unlock(&runtime->lock);
+	return error;
+}
+
+int xcy_reclaim_runtime_renew(struct xcy_reclaim_runtime *runtime, u64 request,
+			      s64 *expires_ms)
+{
+	s64 now;
+	int error;
+	mutex_lock(&runtime->lock);
+	now = xcy_now_ms();
+	error = xcy_check_request(runtime, request, now);
+	if (!error) {
+		runtime->expires_ms = now + XCY_FRAMEWORK_REQUEST_MS;
+		*expires_ms = runtime->expires_ms;
+		xcy_schedule_deadline(runtime, now);
+	}
+	mutex_unlock(&runtime->lock);
+	return error;
+}
+
+/* act() uses the already validated state without calling Framework. */
+int xcy_reclaim_runtime_act(struct xcy_reclaim_runtime *runtime, u64 request,
+			     enum xcy_reclaim_outcome (*act)(void *context), void *context)
+{
+	int error;
+
+	mutex_lock(&runtime->lock);
+	error = xcy_check_request(runtime, request, xcy_now_ms());
+	if (!error) {
+		enum xcy_reclaim_outcome outcome = act(context);
+
+		xcy_finish_request(runtime, outcome, xcy_now_ms());
+	}
 	mutex_unlock(&runtime->lock);
 	return error;
 }

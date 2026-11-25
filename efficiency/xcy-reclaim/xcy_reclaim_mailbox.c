@@ -28,7 +28,7 @@ void xcy_reclaim_mailbox_destroy(struct xcy_reclaim_mailbox *mailbox)
 }
 
 static size_t xcy_format_request(char *target, size_t capacity, char operation,
-				 const xcy_memory_process_t *members, size_t count,
+			 const struct xcy_reclaim_member *members, size_t count,
 				 const char *nonce, const char *epoch)
 {
 	int length = snprintf(target, capacity, "XCY_MEM_REQ_V4 %s %s %c %zu\n",
@@ -39,11 +39,11 @@ static size_t xcy_format_request(char *target, size_t capacity, char operation,
 		return 0;
 	used = length;
 	for (i = 0; i < count; ++i) {
-		const xcy_memory_process_t *member = &members[i];
+		const struct xcy_reclaim_member *member = &members[i];
 
 		length = snprintf(target + used, capacity - used, "%u %u %llu %u\n",
 				  member->pid, member->uid, (unsigned long long)member->starttime,
-				  xcy_memory_kernel_uid(member));
+				  member->kernel_uid);
 		if (length < 0 || length >= capacity - used)
 			return 0;
 		used += length;
@@ -53,7 +53,7 @@ static size_t xcy_format_request(char *target, size_t capacity, char operation,
 }
 
 int xcy_reclaim_mailbox_publish(struct xcy_reclaim_mailbox *mailbox, char operation,
-				const xcy_memory_process_t *members, size_t count,
+				const struct xcy_reclaim_member *members, size_t count,
 				const char *nonce, const char *epoch)
 {
 	size_t length;
