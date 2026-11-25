@@ -13,6 +13,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pid.h>
+#include <linux/sched/cputime.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
@@ -447,11 +448,7 @@ static void sample_game(struct work_struct *work)
 		struct game_sample *sample = &game_next[i];
 		u64 delta;
 
-#ifdef MODULE
-		sample->runtime = READ_ONCE(sample->task->se.sum_exec_runtime);
-#else
 		sample->runtime = task_sched_runtime(sample->task);
-#endif
 		while (old < game_count && game_samples[old].tid < sample->tid)
 			old++;
 		if (old == game_count || game_samples[old].task != sample->task ||

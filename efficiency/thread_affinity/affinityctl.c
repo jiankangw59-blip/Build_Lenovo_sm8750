@@ -180,7 +180,7 @@ static size_t append_source(char *buffer, size_t used, const char *dir, size_t t
 
 static int status(void)
 {
-	char data[640];
+	char data[768];
 	int fd = open(DEVICE, O_RDONLY | O_CLOEXEC);
 	ssize_t n;
 
@@ -212,13 +212,17 @@ int main(int argc, char **argv)
 	if (argc == 2 && !strcmp(argv[1], "status"))
 		return status();
 	if ((argc == 2 || argc == 4) && !strcmp(argv[1], "watch"))
-		return watch_context(argc == 4 ? argv[2] : SCENE_PATH, argc == 4 ? argv[3] : DISPLAY_PATH);
+		return watch_context(argc == 4 ? argv[2] : SCENE_PATH, argc == 4 ? argv[3] : DISPLAY_PATH, NULL);
+	if ((argc == 2 || argc == 5) && !strcmp(argv[1], "watch-games"))
+		return watch_context(argc == 5 ? argv[2] : SCENE_PATH, argc == 5 ? argv[3] : DISPLAY_PATH,
+				     argc == 5 ? argv[4] : "/data/user/0/com.omarea.vtools/shared_prefs/games.xml");
 	if (!check && !load && !adaptive && !dump && !clear) {
 		fprintf(stderr,
 			"Usage: %s status | clear | {check,load,dump} RULE_DIRECTORY\n"
 			"       %s adapt-load RULE_DIRECTORY [PROCESS_PATTERN]\n"
-			"       %s watch [SCENE_FILE BRIGHTNESS_FILE]\n",
-			argv[0], argv[0], argv[0]);
+			"       %s watch [SCENE_FILE BRIGHTNESS_FILE]\n"
+			"       %s watch-games [SCENE_FILE BRIGHTNESS_FILE GAMES_FILE]\n",
+			argv[0], argv[0], argv[0], argv[0]);
 		return 2;
 	}
 	buffer = malloc(MAX_BYTES);

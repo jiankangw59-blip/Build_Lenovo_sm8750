@@ -123,16 +123,47 @@ static bool display_off(const char *path)
 	return off;
 }
 
-static int submit_context(int ctl, const char *node, const char *brightness, char last[NOTICE_SIZE])
+static bool is_scene_game(const char *path, const char *package)
+{
+	char line[4096], name[PACKAGE_SIZE + 8];
+	bool game = false;
+	FILE *file;
+
+	if (!*package || !strcmp(package, "com.oplus.games") ||
+	    !strcmp(package, "com.nearme.gamecenter") || !strcmp(package, "com.xiaoji.egggame") ||
+	    !strcmp(package, "com.antutu.ABenchMark") || !strncmp(package, "com.winlator", 12))
+		return false;
+	file = fopen(path, "re");
+	if (!file)
+		return false;
+	snprintf(name, sizeof(name), "name=\"%s\"", package);
+	while (fgets(line, sizeof(line), file)) {
+		if (strstr(line, "<boolean ") && strstr(line, name) && strstr(line, "value=\"true\"")) {
+			game = true;
+			break;
+		}
+	}
+	fclose(file);
+	return game;
+}
+
+static int submit_context(int ctl, const char *node, const char *brightness, const char *games,
+			  char last[NOTICE_SIZE])
 {
 	char foreground[PACKAGE_SIZE], visible[VISIBLE_SIZE], text[NOTICE_SIZE];
+	bool off;
 	int len;
 	ssize_t wrote;
 
 	read_scene(node, foreground, visible);
-	len = snprintf(text, sizeof(text), "?context\t%s\t%s\t%d\n",
+	off = display_off(brightness);
+	len = snprintf(text, sizeof(text), "?context\t%s\t%s\t%d",
 		       foreground[0] ? foreground : "-", visible[0] ? visible : "-",
-		       display_off(brightness));
+		       off);
+	if (games)
+		len += snprintf(text + len, sizeof(text) - len, "\t%d", !off && is_scene_game(games, foreground));
+	text[len++] = '\n';
+	text[len] = '\0';
 	if (!strcmp(text, last))
 		return 0;
 	wrote = write(ctl, text, (size_t)len);
@@ -163,7 +194,7 @@ static int watch_parent(int inotify, const char *path, struct source *source)
 }
 
 static int read_events(int fd, const struct source *scene, const struct source *brightness,
-		       int panel_watch)
+		       const struct source *games, int panel_watch)
 {
 	char buffer[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
 	ssize_t size = read(fd, buffer, sizeof(buffer));
@@ -175,22 +206,24 @@ static int read_events(int fd, const struct source *scene, const struct source *
 		const struct inotify_event *event = (const void *)(buffer + offset);
 
 		offset += sizeof(*event) + event->len;
-		if ((event->wd == scene->watch || event->wd == brightness->watch) &&
+		if ((event->wd == scene->watch || event->wd == brightness->watch ||
+		     event->wd == games->watch) &&
 		    (event->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED))) {
 			errno = ENOENT;
 			return -1;
 		}
 		if ((event->mask & IN_Q_OVERFLOW) || event->wd == panel_watch ||
 		    (event->len && ((event->wd == scene->watch && !strcmp(event->name, scene->name)) ||
-		     (event->wd == brightness->watch && !strcmp(event->name, brightness->name)))))
+		     (event->wd == brightness->watch && !strcmp(event->name, brightness->name)) ||
+		     (event->wd == games->watch && !strcmp(event->name, games->name)))))
 			changed = true;
 	}
 	return changed;
 }
 
-int watch_context(const char *node, const char *brightness)
+int watch_context(const char *node, const char *brightness, const char *games)
 {
-	struct source scene = {}, panel = {};
+	struct source scene = {}, panel = {}, game_list = { .watch = -2 };
 	struct pollfd events[2];
 	sigset_t signals;
 	char last[NOTICE_SIZE] = "";
@@ -208,7 +241,8 @@ int watch_context(const char *node, const char *brightness)
 	notification = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
 	if (notification < 0 ||
 	    watch_parent(notification, node, &scene) < 0 ||
-	    watch_parent(notification, brightness, &panel) < 0)
+	    watch_parent(notification, brightness, &panel) < 0 ||
+	    (games && watch_parent(notification, games, &game_list) < 0))
 		goto out;
 	if (!strncmp(brightness, "/sys/", 5)) {
 		int watch = inotify_add_watch(notification, brightness, IN_MODIFY);
@@ -217,7 +251,7 @@ int watch_context(const char *node, const char *brightness)
 			panel_watch = watch;
 	}
 	ctl = open(DEVICE, O_WRONLY | O_CLOEXEC);
-	if (ctl < 0 || submit_context(ctl, node, brightness, last) < 0)
+	if (ctl < 0 || submit_context(ctl, node, brightness, games, last) < 0)
 		goto out;
 	events[0] = (struct pollfd){ .fd = notification, .events = POLLIN };
 	events[1] = (struct pollfd){ .fd = signal_fd, .events = POLLIN };
@@ -237,9 +271,9 @@ int watch_context(const char *node, const char *brightness)
 			goto out;
 		}
 		if (events[0].revents & POLLIN) {
-			int dirty = read_events(notification, &scene, &panel, panel_watch);
+			int dirty = read_events(notification, &scene, &panel, &game_list, panel_watch);
 
-			if (dirty < 0 || (dirty && submit_context(ctl, node, brightness, last) < 0))
+			if (dirty < 0 || (dirty && submit_context(ctl, node, brightness, games, last) < 0))
 				goto out;
 		}
 	}
@@ -254,5 +288,6 @@ out:
 		close(signal_fd);
 	free(scene.directory);
 	free(panel.directory);
+	free(game_list.directory);
 	return ret;
 }
