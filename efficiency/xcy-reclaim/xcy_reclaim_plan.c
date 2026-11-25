@@ -183,7 +183,7 @@ int xcy_reclaim_plan_pick(const struct xcy_reclaim_plan *plan,
 		const xcy_memory_process_t *row = &inventory->items[group->representative];
 		struct xcy_reclaim_age observed;
 
-		if (group->departed)
+		if (group->departed || group->download_busy)
 			continue;
 		observed = age(row, now_ms, context);
 		if (!observed.background_since_ms || observed.background_since_ms > now_ms)
@@ -220,6 +220,8 @@ int xcy_reclaim_plan_revalidate(const struct xcy_reclaim_plan *plan, size_t sele
 	group = &plan->groups[selected];
 	if (group->departed)
 		return -ESRCH;
+	if (group->download_busy)
+		return -ESTALE;
 	owner = &first->items[group->representative];
 	for (i = 0; i < fresh->count; ++i)
 		if (fresh->items[i].uid == owner->uid)

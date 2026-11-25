@@ -15,6 +15,7 @@ struct xcy_reclaim_group {
 	uint16_t first;
 	uint16_t count;
 	bool departed;
+	bool download_busy;
 };
 
 struct xcy_reclaim_plan {

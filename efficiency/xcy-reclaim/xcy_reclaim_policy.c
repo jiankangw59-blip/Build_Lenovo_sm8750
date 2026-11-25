@@ -21,6 +21,7 @@
 #include "xcy_reclaim_plan.h"
 #include "xcy_reclaim_policy.h"
 #include "xcy_reclaim_protection.h"
+#include "xcy_reclaim_traffic.h"
 
 #define XCY_CONFIG_DIR "/data/adb/XiaoCaiYe/proc_guard/"
 #define XCY_SYNC_DIR "/data/adb/feedmeboost-sync"
@@ -558,9 +559,22 @@ static ssize_t xcy_policy_write(struct file *file, const char __user *buffer,
 	return error ? error : length;
 }
 
+static long xcy_policy_ioctl(struct file *file, unsigned int command, unsigned long arg)
+{
+	if (!uid_eq(current_euid(), GLOBAL_ROOT_UID) || current_user_ns() != &init_user_ns ||
+	    !capable(CAP_SYS_ADMIN))
+		return -EACCES;
+	if (command != XCY_RECLAIM_BIND_TRAFFIC)
+		return -ENOTTY;
+	if (arg > INT_MAX)
+		return -EINVAL;
+	return xcy_reclaim_traffic_bind(arg);
+}
+
 static const struct file_operations xcy_policy_fops = {
 	.open = nonseekable_open,
 	.write = xcy_policy_write,
+	.unlocked_ioctl = xcy_policy_ioctl,
 	.llseek = no_llseek,
 };
 

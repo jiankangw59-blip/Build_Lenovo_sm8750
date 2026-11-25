@@ -6,6 +6,7 @@
 #include "xcy_reclaim_engine.h"
 #include "xcy_reclaim_pss.h"
 #include "xcy_reclaim_signal.h"
+#include "xcy_reclaim_traffic.h"
 
 enum xcy_engine_stage {
 	XCY_ENGINE_INITIAL,
@@ -18,6 +19,7 @@ struct xcy_engine_round {
 	struct xcy_reclaim_plan plan;
 	xcy_memory_snapshot_t initial;
 	struct xcy_reclaim_targets targets;
+	struct xcy_reclaim_traffic *traffic;
 	size_t selected;
 	u64 request;
 	enum xcy_engine_stage stage;
@@ -42,6 +44,8 @@ static struct xcy_reclaim_age xcy_age(const xcy_memory_process_t *owner, u64 now
 
 static void xcy_engine_clear(struct xcy_engine_round *round)
 {
+	xcy_reclaim_traffic_put(round->traffic);
+	round->traffic = NULL;
 	xcy_reclaim_targets_put(&round->targets);
 	xcy_memory_snapshot_free(&round->initial);
 	round->stage = XCY_ENGINE_DONE;
@@ -111,6 +115,9 @@ static int xcy_initial_reply(struct xcy_reclaim_channel *channel, struct xcy_eng
 	error = xcy_reclaim_targets_pin(&round->plan, &round->targets);
 	if (error || !round->plan.member_count)
 		return xcy_stop_round(channel, round, XCY_RECLAIM_NO_CANDIDATE);
+	error = xcy_reclaim_traffic_start(&round->plan, &round->traffic);
+	if (error)
+		return xcy_stop_round(channel, round, XCY_RECLAIM_SAMPLED_RETRY);
 	round->initial = *snapshot;
 	memset(snapshot, 0, sizeof(*snapshot));
 	return xcy_continue_round(channel, round, XCY_ENGINE_PSS, 'P', round->plan.members,
@@ -128,6 +135,9 @@ static int xcy_pss_reply(struct xcy_reclaim_channel *channel, struct xcy_engine_
 		if (!xcy_reclaim_group_current(&round->plan, i, &round->targets)) {
 			round->plan.groups[i].departed = true;
 			departed = true;
+		} else {
+			round->plan.groups[i].download_busy =
+				xcy_reclaim_traffic_busy(round->traffic, &round->plan, i, true);
 		}
 	}
 	if (departed)
@@ -143,6 +153,7 @@ static int xcy_pss_reply(struct xcy_reclaim_channel *channel, struct xcy_engine_
 struct xcy_final_guard {
 	const struct xcy_reclaim_source_view *view;
 	const xcy_memory_process_t *owner;
+	const struct xcy_engine_round *round;
 };
 
 static bool xcy_guard_current(void *data, u64 now, bool urgent)
@@ -151,7 +162,8 @@ static bool xcy_guard_current(void *data, u64 now, bool urgent)
 	struct xcy_reclaim_age history = engine_sources->age(guard->owner, now);
 
 	return history.background_since_ms && history.background_since_ms <= now &&
-		(urgent || !history.recent) && engine_sources->valid_now(guard->view, now);
+		(urgent || !history.recent) && engine_sources->valid_now(guard->view, now) &&
+		!xcy_reclaim_traffic_busy(guard->round->traffic, &guard->round->plan, guard->round->selected, false);
 }
 
 static int xcy_final_reply(struct xcy_reclaim_channel *channel, struct xcy_engine_round *round,
@@ -159,7 +171,9 @@ static int xcy_final_reply(struct xcy_reclaim_channel *channel, struct xcy_engin
 {
 	const struct xcy_reclaim_group *group = &round->plan.groups[round->selected];
 	struct xcy_reclaim_source_view view = {0};
-	struct xcy_final_guard guard = {.view = &view, .owner = &round->initial.items[group->representative]};
+	struct xcy_final_guard guard = {
+		.view = &view, .owner = &round->initial.items[group->representative], .round = round,
+	};
 	u64 first_signal_ms = 0;
 	int error;
 

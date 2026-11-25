@@ -4,6 +4,7 @@
 
 #include "xcy_reclaim_cooldown.h"
 #include "xcy_reclaim_plan.h"
+#include "xcy_reclaim_traffic.h"
 
 static void test_respawn_cooldown(void)
 {
@@ -15,6 +16,18 @@ static void test_respawn_cooldown(void)
 	assert(!xcy_kill_cooldown_blocked(holds, 2, 10000, app, 121000, 0));
 	assert(xcy_kill_cooldown_record(holds, 2, 10000, app, 122000));
 	assert(!xcy_kill_cooldown_blocked(holds, 2, 10000, app, 124000, 123000));
+}
+
+static void test_download_rate(void)
+{
+	const uint64_t original = 100000;
+
+	assert(!xcy_download_rate_busy(original, original, 0));
+	assert(!xcy_download_rate_busy(original, original + XCY_DOWNLOAD_RATE - 1, 1000));
+	assert(xcy_download_rate_busy(original, original + XCY_DOWNLOAD_RATE, 1000));
+	assert(xcy_download_rate_busy(original, original + XCY_DOWNLOAD_RATE / 2, 500));
+	assert(xcy_download_rate_busy(original, original + 1, 0));
+	assert(xcy_download_rate_busy(original, original - 1, 1000));
 }
 
 static void fill(xcy_memory_process_t *row, unsigned int pid, unsigned int uid,
@@ -58,6 +71,7 @@ int main(void)
 	int recent = 0;
 
 	test_respawn_cooldown();
+	test_download_rate();
 	fill(&initial_rows[0], 20, 10000, "org.example.large", 800);
 	fill(&initial_rows[1], 30, 10001, "org.example.older", 600);
 	fill(&initial_rows[2], 21, 10000, "org.example.large", 200);
@@ -70,6 +84,13 @@ int main(void)
 	assert(plan.members[0].pid == 20 && plan.members[1].pid == 21);
 	assert(!xcy_reclaim_plan_pick(&plan, &initial, &pss, 150000, 0, background, &recent, &picked));
 	assert(picked == 1);
+	plan.groups[1].download_busy = true;
+	assert(!xcy_reclaim_plan_pick(&plan, &initial, &pss, 150000, 1, background, &recent, &picked));
+	assert(picked == 0);
+	assert(xcy_reclaim_plan_revalidate(&plan, 1, &initial, &final, &protection, 150010,
+					    1, background, &recent) == -ESTALE);
+	plan.groups[1].download_busy = false;
+	picked = 1;
 	/* A departed child remains in its owner's inventory, with no usable PSS. */
 	xcy_memory_discard_identity(&measured_rows[0]);
 	assert(measured_rows[0].uid == 10000 && !strcmp(measured_rows[0].pkg, "org.example.large"));

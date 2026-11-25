@@ -57,6 +57,6 @@ jobs:
           grep -qx 'CONFIG_XCY_RECLAIM=y' "$out/.config"
           make -s -C "$kernel" -j2 O="$out" ARCH=arm64 LLVM=1 mm/xcy-reclaim/built-in.a
           objects="$(llvm-ar t "$out/mm/xcy-reclaim/built-in.a")"
-          for source in sources policy lease scene; do
+          for source in sources policy lease scene traffic; do
             grep -E "(^|/)xcy_reclaim_${source}\.o$" <<< "$objects"
           done
