@@ -895,8 +895,9 @@ jobs:
             exit 1
           fi
           patch="$GITHUB_WORKSPACE/efficiency/patches/xcy-lmk-policy-6.6.118.patch"
-          git apply --check "$patch"
-          git apply "$patch"
+          patch --batch --forward --fuzz=0 -p1 --dry-run < "$patch"
+          patch --batch --forward --fuzz=0 -p1 < "$patch"
+          test -s mm/xcy_lmk.c
           scripts/config --file arch/arm64/configs/gki_defconfig --enable XCY_LMK_POLICY
 
       - name: Apply reviewed Ace 6 efficiency patch series
@@ -999,6 +1000,13 @@ jobs:
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
+
+          if [ '${{ inputs.enable_xcy_lmk_policy }}' = 'true' ]; then
+            if ! grep -qx 'CONFIG_XCY_LMK_POLICY=y' out/.config; then
+              echo "::error::XiaoCaiYe selection interface did not resolve to CONFIG_XCY_LMK_POLICY=y"
+              exit 1
+            fi
+          fi
 
           if [ "$EFFICIENCY_PROFILE" != off ]; then
             cp arch/arm64/configs/gki_defconfig ../preflash/efficiency/requested-defconfig
@@ -1110,10 +1118,14 @@ jobs:
           if [ "${{ inputs.enable_xcy_lmk_policy }}" = true ]; then
             mkdir -p ../preflash/efficiency
             {
-              grep -x 'CONFIG_XCY_LMK_POLICY=y' out/.config
-              grep -E '[[:space:]]__initcall__.*_xcy_lmk_init6$' out/System.map
+              grep -x 'CONFIG_XCY_LMK_POLICY=y' out/.config &&
+              grep -E '[[:space:]]__initcall__.*_xcy_lmk_init6$' out/System.map &&
               grep -E '[[:space:]]xcy_lmk_ioctl(\.llvm\.[0-9]+)?$' out/System.map
-            } | tee ../preflash/efficiency/xcy-lmk-build.txt
+            } > ../preflash/efficiency/xcy-lmk-build.txt || {
+              echo "::error::XiaoCaiYe selection interface is missing from the final image"
+              exit 1
+            }
+            cat ../preflash/efficiency/xcy-lmk-build.txt
           fi
 
           if [ "$EFFICIENCY_PROFILE" != off ]; then
