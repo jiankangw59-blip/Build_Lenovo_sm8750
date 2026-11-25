@@ -75,6 +75,11 @@ on:
         default: false
         type: boolean
 
+      enable_thread_affinity:
+        description: "Build the opt-in thread affinity backend (Ace 6 6.6.118)"
+        type: boolean
+        default: false
+
       custom_kernel_suffix:
         description: "✏️ 自定义内核名称- (-开头 留空则默认官方）"
         required: false
@@ -121,10 +126,68 @@ on:
         default: true
         type: boolean
 
+      build_kernel:
+        description: "构建内核及相关产物"
+        required: false
+        default: true
+        type: boolean
+
+      enable_honk:
+        description: "并行构建带补丁的 Honk Android ARM64"
+        required: false
+        default: false
+        type: boolean
+
+      enable_oxidns:
+        description: "并行构建带补丁的 OxiDNS Android ARM64"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
+  honk:
+    name: Build Honk Android ARM64
+    if: ${{ inputs.enable_honk }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Apply Honk patches and build
+        run: bash ci/ace6-android/build.sh honk
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: Honk-Android-arm64
+          path: ${{ runner.temp }}/ace6-android/honk.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+
+  oxidns:
+    name: Build OxiDNS Android ARM64
+    if: ${{ inputs.enable_oxidns }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Apply OxiDNS patches and build
+        run: bash ci/ace6-android/build.sh oxidns
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: OxiDNS-Android-arm64
+          path: ${{ runner.temp }}/ace6-android/oxidns.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+
   build:
     name: Build_${{ github.event.inputs.device_name }}
+    if: ${{ inputs.build_kernel }}
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -914,6 +977,13 @@ jobs:
           python3 efficiency/apply_profile.py configure --kernel kernel_workspace/common \
             --profile "$EFFICIENCY_PROFILE"
 
+      - name: Attach Ace 6 thread affinity backend
+        if: ${{ inputs.enable_thread_affinity }}
+        run: |
+          set -euo pipefail
+          test "$DEVICES_NAME:$KERNEL_VERSION:$KERNEL_SOURCE_REF" = "oneplus_ace_6:6.6.118:65b954a773b183a9999b06bb1b2f921f12eaaf11"
+          python3 efficiency/thread_affinity/install_builtin.py --kernel kernel_workspace/common
+
       - name: 🔧 Set Kernel name (设置内核名称)
         run: |
           cd kernel_workspace
@@ -1389,16 +1459,16 @@ jobs:
   release:
     name: 📤 Create Release (创建发布)
     needs: [build, upload_rekernel]
-    if: ${{ github.event.inputs.enable_release == 'true' && always() && needs.build.result != 'failure' }}
+    if: ${{ always() && inputs.build_kernel && github.event.inputs.enable_release == 'true' && needs.build.result != 'failure' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
       actions: read
     steps:
-      - name: 📥 Download all artifacts (下载所有构建产物)
+      - name: 📥 Download kernel release artifacts (下载内核发布产物)
         uses: actions/download-artifact@v5
         with:
-          pattern: "*"
+          pattern: "{AK3_*,Re-Kernel-v*}"
           path: ./release_assets
 
       - name: 📦 Prepare release files (准备发布文件)
