@@ -48,6 +48,10 @@ function showStatus(text) {
   const status = Object.fromEntries(text.trim().split("\n").map(line => line.split("=")));
   document.getElementById("rules").textContent = status.rules ?? "—";
   document.getElementById("foreground").textContent = status.foreground === "-" ? "—" : (status.foreground ?? "—");
+  document.getElementById("load-card").hidden = status.wire_lines === undefined;
+  document.getElementById("wire-lines").textContent = status.wire_lines ?? "—";
+  document.getElementById("storage-card").hidden = status.stored_rules === undefined;
+  document.getElementById("stored-rules").textContent = status.stored_rules ?? "—";
 }
 
 async function readEditor() {

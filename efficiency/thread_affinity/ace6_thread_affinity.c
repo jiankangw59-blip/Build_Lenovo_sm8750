@@ -274,14 +274,14 @@ static void stop_game(void)
 
 static void start_game(struct task_struct *task, const char *process)
 {
-	const struct affinity_rule *rule;
+	struct affinity_match match;
 
 	if (game_leader || !scene || !scene->game || cpumask_empty(&game_top_cpus) ||
 	    task != task->group_leader || strcmp(scene->foreground, process) ||
 	    !adaptive_in_scope(policy, task, process))
 		return;
-	rule = select_rule(policy, process, "");
-	if (rule && rule->manual && !strcmp(rule->process, process))
+	match = select_rule(policy, process, "");
+	if (match.rule && match.rule->manual && !strcmp(match.selector->name, process))
 		return;
 	get_task_struct(task);
 	game_leader = task;
@@ -320,9 +320,12 @@ static void apply_task(struct task_struct *task, struct task_struct *parent, con
 	if (!process && process_name(task, name))
 		process = name;
 	if (policy && policy->count && process && *process) {
+		struct affinity_match match;
+
 		get_task_comm(thread, task);
 		thread_name = strim(thread);
-		rule = select_rule(policy, process, thread_name);
+		match = select_rule(policy, process, thread_name);
+		rule = match.rule;
 		start_game(task, process);
 		automatic = game_mask(task, rule);
 		if (!strcmp(process, "scene-daemon") && (!rule || !rule->manual)) {
@@ -331,7 +334,7 @@ static void apply_task(struct task_struct *task, struct task_struct *parent, con
 			if (scene && !strcmp(policy->adaptive_scope, "*"))
 				automatic = scene->display_off ? &tiny_cpus : &little_cpus;
 		} else if (!automatic && scene && adaptive_in_scope(policy, task, process)) {
-			automatic = adaptive_mask(task, scene_stage(scene, process), thread_name, rule);
+			automatic = adaptive_mask(task, scene_stage(scene, process), thread_name, &match);
 		}
 		requested = automatic ?: (rule ? &rule->mask : NULL);
 	}
@@ -420,7 +423,7 @@ static bool game_thread_can_rank(struct task_struct *task)
 	cpumask_t allowed;
 
 	get_task_comm(name, task);
-	rule = select_rule(policy, scene->foreground, strim(name));
+	rule = select_rule(policy, scene->foreground, strim(name)).rule;
 	if (rule && rule->source >= 3)
 		return false;
 	cpuset_cpus_allowed(task, &allowed);
@@ -641,7 +644,7 @@ static void release_policy(void)
 	stop_game();
 	hash_for_each_safe(leases, bucket, tmp, lease, node)
 		restore_lease(lease);
-	kvfree(policy);
+	free_policy(policy);
 	policy = NULL;
 #ifndef MODULE
 	if (policy_cred) {
@@ -733,7 +736,7 @@ static int replace_policy(struct affinity_policy *next)
 	mutex_lock(&policy_lock);
 	if (!next->count) {
 		release_policy();
-		kvfree(next);
+		free_policy(next);
 		goto out;
 	}
 	WRITE_ONCE(enabled, true);
@@ -743,7 +746,7 @@ static int replace_policy(struct affinity_policy *next)
 		goto out;
 	}
 	stop_game();
-	kvfree(policy);
+	free_policy(policy);
 	policy = next;
 #ifndef MODULE
 	if (policy_cred)
@@ -874,12 +877,12 @@ static ssize_t control_write(struct file *file, const char __user *user,
 		mutex_lock(&policy_lock);
 		validated = next->count;
 		mutex_unlock(&policy_lock);
-		kvfree(next);
+		free_policy(next);
 		return size;
 	}
 	ret = replace_policy(next);
 	if (ret) {
-		kvfree(next);
+		free_policy(next);
 		return ret;
 	}
 	return size;
@@ -894,12 +897,15 @@ static ssize_t control_read(struct file *file, char __user *user,
 	mutex_lock(&policy_lock);
 	len = scnprintf(stats, sizeof(stats),
 		"revision=%u\nrules=%u\nvalidated=%u\nleases=%u\npending=%d\nchanged=%ld\nclamped=%ld\nfailed=%ld\ndropped=%ld\n"
+		"profile_wire=1\nwire_lines=%u\nstored_rules=%u\nprofiles=%u\nprofile_bindings=%u\n"
 		"adaptive=%s\nforeground=%s\ndisplay_off=%u\ncontext_switches=%u\nadapted=%ld\n"
 		"game_tgid=%d\ngame_top=%d,%d,%d\ngame_samples=%u\ngame_finalized=%u\n",
 		revision, policy ? policy->count : 0, validated, lease_count,
 		atomic_read(&pending), atomic_long_read(&changed),
 		atomic_long_read(&clamped), atomic_long_read(&failed),
 		atomic_long_read(&dropped),
+		policy ? policy->wire_lines : 0, policy ? policy->stored_rules : 0,
+		policy ? policy->profile_count : 0, policy ? policy->binding_count : 0,
 		policy && policy->adaptive_scope[0] ? policy->adaptive_scope : "-",
 		scene && scene->foreground[0] ? scene->foreground : "-",
 		scene && scene->display_off, context_switches, atomic_long_read(&adapted),

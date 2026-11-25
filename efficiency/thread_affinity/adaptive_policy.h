@@ -209,24 +209,26 @@ static enum thread_role thread_role(struct task_struct *task, const char *name)
 }
 
 static const struct cpumask *adaptive_mask(struct task_struct *task, enum app_stage stage,
-					   const char *name, const struct affinity_rule *rule)
+					   const char *name, const struct affinity_match *match)
 {
+	const struct affinity_rule *rule = match->rule;
+	bool specific = rule && match->selector->scope != PROCESS_GLOBAL;
 	enum thread_role role;
 
 	if (stage == APP_STATIC || (rule && rule->source >= 3))
 		return NULL;
 	if (critical_runtime_thread(name))
 		return stage == APP_FOREGROUND ? &interactive_cpus : &little_cpus;
-	if (rule && rule->thread[0] && strcmp(rule->process, "*"))
+	if (specific && rule->thread[0])
 		return NULL;
 	role = thread_role(task, name);
 	if (stage == APP_FOREGROUND) {
 		if (role == ROLE_INTERACTIVE)
-			return rule && strcmp(rule->process, "*") ? NULL : &interactive_cpus;
+			return specific ? NULL : &interactive_cpus;
 		return role == ROLE_IDLE && !contains_word(name, "push") ? &tiny_cpus : &little_cpus;
 	}
 	if (role == ROLE_INTERACTIVE && stage == APP_BACKGROUND)
-		return rule && strcmp(rule->process, "*") ? NULL : &background_cpus;
+		return specific ? NULL : &background_cpus;
 	return role <= ROLE_RUNTIME || contains_word(name, "push") ? &little_cpus : &tiny_cpus;
 }
 

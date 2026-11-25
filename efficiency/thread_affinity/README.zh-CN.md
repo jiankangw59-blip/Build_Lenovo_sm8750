@@ -6,6 +6,8 @@
 
 `compact_profiles.py 源规则目录 输出目录` 将重复的自动生成配置写成 `app_profile_rules.profiles`。加载器按原顺序展开，手工文件仍为 `applist.prop`。可用 `affinityctl dump` 比较压缩前后的提交内容。
 
+支持 `profile_wire=1` 的内核会直接读入共享配置，按进程选择器定位规则集，再按精确线程名哈希查找，必要时检查通配及默认规则。引用记录保留各套配置的生效顺序。`rules` 显示逻辑生效数量，`wire_lines` 显示提交行数，`stored_rules` 显示实际存储的规则定义数。旧内核仍接收平铺规则，`affinityctl dump` 输出平铺格式，`dump-compact` 输出共享格式。
+
 外部模块用于现机小范围测试。内建版本通过原调度器的亲和性路径更新应用此前请求的掩码，并记录原请求供撤销。Action 的 `enable_thread_affinity` 仅供 Ace 6 6.6.118 选择，开机后仍需加载规则才会生效。
 
 `affinityctl watch` 监听现有 Scene 状态文件和面板亮度节点。`affinityctl adapt-load 规则目录 [进程模式]` 启用前后台分核。省略进程模式时，自适应覆盖主用户应用。手工规则和实测游戏规则优先。副窗口仍可见时沿用前台分配，退出监听后回到静态规则。Android cpuset 继续限制实际可用的核。

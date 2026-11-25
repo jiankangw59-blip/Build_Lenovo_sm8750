@@ -27,6 +27,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; }
 main { max-width: 760px; margin: auto; padding: 24px 16px; }
 header, .editor-title, .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
