@@ -23,6 +23,10 @@ jobs:
           cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
             efficiency/xcy-reclaim/test_without_pageout.c -o "$RUNNER_TEMP/xcy-kill-only"
           "$RUNNER_TEMP/xcy-kill-only"
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
+            efficiency/xcy-reclaim/test_candidates.c efficiency/xcy-reclaim/xcy_reclaim_candidates.c \
+            efficiency/xcy-reclaim/xcy_reclaim_importance.c -o "$RUNNER_TEMP/xcy-candidates"
+          "$RUNNER_TEMP/xcy-candidates"
       - name: Compile the components against the pinned ARM64 6.6.118 kernel
         shell: bash
         run: |
@@ -42,13 +46,14 @@ jobs:
           make -s -C "$kernel" -j2 O="$out" ARCH=arm64 LLVM=1 prepare
           cp efficiency/xcy-reclaim/xcy_reclaim*.[ch] "$objects/"
           cat > "$objects/Makefile" <<'EOF'
-          obj-m := xcy_reclaim_runtime.o xcy_reclaim_psi.o xcy_reclaim_rank.o xcy_reclaim_urgent.o xcy_reclaim_importance.o xcy_reclaim_identity.o xcy_reclaim_mailbox.o
+          obj-m := xcy_reclaim_runtime.o xcy_reclaim_psi.o xcy_reclaim_rank.o xcy_reclaim_urgent.o xcy_reclaim_importance.o xcy_reclaim_identity.o xcy_reclaim_mailbox.o xcy_reclaim_candidates.o
           CFLAGS_REMOVE_xcy_reclaim_urgent.o := -mgeneral-regs-only $(CC_FLAGS_LTO)
           CFLAGS_xcy_reclaim_urgent.o := -fno-lto
           EOF
           make -s -C "$kernel" -j2 O="$out" ARCH=arm64 LLVM=1 M="$objects" \
             xcy_reclaim_runtime.o xcy_reclaim_psi.o xcy_reclaim_rank.o \
-            xcy_reclaim_urgent.o xcy_reclaim_importance.o xcy_reclaim_identity.o xcy_reclaim_mailbox.o
+            xcy_reclaim_urgent.o xcy_reclaim_importance.o xcy_reclaim_identity.o \
+            xcy_reclaim_mailbox.o xcy_reclaim_candidates.o
           for component in "$objects"/*.o; do
             llvm-readelf -h "$component" | grep -E 'Machine:.*AArch64'
           done
