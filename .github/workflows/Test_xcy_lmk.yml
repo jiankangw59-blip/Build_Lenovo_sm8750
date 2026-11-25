@@ -38,7 +38,7 @@ jobs:
           aarch64-linux-gnu-gcc -static -O2 -Wall -Wextra -Werror -I. efficiency/xcy-lmk/probe.c -o guest/init
           (cd guest && find . -print0 | cpio --null -o -H newc --quiet) | gzip -1 > initramfs.gz
           timeout 240s qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a76 -smp 2 -m 1024 \
-            -display none -serial stdio -monitor none -no-reboot -kernel candidate/Image -initrd initramfs.gz \
+            -display none -serial stdio -monitor none -nic none -no-reboot -kernel candidate/Image -initrd initramfs.gz \
             -append 'console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init panic=-1 nokaslr' \
             2>&1 | tee guest.log
           grep -q '^XCY_LMK_RUNTIME_PASSED' guest.log
