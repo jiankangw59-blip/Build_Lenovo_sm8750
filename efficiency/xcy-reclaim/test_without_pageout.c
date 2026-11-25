@@ -6,55 +6,44 @@
 int main(void)
 {
 	xcy_system_reclaim_episode_t episode = {0};
-	xcy_system_reclaim_episode_t cooldown;
+	xcy_system_reclaim_episode_t after_kill;
 	xcy_system_pressure_level_t stress = xcy_system_ram_pressure_classify(10000, 1200);
 	xcy_system_pressure_level_t critical = xcy_system_ram_pressure_classify(10000, 1199);
 	xcy_system_pressure_level_t healthy = xcy_system_ram_pressure_classify(10000, 3000);
+	xcy_reclaim_s64 now = 2000, next_round;
+	unsigned int action;
 
 	assert(stress == XCY_SYSTEM_PRESSURE_STRESS);
 	assert(critical == XCY_SYSTEM_PRESSURE_CRITICAL);
 	assert(healthy == XCY_SYSTEM_PRESSURE_HEALTHY);
 	assert(xcy_reclaim_observe_without_pageout(&episode, stress, 1000) == XCY_SYSTEM_RECLAIM_NONE);
-	assert(xcy_reclaim_wakeup_deadline(&episode) == 0);
+	assert(xcy_system_reclaim_deadline(&episode) == 0);
 	assert(episode.critical_reclaim_rounds == 0);
-	assert(xcy_reclaim_observe_without_pageout(&episode, critical, 2000) == XCY_SYSTEM_RECLAIM_READY);
-	assert(episode.phase == XCY_SYSTEM_RECLAIM_ACTION_PENDING);
-	assert(xcy_reclaim_complete_without_pageout(&episode, 2001, 1) == XCY_SYSTEM_RECLAIM_WAIT);
-	assert(xcy_reclaim_wakeup_deadline(&episode) == 5001);
-	assert(xcy_reclaim_observe_without_pageout(&episode, critical, 5000) == XCY_SYSTEM_RECLAIM_WAIT);
-	assert(xcy_reclaim_observe_without_pageout(&episode, critical, 5001) == XCY_SYSTEM_RECLAIM_READY);
-	assert(episode.critical_reclaim_rounds == 0);
-	assert(xcy_reclaim_complete_without_pageout(&episode, 5002, 1) == XCY_SYSTEM_RECLAIM_WAIT);
-	assert(episode.episode_actions == XCY_SYSTEM_RECLAIM_MAX_ACTIONS);
-	assert(xcy_reclaim_wakeup_deadline(&episode) == 35002);
-	cooldown = episode;
-	assert(xcy_reclaim_observe_without_pageout(&episode, critical, 8002) == XCY_SYSTEM_RECLAIM_WAIT);
-	assert(xcy_reclaim_observe_without_pageout(&episode, critical, 35001) == XCY_SYSTEM_RECLAIM_WAIT);
-	assert(xcy_reclaim_observe_without_pageout(&episode, critical, 35002) == XCY_SYSTEM_RECLAIM_READY);
-	assert(episode.episode_actions == 0);
-	assert(xcy_reclaim_complete_without_pageout(&episode, 35003, 1) == XCY_SYSTEM_RECLAIM_WAIT);
-	assert(episode.episode_actions == 1);
-	assert(xcy_reclaim_wakeup_deadline(&episode) == 38003);
-	assert(xcy_reclaim_observe_without_pageout(&episode, critical, 38003) == XCY_SYSTEM_RECLAIM_READY);
-	assert(xcy_reclaim_complete_without_pageout(&episode, 38004, 1) == XCY_SYSTEM_RECLAIM_WAIT);
-	assert(xcy_reclaim_wakeup_deadline(&episode) == 68004);
+	for (action = 0; action < 4; ++action) {
+		assert(xcy_reclaim_observe_without_pageout(&episode, critical, now) == XCY_SYSTEM_RECLAIM_READY);
+		assert(episode.phase == XCY_SYSTEM_RECLAIM_ACTION_PENDING);
+		assert(xcy_reclaim_complete_without_pageout(&episode, ++now, 1) == XCY_SYSTEM_RECLAIM_WAIT);
+		now += XCY_SYSTEM_RECLAIM_OBSERVE_MS;
+		assert(xcy_system_reclaim_deadline(&episode) == now);
+		assert(xcy_reclaim_observe_without_pageout(&episode, critical, now - 1) == XCY_SYSTEM_RECLAIM_WAIT);
+		assert(episode.critical_reclaim_rounds == 0);
+	}
+	after_kill = episode;
 
-	episode = cooldown;
-	assert(xcy_reclaim_observe_without_pageout(&episode, stress, 35002) == XCY_SYSTEM_RECLAIM_NONE);
-	assert(xcy_reclaim_wakeup_deadline(&episode) == 0);
-	assert(xcy_reclaim_observe_without_pageout(&episode, critical, 36000) == XCY_SYSTEM_RECLAIM_READY);
-	assert(xcy_reclaim_complete_without_pageout(&episode, 36001, 0) == XCY_SYSTEM_RECLAIM_FALLBACK);
-	assert(xcy_reclaim_wakeup_deadline(&episode) == 0);
-	assert(xcy_reclaim_observe_without_pageout(&episode, critical, 70000) == XCY_SYSTEM_RECLAIM_FALLBACK);
+	assert(xcy_reclaim_observe_without_pageout(&episode, stress, now) == XCY_SYSTEM_RECLAIM_NONE);
+	assert(xcy_system_reclaim_deadline(&episode) == 0);
+	assert(xcy_reclaim_observe_without_pageout(&episode, critical, now + 1) == XCY_SYSTEM_RECLAIM_READY);
+	assert(xcy_reclaim_complete_without_pageout(&episode, now + 2, 0) == XCY_SYSTEM_RECLAIM_FALLBACK);
+	assert(xcy_system_reclaim_deadline(&episode) == 0);
+	assert(xcy_reclaim_observe_without_pageout(&episode, critical, now + 60000) == XCY_SYSTEM_RECLAIM_FALLBACK);
 
-	episode = cooldown;
-	assert(xcy_reclaim_observe_without_pageout(&episode, healthy, 8003) == XCY_SYSTEM_RECLAIM_NONE);
-	assert(xcy_reclaim_wakeup_deadline(&episode) == 0);
-	assert(xcy_reclaim_observe_without_pageout(&episode, critical, 35001) == XCY_SYSTEM_RECLAIM_WAIT);
-	assert(xcy_system_reclaim_deadline(&episode) == 35002);
-	assert(xcy_reclaim_wakeup_deadline(&episode) == 0);
-	assert(xcy_reclaim_observe_without_pageout(&episode, critical, 35002) == XCY_SYSTEM_RECLAIM_READY);
-	assert(xcy_reclaim_observe_without_pageout(&episode, healthy, 35003) == XCY_SYSTEM_RECLAIM_NONE);
+	episode = after_kill;
+	assert(xcy_reclaim_observe_without_pageout(&episode, healthy, now - 1) == XCY_SYSTEM_RECLAIM_NONE);
+	assert(xcy_system_reclaim_deadline(&episode) == 0);
+	next_round = episode.last_action_ms + XCY_SYSTEM_RECLAIM_EPISODE_GAP_MS;
+	assert(xcy_reclaim_observe_without_pageout(&episode, critical, next_round - 1) == XCY_SYSTEM_RECLAIM_WAIT);
+	assert(xcy_system_reclaim_deadline(&episode) == next_round);
+	assert(xcy_reclaim_observe_without_pageout(&episode, critical, next_round) == XCY_SYSTEM_RECLAIM_READY);
 
 	episode = (xcy_system_reclaim_episode_t){0};
 	assert(xcy_reclaim_observe_without_pageout(&episode, XCY_SYSTEM_PRESSURE_UNKNOWN, 1) ==

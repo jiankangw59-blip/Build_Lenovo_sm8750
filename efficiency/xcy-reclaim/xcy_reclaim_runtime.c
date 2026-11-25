@@ -21,9 +21,10 @@ static xcy_system_pressure_level_t xcy_ram_pressure(void)
 static void xcy_schedule_deadline(struct xcy_reclaim_runtime *runtime, s64 now)
 {
 	s64 deadline = runtime->pending ? runtime->expires_ms :
-		xcy_reclaim_wakeup_deadline(&runtime->policy);
+		xcy_system_reclaim_deadline(&runtime->policy);
 
-	if (!deadline) {
+	/* An empty or interrupted round waits for the next eligible PSI event. */
+	if (!deadline || (!runtime->pending && runtime->policy.phase == XCY_SYSTEM_RECLAIM_RATE_WAIT)) {
 		cancel_delayed_work(&runtime->deadline);
 		return;
 	}
