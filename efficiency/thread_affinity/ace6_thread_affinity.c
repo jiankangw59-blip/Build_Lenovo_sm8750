@@ -47,6 +47,9 @@ struct task_event {
 static DEFINE_MUTEX(policy_lock);
 static DEFINE_HASHTABLE(leases, 10);
 static struct affinity_policy *policy;
+#ifndef MODULE
+static const struct cred *policy_cred;
+#endif
 static struct scene_context *scene;
 static struct file *scene_owner;
 static struct workqueue_struct *affinity_wq;
@@ -169,8 +172,13 @@ static int apply_mask(struct task_struct *task, const struct cpumask *target,
 		atomic_long_inc(&clamped);
 	return ret;
 #else
-	int ret = ace6_set_task_affinity(task, target, user_request);
+	const struct cred *saved;
+	int ret;
 
+	/* Use the loading client's security identity in asynchronous workers. */
+	saved = override_creds(policy_cred);
+	ret = ace6_set_task_affinity(task, target, user_request);
+	revert_creds(saved);
 	if (!ret) {
 		read_affinity(task, applied);
 		if (!cpumask_equal(target, &applied->effective))
@@ -400,6 +408,12 @@ static void release_policy(void)
 		restore_lease(lease);
 	kvfree(policy);
 	policy = NULL;
+#ifndef MODULE
+	if (policy_cred) {
+		put_cred(policy_cred);
+		policy_cred = NULL;
+	}
+#endif
 }
 
 static int capture_tasks(unsigned int *count)
@@ -480,6 +494,11 @@ static int replace_policy(struct affinity_policy *next)
 	}
 	kvfree(policy);
 	policy = next;
+#ifndef MODULE
+	if (policy_cred)
+		put_cred(policy_cred);
+	policy_cred = get_current_cred();
+#endif
 	hash_for_each_safe(leases, bucket, tmp, lease, node) {
 		if (READ_ONCE(lease->task->flags) & PF_EXITING)
 			free_lease(lease);
