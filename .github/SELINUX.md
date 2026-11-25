@@ -2,7 +2,7 @@
 
 `selinux_seqno.py` 在 SUSFS 补丁之后应用兼容修改；`selinux_projection.py` 负责用户查询边界。BakaSU、SUSFS 源码及修改后的九个文件均由 CI 记录哈希，配套管理器使用同一份输入重放补丁并核对哈希。
 
-`selinux_ids.py` 在上述边界之上增加经过验证的 ID 快路径。兼容标记和快照指针属于每个 `selinux_policy` 对象；KSU 两个规则发布入口、完整策略提交及布尔更新都在 RCU 发布前清除复制来的旧标记并重新校验。校验包括原厂主名称前缀、双向别名、user/role/type/sens/cat ID、MLS 模式，以及 class 和 common/class-specific permission 名称与位值。live-only 名称映射到原厂 ID 会触发回退。
+`selinux_ids.py` 在上述边界之上增加经过验证的 ID 快路径。兼容标记和快照指针属于每个 `selinux_policy` 对象；所有发布入口都在 RCU 发布前清除复制来的旧标记。完整策略提交、KSU 初始注入及结构性更新执行完整校验；只有已审计的纯权限批次和原生布尔更新，且旧证明、当前策略指针、快照、相邻代数及符号表规模均匹配时，才继承已有证明。未知命令、部分失败的结构修改及任一条件失配均回退完整校验。校验包括原厂主名称前缀、双向别名、user/role/type/sens/cat ID、MLS 模式，以及 class 和 common/class-specific permission 名称与位值。live-only 名称映射到原厂 ID 会触发回退。
 
 兼容时，显式用户入口采用从原版函数生成的单遍 live 解析器，在进入 MLS 前拒绝新增 user/role/type，保留 live 合法性检查并追加快照检查；AV 决策直接使用实时 SID 的上下文，不做额外上下文转译或分配。失配时保留规范化映射，并按名称转换 class 和权限位，新增或有歧义的权限默认拒绝。原版内部解析器和实际内核 AVC 热函数保持原样。
 
