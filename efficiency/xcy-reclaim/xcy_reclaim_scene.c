@@ -7,7 +7,23 @@
 #include "xcy_reclaim_protection.h"
 
 #define XCY_SCENE_NAMES_MAX 128U
-#define XCY_SCENE_FIELDS_MAX 9U
+
+enum xcy_scene_field {
+	XCY_SCENE_VERSION,
+	XCY_SCENE_SOURCE,
+	XCY_SCENE_TIME,
+	XCY_SCENE_UNMAPPED,
+	XCY_SCENE_FOREGROUND,
+	XCY_SCENE_FOCUSED,
+	XCY_SCENE_ACTIVE,
+	XCY_SCENE_VISIBLE,
+	XCY_SCENE_MAPPED,
+	XCY_SCENE_WINDOWED,
+	XCY_SCENE_SMALL,
+	XCY_SCENE_ANALYZED_SMALL,
+	XCY_SCENE_SYSTEM_SMALL,
+	XCY_SCENE_FIELDS,
+};
 
 static char *xcy_scene_next(char **cursor, char delimiter)
 {
@@ -22,19 +38,13 @@ static char *xcy_scene_next(char **cursor, char delimiter)
 	return item;
 }
 
-static bool xcy_scene_name(const char *value, size_t length)
-{
-	xcy_memory_token_t token = { .text = value, .len = length };
-
-	return length && length < XCY_MEMORY_PACKAGE_BYTES && xcy_memory_package(token);
-}
-
 static int xcy_scene_add(const char **names, size_t *count, const char *value)
 {
+	xcy_memory_token_t token = { .text = value, .len = strlen(value) };
 	size_t i;
 
-	if (!xcy_scene_name(value, strlen(value)))
-		return 0;
+	if (!xcy_memory_package(token))
+		return -EINVAL;
 	for (i = 0; i < *count; ++i)
 		if (!strcmp(names[i], value))
 			return 0;
@@ -57,39 +67,55 @@ int xcy_reclaim_scene_parse(char *data, uint64_t wall_now_sec, uint64_t fallback
 			    uint64_t now, uint64_t maximum_age,
 			    struct xcy_reclaim_protection_frame *frame)
 {
-	static const char *const keys[XCY_SCENE_FIELDS_MAX] = {
-		"scene_foreground_pkg", "focused_pkg", "active_pkg",
-		"visible_pkgs", "mapped_shell_pkgs", "windowed_pkgs", "small_window_pkgs",
-		"scene_analyzed_small_window_pkgs", "scene_include_system_small_window_pkgs",
+	static const char *const keys[XCY_SCENE_FIELDS] = {
+		[XCY_SCENE_VERSION] = "version",
+		[XCY_SCENE_SOURCE] = "source",
+		[XCY_SCENE_TIME] = "time_sec",
+		[XCY_SCENE_UNMAPPED] = "unmapped_shell_count",
+		[XCY_SCENE_FOREGROUND] = "scene_foreground_pkg",
+		[XCY_SCENE_FOCUSED] = "focused_pkg",
+		[XCY_SCENE_ACTIVE] = "active_pkg",
+		[XCY_SCENE_VISIBLE] = "visible_pkgs",
+		[XCY_SCENE_MAPPED] = "mapped_shell_pkgs",
+		[XCY_SCENE_WINDOWED] = "windowed_pkgs",
+		[XCY_SCENE_SMALL] = "small_window_pkgs",
+		[XCY_SCENE_ANALYZED_SMALL] = "scene_analyzed_small_window_pkgs",
+		[XCY_SCENE_SYSTEM_SMALL] = "scene_include_system_small_window_pkgs",
 	};
-	char *value[XCY_SCENE_FIELDS_MAX] = {0};
-	char *cursor = data, *line;
-	uint64_t observed = 0, unmapped = 0, age;
-	bool source = false;
+	char *value[XCY_SCENE_FIELDS] = {0};
+	char *cursor = data;
+	uint64_t observed, unmapped, age;
 	size_t i;
 	int error = 0;
 
-	while ((line = xcy_scene_next(&cursor, '\n'))) {
+	if (!data || !*data || data[strlen(data) - 1] != '\n')
+		return -EINVAL;
+	while (cursor && *cursor) {
+		char *line = xcy_scene_next(&cursor, '\n');
 		char *entry = strchr(line, '=');
 
-		if (!entry)
-			continue;
+		if (!entry || entry == line)
+			return -EINVAL;
 		*entry++ = 0;
-		if (!strcmp(line, "source"))
-			source = !strcmp(entry, "scene_accessibility");
-		if (!strcmp(line, "time_sec") && !xcy_scene_uint(entry, &observed))
-			return -EINVAL;
-		if (!strcmp(line, "unmapped_shell_count") && !xcy_scene_uint(entry, &unmapped))
-			return -EINVAL;
-		for (i = 0; i < XCY_SCENE_FIELDS_MAX; ++i)
+		for (i = 0; i < XCY_SCENE_FIELDS; ++i)
 			if (!strcmp(line, keys[i])) {
+				if (value[i])
+					return -EINVAL;
 				value[i] = entry;
 				break;
 			}
 	}
+	for (i = 0; i < XCY_SCENE_FIELDS; ++i)
+		if (!value[i])
+			return -EINVAL;
+	if (strcmp(value[XCY_SCENE_VERSION], "1") ||
+	    !xcy_scene_uint(value[XCY_SCENE_TIME], &observed) ||
+	    !xcy_scene_uint(value[XCY_SCENE_UNMAPPED], &unmapped))
+		return -EINVAL;
 	if (!observed)
 		observed = fallback_sec;
-	if (!source || unmapped || !observed || wall_now_sec < observed ||
+	if (strcmp(value[XCY_SCENE_SOURCE], "scene_accessibility") ||
+	    unmapped || !observed || wall_now_sec < observed ||
 	    wall_now_sec - observed > maximum_age / 1000U)
 		return -ESTALE;
 	age = (wall_now_sec - observed) * 1000U;
@@ -100,12 +126,12 @@ int xcy_reclaim_scene_parse(char *data, uint64_t wall_now_sec, uint64_t fallback
 		return -ENOMEM;
 	frame->view.visible.values = frame->names;
 	frame->view.active.values = frame->names + XCY_SCENE_NAMES_MAX;
-	for (i = 0; i < XCY_SCENE_FIELDS_MAX && !error; ++i) {
+	for (i = XCY_SCENE_FOREGROUND; i < XCY_SCENE_FIELDS && !error; ++i) {
 		char *pkg;
 
-		if (!value[i])
+		if (!*value[i])
 			continue;
-		if (i < 3)
+		if (i < XCY_SCENE_VISIBLE)
 			error = xcy_scene_add(frame->names + XCY_SCENE_NAMES_MAX,
 					      &frame->view.active.count, value[i]);
 		while (!error && (pkg = xcy_scene_next(&value[i], ',')))
