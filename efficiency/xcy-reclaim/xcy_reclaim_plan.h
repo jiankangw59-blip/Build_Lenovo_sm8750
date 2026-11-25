@@ -26,7 +26,7 @@ struct xcy_reclaim_plan {
 };
 
 struct xcy_reclaim_pick {
-	uint64_t pss_kb;
+	uint64_t reclaim_kb;
 	uint64_t first_signal_ms;
 	size_t group;
 };

@@ -125,9 +125,9 @@ out:
 static uint64_t group_pss(const struct xcy_reclaim_plan *plan,
 			  const struct xcy_reclaim_group *group,
 			  const xcy_memory_snapshot_t *pss, const struct xcy_plan_key *keys,
-			  const char *package)
+			  const char *package, uint64_t *reclaim_kb)
 {
-	uint64_t total = 0;
+	uint64_t total = 0, resident = 0;
 	size_t i;
 
 	for (i = 0; i < group->count; ++i) {
@@ -148,7 +148,11 @@ static uint64_t group_pss(const struct xcy_reclaim_plan *plan,
 		    row->pss_kb > (uint64_t)XCY_RECLAIM_INT64_MAX - total)
 			return 0;
 		total += row->pss_kb;
+		/* Framework PSS can include swap. Bound the reclaim estimate by
+		 * the process RSS captured with this same identity and PSS sample. */
+		resident += row->pss_kb < row->rss_kb ? row->pss_kb : row->rss_kb;
 	}
+	*reclaim_kb = resident;
 	return total;
 }
 
@@ -191,19 +195,19 @@ int xcy_reclaim_plan_pick(const struct xcy_reclaim_plan *plan,
 		observed = age(row, now_ms, context);
 		if (!observed.background_since_ms || observed.background_since_ms > now_ms)
 			continue;
-		rank[i].pss_kb = group_pss(plan, group, pss, keys, row->pkg);
-		rank[i].valid = !!rank[i].pss_kb;
+		rank[i].pss_kb = group_pss(plan, group, pss, keys, row->pkg, &rank[i].reclaim_kb);
+		rank[i].valid = rank[i].reclaim_kb != 0;
 		rank[i].age_ms = now_ms - observed.background_since_ms;
 		rank[i].recent = observed.recent;
 	}
 	/* Rank only the remaining entries from the same PSS snapshot. */
 	while ((i = xcy_reclaim_rank(rank, plan->group_count, needed_kb > urgent_above_kb)) != SIZE_MAX) {
 		batch->picks[batch->count++] = (struct xcy_reclaim_pick){
-			.pss_kb = rank[i].pss_kb, .group = i,
+			.reclaim_kb = rank[i].reclaim_kb, .group = i,
 		};
-		if (rank[i].pss_kb >= needed_kb)
+		if (rank[i].reclaim_kb >= needed_kb)
 			break;
-		needed_kb -= rank[i].pss_kb;
+		needed_kb -= rank[i].reclaim_kb;
 		rank[i].valid = false;
 	}
 	error = 0;

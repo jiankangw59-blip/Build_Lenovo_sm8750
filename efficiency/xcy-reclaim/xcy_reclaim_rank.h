@@ -8,6 +8,7 @@ struct xcy_reclaim_rank_entry {
 	uint64_t age_ms;
 	int valid;
 	int recent;
+	uint64_t reclaim_kb;
 };
 
 size_t xcy_reclaim_rank(const struct xcy_reclaim_rank_entry *items, size_t count,

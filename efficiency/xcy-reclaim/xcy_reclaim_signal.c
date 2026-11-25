@@ -149,7 +149,7 @@ static enum xcy_reclaim_outcome xcy_send_signals(void *data, u64 expires_ms)
 		if (result == XCY_RECLAIM_ACTION_SENT) {
 			outcome = result;
 			/* Charge the whole estimate even if only part of a group was signalled. */
-			needed -= min(needed, pick->pss_kb);
+			needed -= min(needed, pick->reclaim_kb);
 		} else if (result == XCY_RECLAIM_ACTION_FAILED && outcome == XCY_RECLAIM_NO_CANDIDATE) {
 			outcome = result;
 		}

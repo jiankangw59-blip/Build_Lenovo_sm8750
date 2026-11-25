@@ -42,6 +42,7 @@ static void fill(xcy_memory_process_t *row, unsigned int pid, unsigned int uid,
 	row->importance = 400;
 	row->procstate = 17;
 	row->pss_kb = pss;
+	row->rss_kb = pss;
 	row->sampled_elapsed_ms = 150000;
 	strcpy(row->pkg, package);
 	strcpy(row->pkg_list, package);
@@ -86,10 +87,19 @@ int main(void)
 	assert(!xcy_reclaim_plan_pick(&plan, &initial, &pss, 150000, background, &recent, 0, 2000, &batch));
 	assert(!batch.count);
 	assert(!xcy_reclaim_plan_pick(&plan, &initial, &pss, 150000, background, &recent, 600, 2000, &batch));
-	assert(batch.count == 1 && batch.picks[0].group == 1 && batch.picks[0].pss_kb == 600);
+	assert(batch.count == 1 && batch.picks[0].group == 1 && batch.picks[0].reclaim_kb == 600);
 	assert(!xcy_reclaim_plan_pick(&plan, &initial, &pss, 150000, background, &recent, 1100, 2000, &batch));
 	assert(batch.count == 2 && batch.picks[0].group == 1 && batch.picks[1].group == 0);
-	assert(batch.picks[1].pss_kb == 1000);
+	assert(batch.picks[1].reclaim_kb == 1000);
+	/* High Framework PSS can come from swapped pages. Resident limits for
+	 * each PID keep this group's budget well below its 1000 KiB rank. */
+	measured_rows[0].rss_kb = 20;
+	measured_rows[2].rss_kb = 300;
+	assert(!xcy_reclaim_plan_pick(&plan, &initial, &pss, 150000, background, &recent, 700, 0, &batch));
+	assert(batch.count == 2 && batch.picks[0].group == 0 && batch.picks[0].reclaim_kb == 320);
+	assert(batch.picks[1].group == 1 && batch.picks[1].reclaim_kb == 600);
+	measured_rows[0] = initial_rows[2];
+	measured_rows[2] = initial_rows[0];
 	plan.groups[1].download_busy = true;
 	assert(!xcy_reclaim_plan_revalidate(&plan, &batch, &initial, &final, &protection, 150010,
 					    1, background, &recent, &changed));
