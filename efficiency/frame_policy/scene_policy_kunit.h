@@ -121,6 +121,7 @@ static void frame_test_scene_control_ownership(struct kunit *test)
 {
 	struct fp_scene_table *table;
 	struct fp_scene_profile *normal, *off;
+	struct file *file;
 	unsigned long flags;
 	int error;
 
@@ -154,6 +155,7 @@ static void frame_test_scene_control_ownership(struct kunit *test)
 	table->rules[0].profiles[2] = 1;
 	normal = &table->profiles[0];
 	normal->flags = FP_SCENE_ENABLED;
+	normal->gpu_percent = 105;
 	normal->gpu = (struct fp_limits){330000, 1083000};
 	normal->cpus[0].limits = (struct fp_limits){750000, 2000000};
 	off = &table->profiles[2];
@@ -171,7 +173,12 @@ static void frame_test_scene_control_ownership(struct kunit *test)
 	configuration.gpu_scene = (struct fp_limits){500000, 1200000};
 	configuration.gpu_idle = (struct fp_limits){500000, 1000000};
 	configuration.gpu_game = (struct fp_limits){500000, 1200000};
+	configuration.gpu_game_percent = 100;
 	configuration.flags = FP_CPU | FP_GPU;
+	file = anon_inode_getfile("scene-gpu-lease", &fp_test_gpu_file_ops, NULL, O_RDWR);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(file));
+	gpu_governor_file = file;
+	WRITE_ONCE(fp_test_gpu_percent, 100);
 	configured = true;
 
 	/* Exercise the real event publisher, ordered worker and actual QoS lists. */
@@ -188,6 +195,26 @@ static void frame_test_scene_control_ownership(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MIN), 750000);
 	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 2000000);
 	KUNIT_EXPECT_EQ(test, dev_pm_qos_read_value(&fp_test_gpu->dev, DEV_PM_QOS_MAX_FREQUENCY), 1083000);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 105U);
+	KUNIT_EXPECT_TRUE(test, gpu_mode_owned);
+	/* Reproduce the live fault: platform replaces Scene105 with100, while
+	 * Scene still desires105. Preserve100 without disabling either QoS axis
+	 * or freezing subsequent real foreground events behind configured=false.
+	 */
+	WRITE_ONCE(fp_test_gpu_percent, 100);
+	fp_test_gpu_force_error = true;
+	frame_policy_scene("frame.policy.kunit.scene.foreign-owner", false, false);
+	flush_work(&control_work);
+	KUNIT_EXPECT_EQ(test, last_error, 0);
+	KUNIT_EXPECT_TRUE(test, configured);
+	KUNIT_EXPECT_TRUE(test, scene_active);
+	KUNIT_EXPECT_NOT_NULL(test, cpu_requests[0].policy);
+	KUNIT_EXPECT_NOT_NULL(test, gpu_device);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 2000000);
+	KUNIT_EXPECT_EQ(test, dev_pm_qos_read_value(&fp_test_gpu->dev, DEV_PM_QOS_MAX_FREQUENCY), 1083000);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 100U);
+	KUNIT_EXPECT_FALSE(test, gpu_mode_owned);
+	KUNIT_EXPECT_TRUE(test, gpu_mode_conflict);
 
 	frame_policy_scene("frame.policy.kunit.ignored", false, false);
 	flush_work(&control_work);
@@ -198,6 +225,9 @@ static void frame_test_scene_control_ownership(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, NULL);
 	KUNIT_EXPECT_PTR_EQ(test, gpu_device, NULL);
 	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 100U);
+	KUNIT_EXPECT_FALSE(test, gpu_mode_owned);
+	KUNIT_EXPECT_TRUE(test, gpu_mode_conflict);
 	KUNIT_EXPECT_FALSE(test, freq_qos_request_active(&cpu_requests[0].min));
 	KUNIT_EXPECT_FALSE(test, freq_qos_request_active(&cpu_requests[0].max));
 
@@ -219,6 +249,10 @@ static void frame_test_scene_control_ownership(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, NULL);
 	KUNIT_EXPECT_PTR_EQ(test, gpu_device, NULL);
 	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
+	KUNIT_EXPECT_TRUE(test, configured);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 100U);
+	KUNIT_EXPECT_TRUE(test, gpu_mode_owned);
+	KUNIT_EXPECT_FALSE(test, gpu_mode_conflict);
 
 	/* Model an already-qualified game; the outgoing requests themselves are
 	 * real QoS requests. Android libgui/uprobes are outside this QEMU test.
@@ -232,6 +266,8 @@ static void frame_test_scene_control_ownership(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, error, 0);
 	KUNIT_ASSERT_TRUE(test, game_active);
 	KUNIT_EXPECT_EQ(test, cpu_floors[0], 2500000U);
+	KUNIT_EXPECT_NOT_NULL(test, gpu_device);
+	fp_test_gpu_force_error = false;
 	frame_policy_scene("frame.policy.kunit.scene", false, false);
 	flush_work(&control_work);
 	KUNIT_EXPECT_EQ(test, last_error, 0);
@@ -243,6 +279,20 @@ static void frame_test_scene_control_ownership(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, cpu_floors[0], 750000U);
 	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 2000000);
 	KUNIT_EXPECT_EQ(test, dev_pm_qos_read_value(&fp_test_gpu->dev, DEV_PM_QOS_MAX_FREQUENCY), 1083000);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 105U);
+	KUNIT_EXPECT_TRUE(test, configured);
+	/* A real mode-file write failure still tears down control safely. */
+	fp_test_gpu_force_error = true;
+	frame_policy_scene("frame.policy.kunit.missing-game.io-failure", false, true);
+	flush_work(&control_work);
+	KUNIT_EXPECT_EQ(test, last_error, -EIO);
+	KUNIT_EXPECT_STREQ(test, last_error_stage, "gpu_mode_write");
+	KUNIT_EXPECT_FALSE(test, configured);
+	KUNIT_EXPECT_FALSE(test, scene_active);
+	KUNIT_EXPECT_FALSE(test, game_active);
+	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, gpu_device, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
 }
 
 static void fp_test_connect_before_open(struct input_dev *dev)

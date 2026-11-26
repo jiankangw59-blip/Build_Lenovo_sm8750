@@ -16,6 +16,7 @@ static struct input_dev *fp_test_activity_input;
 static struct freq_qos_request fp_test_cpu_cap;
 static struct dev_pm_qos_request fp_test_gpu_cap;
 static bool fp_test_gpu_credential_check, fp_test_gpu_force_error;
+static int fp_test_gpu_read_error;
 
 static struct cpufreq_frequency_table fp_test_frequency_table[] = {
 	{ .frequency = 500000 }, { .frequency = 1000000 },
@@ -92,6 +93,7 @@ static void fp_test_reset(void)
 	last_error_stage = "none";
 	fp_test_gpu_credential_check = false;
 	fp_test_gpu_force_error = false;
+	fp_test_gpu_read_error = 0;
 	mutex_unlock(&config_lock);
 	cancel_work_sync(&control_work);
 	cancel_work_sync(&frame_work);
@@ -293,6 +295,8 @@ static ssize_t fp_test_gpu_read(struct kiocb *iocb, struct iov_iter *output)
 	char buffer[24];
 	size_t length, copied;
 
+	if (fp_test_gpu_read_error)
+		return fp_test_gpu_read_error;
 	if (fp_test_gpu_credential_check && current_cred() != iocb->ki_filp->f_cred)
 		return -EACCES;
 	length = scnprintf(buffer, sizeof(buffer), "%u\n", READ_ONCE(fp_test_gpu_percent));
@@ -375,7 +379,42 @@ static void frame_test_gpu_governor_lease(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, release_gpu_mode(), 0);
 	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 110U);
 	KUNIT_EXPECT_TRUE(test, gpu_mode_conflict);
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(true), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 110U);
+	KUNIT_EXPECT_FALSE(test, gpu_mode_owned);
+	KUNIT_EXPECT_TRUE(test, gpu_mode_conflict);
+	display_off = true;
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(false), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 110U);
+	KUNIT_EXPECT_FALSE(test, gpu_mode_owned);
+	display_off = false;
+	/* A later game whose intent already matches the foreign value can
+	 * reacquire without writing, even if a write would currently fail.
+	 */
+	WRITE_ONCE(fp_test_gpu_percent, 100);
+	fp_test_gpu_force_error = true;
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(true), 0);
+	KUNIT_EXPECT_TRUE(test, gpu_mode_owned);
+	KUNIT_EXPECT_FALSE(test, gpu_mode_conflict);
+	KUNIT_EXPECT_EQ(test, gpu_mode_original, 100U);
+	fp_test_gpu_force_error = false;
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(false), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 105U);
+	KUNIT_EXPECT_EQ(test, release_gpu_mode(), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 100U);
+	/* Only ownership conflicts yield. Real reads, including EBUSY, and
+	 * invalid hardware values keep their ordinary error semantics.
+	 */
+	gpu_mode_conflict = true;
+	fp_test_gpu_read_error = -EBUSY;
 	KUNIT_EXPECT_EQ(test, apply_gpu_mode(true), -EBUSY);
+	fp_test_gpu_read_error = -EIO;
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(true), -EIO);
+	fp_test_gpu_read_error = 0;
+	WRITE_ONCE(fp_test_gpu_percent, 201);
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(true), -ERANGE);
+	WRITE_ONCE(fp_test_gpu_percent, 0);
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(true), -ERANGE);
 }
 
 static void frame_test_gpu_file_credentials(struct kunit *test)

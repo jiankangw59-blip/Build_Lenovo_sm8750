@@ -267,8 +267,6 @@ static int apply_gpu_mode(bool game)
 		return 0;
 	if (!desired || display_off)
 		return release_gpu_mode();
-	if (gpu_mode_conflict)
-		return -EBUSY;
 	error = read_gpu_mode(&current_percent);
 	if (error)
 		return error;
@@ -277,7 +275,16 @@ static int apply_gpu_mode(bool game)
 	if (gpu_mode_owned && current_percent != gpu_mode_last) {
 		gpu_mode_conflict = true;
 		gpu_mode_owned = false;
-		return -EBUSY;
+	}
+	if (gpu_mode_conflict) {
+		/* This file lease is independent of CPU/FAS and GPU frequency QoS.
+		 * Preserve a foreign owner's value and yield only this lease. A real
+		 * later context may share ownership when its desired value matches;
+		 * never poll or write back merely to resolve an ownership conflict.
+		 */
+		if (current_percent != desired)
+			return 0;
+		gpu_mode_conflict = false;
 	}
 	if (!gpu_mode_owned)
 		gpu_mode_original = current_percent;
