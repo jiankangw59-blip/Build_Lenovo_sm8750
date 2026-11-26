@@ -10,6 +10,8 @@ typedef uint64_t u64;
 typedef uint32_t u32;
 #endif
 
+#include "frame_policy_uapi.h"
+
 /*
  * Independent integer controller. A slow frame raises the requested floor,
  * while sustained headroom lowers it. A single long pause resets history.
@@ -71,6 +73,24 @@ static inline u32 fp_control_gpu(struct fp_control *state, u64 pending_ns, u32 t
 		state->good_frames = 0;
 	}
 	return state->level;
+}
+
+static inline u32 fp_scene_ceiling(u32 effective_khz, const struct fp_cpu_config *cpu)
+{
+	u32 margin = cpu->margins[0].percent, i;
+	u64 ceiling;
+
+	for (i = 1; i < cpu->margin_count; i++) {
+		if (effective_khz < cpu->margins[i].threshold_khz)
+			break;
+		margin = cpu->margins[i].percent;
+	}
+	ceiling = (u64)effective_khz * margin / 100;
+	if (ceiling < cpu->scene.min_khz)
+		return cpu->scene.min_khz;
+	if (ceiling > cpu->scene.max_khz)
+		return cpu->scene.max_khz;
+	return ceiling;
 }
 
 #endif

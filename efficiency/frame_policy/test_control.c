@@ -12,8 +12,8 @@ int main(void)
 	u32 previous = 0, result;
 	unsigned int i;
 
-	assert(sizeof(struct fp_config) == 248);
-	assert(offsetof(struct fp_config, cpus) == 120);
+	assert(sizeof(struct fp_config) == 576);
+	assert(offsetof(struct fp_config, cpus) == 128);
 	for (i = 0; i < 200; i++) {
 		result = fp_control_frame(&state, 24000000, 60);
 		assert(result >= previous && result <= 1000);
@@ -25,6 +25,17 @@ int main(void)
 		assert(result <= 1000);
 	}
 	assert(state.level == 0);
+	{
+		struct fp_cpu_config cpu = {
+			.scene = { 960000, 2400000 }, .margin_count = 3,
+			.margins = { { 0, 200 }, { 1555200, 130 }, { 1996800, 90 } },
+		};
+		assert(fp_scene_ceiling(0, &cpu) == 960000);
+		assert(fp_scene_ceiling(1000000, &cpu) == 2000000);
+		assert(fp_scene_ceiling(1555200, &cpu) == 2021760);
+		assert(fp_scene_ceiling(1996800, &cpu) == 1797120);
+		assert(fp_scene_ceiling(4000000, &cpu) == 2400000);
+	}
 	assert(fp_control_floor(0, 384000, 3532800) == 384000);
 	assert(fp_control_floor(1000, 384000, 3532800) == 3532800);
 	assert(fp_control_frame(&state, 5000000000ULL, 165) == 0);

@@ -9,13 +9,16 @@
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
 #include <linux/miscdevice.h>
+#include <linux/math64.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
+#include <linux/perf_event.h>
 #include <linux/pm_qos.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
+#include <linux/sched/stat.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -25,6 +28,7 @@
 #include <linux/uprobes.h>
 #include <linux/vmalloc.h>
 #include <linux/workqueue.h>
+#include <trace/events/sched.h>
 #include <asm/ptrace.h>
 
 #include "frame_control.h"
@@ -58,11 +62,17 @@ struct fp_stream {
 	struct fp_control control;
 };
 
+struct fp_pmu {
+	struct perf_event *cycles;
+	u64 count, enabled, running, timestamp;
+};
+
 static DEFINE_MUTEX(config_lock);
 static DEFINE_SPINLOCK(frame_lock);
 static struct workqueue_struct *policy_wq;
 static struct fp_config configuration;
 static struct fp_cpu_request cpu_requests[FP_MAX_CPUS];
+static struct fp_pmu *pmus;
 static struct dev_pm_qos_request gpu_min, gpu_max;
 static struct device *gpu_device;
 static struct task_struct *target;
@@ -82,12 +92,16 @@ static u64 gpu_samples, gpu_unknown;
 static unsigned int selected_stream, floor_level;
 static u32 cpu_floors[FP_MAX_CPUS], gpu_floor;
 static int last_error;
+static atomic64_t next_scene_sample = ATOMIC64_INIT(0);
+static u64 scene_samples;
 
 static void apply_control(struct work_struct *work);
 static void apply_frame(struct work_struct *work);
 static void expire_frame(struct work_struct *work);
+static void apply_scene(struct work_struct *work);
 static DECLARE_WORK(control_work, apply_control);
 static DECLARE_WORK(frame_work, apply_frame);
+static DECLARE_WORK(scene_work, apply_scene);
 static DECLARE_DELAYED_WORK(expire_work, expire_frame);
 
 static bool observe_only(void)
@@ -95,10 +109,72 @@ static bool observe_only(void)
 	return configuration.flags & FP_OBSERVE;
 }
 
+static void stop_pmus(void)
+{
+	unsigned int cpu;
+
+	if (!pmus)
+		return;
+	for_each_possible_cpu(cpu) {
+		if (pmus[cpu].cycles)
+			perf_event_release_kernel(pmus[cpu].cycles);
+	}
+	kfree(pmus);
+	pmus = NULL;
+}
+
+static int start_pmus(void)
+{
+	struct perf_event_attr attr = {
+		.type = PERF_TYPE_HARDWARE,
+		.size = sizeof(attr),
+		.config = PERF_COUNT_HW_CPU_CYCLES,
+	};
+	unsigned int cpu, i;
+	int error;
+
+	pmus = kcalloc(nr_cpu_ids, sizeof(*pmus), GFP_KERNEL);
+	if (!pmus)
+		return -ENOMEM;
+	for (i = 0; i < configuration.cpu_count; i++) {
+		struct cpufreq_policy *policy = cpufreq_cpu_get(configuration.cpus[i].cpu);
+
+		if (!policy) {
+			error = -ENODEV;
+			goto fail;
+		}
+		for_each_cpu(cpu, policy->related_cpus) {
+			struct fp_pmu *sample = &pmus[cpu];
+
+			if (sample->cycles || !cpu_online(cpu))
+				continue;
+			attr.config = PERF_COUNT_HW_CPU_CYCLES;
+			sample->cycles = perf_event_create_kernel_counter(&attr, cpu, NULL, NULL, NULL);
+			if (IS_ERR(sample->cycles)) {
+				error = PTR_ERR(sample->cycles);
+				sample->cycles = NULL;
+				cpufreq_cpu_put(policy);
+				goto fail;
+			}
+			sample->count = perf_event_read_value(sample->cycles, &sample->enabled,
+							     &sample->running);
+			sample->timestamp = ktime_get_ns();
+		}
+		cpufreq_cpu_put(policy);
+	}
+	atomic64_set(&next_scene_sample, 0);
+	return 0;
+fail:
+	stop_pmus();
+	return error;
+}
+
 static void remove_requests(void)
 {
 	unsigned int i;
 
+	WRITE_ONCE(scene_active, false);
+	stop_pmus();
 	if (gpu_device) {
 		if (dev_pm_qos_request_active(&gpu_min))
 			dev_pm_qos_remove_request(&gpu_min);
@@ -126,7 +202,7 @@ static void remove_requests(void)
 
 static int add_requests(bool game)
 {
-	unsigned int i;
+	unsigned int i, j;
 	int error;
 
 	if (observe_only())
@@ -134,7 +210,8 @@ static int add_requests(bool game)
 	if (configuration.flags & FP_CPU) {
 		for (i = 0; i < configuration.cpu_count; i++) {
 			const struct fp_cpu_config *cpu = &configuration.cpus[i];
-			const struct fp_limits *limits = game ? &cpu->game : &cpu->scene;
+			const struct fp_limits *limits = game ? &cpu->game :
+				display_off ? &cpu->idle : &cpu->scene;
 			struct fp_cpu_request *request = &cpu_requests[i];
 
 			request->policy = cpufreq_cpu_get(cpu->cpu);
@@ -146,10 +223,12 @@ static int add_requests(bool game)
 				error = -ERANGE;
 				goto fail;
 			}
-			if (i && cpumask_test_cpu(cpu->cpu, cpu_requests[0].policy->related_cpus)) {
-				error = -EINVAL;
-				goto fail;
-			}
+			for (j = 0; j < i; j++)
+				if (cpumask_intersects(request->policy->related_cpus,
+						      cpu_requests[j].policy->related_cpus)) {
+					error = -EINVAL;
+					goto fail;
+				}
 			error = freq_qos_add_request(&request->policy->constraints, &request->max,
 						    FREQ_QOS_MAX, limits->max_khz);
 			if (error < 0)
@@ -162,8 +241,8 @@ static int add_requests(bool game)
 		}
 	}
 	if (configuration.flags & FP_GPU) {
-		const struct fp_limits *limits = game ?
-			&configuration.gpu_game : &configuration.gpu_scene;
+		const struct fp_limits *limits = game ? &configuration.gpu_game :
+			display_off ? &configuration.gpu_idle : &configuration.gpu_scene;
 
 		gpu_device = bus_find_device_by_name(&platform_bus_type, NULL,
 						    configuration.gpu_device);
@@ -538,14 +617,89 @@ static void apply_control(struct work_struct *work)
 	applied_generation = generation;
 	last_error = 0;
 	switches++;
-	if (!configured || !source_valid || display_off)
+	if (!configured || !source_valid)
 		goto out;
-	if (source_game) {
+	if (source_game && !display_off) {
 		last_error = start_game();
 	} else {
 		last_error = add_requests(false);
+		if (!last_error && !display_off && (configuration.flags & FP_CPU))
+			last_error = start_pmus();
+		if (last_error)
+			remove_requests();
 		scene_active = !last_error;
 	}
+out:
+	mutex_unlock(&config_lock);
+}
+
+static void scene_switch(void *data, bool preempt, struct task_struct *previous,
+			 struct task_struct *next, unsigned int prev_state)
+{
+	u64 now, due;
+
+	if (!READ_ONCE(scene_active) || READ_ONCE(display_off) || !READ_ONCE(pmus))
+		return;
+	now = ktime_get_mono_fast_ns();
+	due = atomic64_read(&next_scene_sample);
+	if (now >= due && atomic64_cmpxchg(&next_scene_sample, due, now + 80000000ULL) == due)
+		queue_work(policy_wq, &scene_work);
+}
+
+static void apply_scene(struct work_struct *work)
+{
+	u32 effective[FP_MAX_CPUS] = {};
+	unsigned int i, cpu;
+	u64 now = ktime_get_ns();
+
+	mutex_lock(&config_lock);
+	if (!scene_active || display_off || !pmus || applied_generation != generation)
+		goto out;
+	for (i = 0; i < configuration.cpu_count; i++) {
+		struct cpufreq_policy *policy = cpufreq_cpu_get(configuration.cpus[i].cpu);
+		u32 ceiling;
+		int error;
+		bool have_data = false;
+
+		if (!policy)
+			continue;
+		for_each_cpu(cpu, policy->related_cpus) {
+			struct fp_pmu *sample = &pmus[cpu];
+			u64 count, enabled, running, cycles, dt, denabled, drunning;
+
+			if (!sample->cycles)
+				continue;
+			count = perf_event_read_value(sample->cycles, &enabled, &running);
+			cycles = count - sample->count;
+			dt = now - sample->timestamp;
+			denabled = enabled - sample->enabled;
+			drunning = running - sample->running;
+			if (dt && drunning && denabled && count >= sample->count &&
+			    enabled >= sample->enabled && running >= sample->running) {
+				u64 scaled = mul_u64_u64_div_u64(cycles, denabled, drunning);
+				u64 khz = mul_u64_u64_div_u64(scaled, 1000000, dt);
+
+				effective[i] = max(effective[i],
+					(u32)min_t(u64, khz, policy->cpuinfo.max_freq));
+				have_data = true;
+			}
+			sample->count = count;
+			sample->enabled = enabled;
+			sample->running = running;
+			sample->timestamp = now;
+		}
+		cpufreq_cpu_put(policy);
+		if (!have_data || observe_only() || !cpu_requests[i].policy)
+			continue;
+		ceiling = fp_scene_ceiling(effective[i], &configuration.cpus[i]);
+		error = freq_qos_update_request(&cpu_requests[i].max, ceiling);
+		if (error < 0) {
+			last_error = error;
+			remove_requests();
+			break;
+		}
+	}
+	scene_samples++;
 out:
 	mutex_unlock(&config_lock);
 }
@@ -694,14 +848,24 @@ static int validate_configuration(const struct fp_config *config)
 	    !memchr(config->gpu_device, 0, sizeof(config->gpu_device)))
 		return -EINVAL;
 	if ((config->flags & FP_GPU) && (!config->gpu_device[0] ||
-	    !valid_limits(&config->gpu_scene) || !valid_limits(&config->gpu_game)))
+	    !valid_limits(&config->gpu_scene) || !valid_limits(&config->gpu_game) ||
+	    !valid_limits(&config->gpu_idle)))
 		return -EINVAL;
 	for (i = 0; i < config->cpu_count; i++) {
 		const struct fp_cpu_config *cpu = &config->cpus[i];
 
-		if (cpu->reserved || cpu->cpu >= nr_cpu_ids || !cpu_possible(cpu->cpu) ||
-		    !valid_limits(&cpu->scene) || !valid_limits(&cpu->game))
+		if (cpu->reserved || cpu->reserved2 || cpu->cpu >= nr_cpu_ids ||
+		    !cpu_possible(cpu->cpu) || !cpu->margin_count ||
+		    cpu->margin_count > FP_MAX_MARGINS ||
+		    !valid_limits(&cpu->scene) || !valid_limits(&cpu->game) ||
+		    !valid_limits(&cpu->idle))
 			return -EINVAL;
+		for (j = 0; j < cpu->margin_count; j++) {
+			if (!cpu->margins[j].percent || cpu->margins[j].percent > 1000 ||
+			    (!j && cpu->margins[j].threshold_khz) ||
+			    (j && cpu->margins[j].threshold_khz <= cpu->margins[j - 1].threshold_khz))
+				return -EINVAL;
+		}
 		for (j = 0; j < i; j++)
 			if (config->cpus[j].cpu == cpu->cpu)
 				return -EINVAL;
@@ -762,18 +926,18 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 	gpu_missing = gpu_unknown;
 	spin_unlock_irqrestore(&frame_lock, flags);
 	length = scnprintf(status, sizeof(status),
-		"abi=1\nconfigured=%u\nobserve=%u\nowner=%s\nforeground=%s\n"
+		"abi=2\nconfigured=%u\nobserve=%u\nowner=%s\nforeground=%s\n"
 		"game_pid=%d\nprobe=%u\ngeneration=%llu\napplied_generation=%llu\n"
 		"frames=%llu\nselected_frames=%llu\nframe_errors=%llu\nlevel=%u\n"
 		"gpu_samples=%llu\ngpu_unknown=%llu\ngpu_level=%u\ngpu_pending_ns=%llu\n"
 		"cpu0_floor_khz=%u\ncpu1_floor_khz=%u\ngpu_floor_khz=%u\n"
-		"cpu_requests=%u\ngpu_requests=%u\nswitches=%llu\nlast_error=%d\n",
+		"cpu_requests=%u\ngpu_requests=%u\nswitches=%llu\nscene_samples=%llu\nlast_error=%d\n",
 		configured, observe_only(), game_active ? "frame" : scene_active ? "scene" : "idle",
 		foreground, target ? task_pid_nr(target) : 0, registered, epoch,
 		applied_generation, frames, used, errors, level,
 		gpu_count, gpu_missing, gpu_level, gpu_average,
 		cpu_floors[0], cpu_floors[1], gpu_floor,
-		!!cpu_requests[0].policy, !!gpu_device, switches, last_error);
+		!!cpu_requests[0].policy, !!gpu_device, switches, scene_samples, last_error);
 	mutex_unlock(&config_lock);
 	return simple_read_from_buffer(data, size, offset, status, length);
 }
@@ -804,6 +968,11 @@ static int __init frame_policy_init(void)
 	if (!policy_wq)
 		return -ENOMEM;
 	error = misc_register(&policy_device);
+	if (!error) {
+		error = register_trace_sched_switch(scene_switch, NULL);
+		if (error)
+			misc_deregister(&policy_device);
+	}
 	if (error) {
 		destroy_workqueue(policy_wq);
 		policy_wq = NULL;
@@ -817,6 +986,8 @@ static void __exit frame_policy_exit(void)
 	unsigned long flags;
 
 	misc_deregister(&policy_device);
+	unregister_trace_sched_switch(scene_switch, NULL);
+	tracepoint_synchronize_unregister();
 	mutex_lock(&config_lock);
 	configured = false;
 	source_valid = false;
@@ -828,6 +999,7 @@ static void __exit frame_policy_exit(void)
 	mutex_unlock(&config_lock);
 	cancel_work_sync(&control_work);
 	cancel_work_sync(&frame_work);
+	cancel_work_sync(&scene_work);
 	cancel_delayed_work_sync(&expire_work);
 	destroy_workqueue(policy_wq);
 	policy_wq = NULL;

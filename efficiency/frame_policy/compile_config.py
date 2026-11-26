@@ -1,4 +1,4 @@
-"""Compile explicit Scene CPU/GPU limits and a verified libgui symbol into ABI 1."""
+"""Compile Scene CPU margins, GPU bounds and a verified libgui symbol into ABI 2."""
 import argparse
 import hashlib
 import json
@@ -67,24 +67,42 @@ def compile_config(profile, libgui, controls, observe):
         raise ValueError("GPU platform device name must fit in 63 ASCII bytes")
     gpu_scene = bounded_limits(controls["gpu_scene_khz"])
     gpu_game = bounded_limits(controls["gpu_game_khz"])
-    data = struct.pack("<IIIIQ16s64sIIII", 1, flags, len(cpus), fps, offset,
-                       libgui[offset:offset + 16], device, *gpu_scene, *gpu_game)
+    gpu_idle = bounded_limits(controls.get("gpu_idle_khz", gpu_scene))
+    data = struct.pack("<IIIIQ16s64sIIIIII", 2, flags, len(cpus), fps, offset,
+                       libgui[offset:offset + 16], device, *gpu_scene, *gpu_game, *gpu_idle)
     policies = []
-    for cpu, scene in zip(cpus, limiter["cpus"]):
+    idle = profile["features"]["limiter"]["limiters"]["idle"]["cpus"]
+    if len(idle) != len(cpus):
+        raise ValueError("Scene idle policy topology differs")
+    for cpu, scene, screen_off in zip(cpus, limiter["cpus"], idle):
         scene_limits = bounded_limits((scene["min"], scene["max"]))
         game_limits = bounded_limits(cpu["game_khz"])
-        data += struct.pack("<IIIIII", cpu["cpu"], 0, *scene_limits, *game_limits)
-        policies.append({"cpu": cpu["cpu"], "scene_khz": scene_limits, "game_khz": game_limits})
+        idle_limits = bounded_limits((screen_off["min"], screen_off["max"]))
+        tokens = scene["margins"].split()
+        margins = [(0, int(tokens[0]))]
+        margins.extend(tuple(map(int, item.split(":"))) for item in tokens[1:])
+        if len(margins) > 8 or any(not 0 < percent <= 1000 for _, percent in margins):
+            raise ValueError("Scene margins exceed the supported range")
+        if any(a[0] >= b[0] for a, b in zip(margins, margins[1:])):
+            raise ValueError("Scene margin thresholds must be increasing")
+        data += struct.pack("<10I", cpu["cpu"], 0, *scene_limits, *game_limits,
+                            *idle_limits, len(margins), 0)
+        for margin in margins:
+            data += struct.pack("<II", *margin)
+        data += bytes((8 - len(margins)) * 8)
+        policies.append({"cpu": cpu["cpu"], "scene_khz": scene_limits, "game_khz": game_limits,
+                         "idle_khz": idle_limits, "margins": margins})
     if len({p["cpu"] for p in policies}) != len(policies):
         raise ValueError("Repeated CPU policy")
-    data += bytes((4 - len(cpus)) * 24 + 32)
-    assert len(data) == 248
+    data += bytes((4 - len(cpus)) * 104 + 32)
+    assert len(data) == 576
     report = {
-        "abi": 1, "observe": observe, "symbol": symbol, "offset": offset,
+        "abi": 2, "observe": observe, "symbol": symbol, "offset": offset,
         "libgui_sha256": hashlib.sha256(libgui).hexdigest(), "cpus": policies,
         "gpu_scene_khz": gpu_scene, "gpu_game_khz": gpu_game,
         "scene_limiter": controls["scene_limiter"], "target_fps": fps,
-        "dynamic_scene_limiter_feedback_ported": False,
+        "dynamic_scene_limiter_feedback_ported": True,
+        "scene_feedback_backend": "event-driven native CPU cycle counters",
         "scene_gpu_mod_percent_ported": False,
         "configuration_sha256": hashlib.sha256(data).hexdigest(),
     }
