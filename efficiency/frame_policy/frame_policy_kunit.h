@@ -56,6 +56,7 @@ static void fp_test_reset(void)
 	source_valid = false;
 	spin_lock_irqsave(&frame_lock, flags);
 	generation++;
+	memset(&pending_scene, 0, sizeof(pending_scene));
 	spin_unlock_irqrestore(&frame_lock, flags);
 	stop_game();
 	remove_requests();
@@ -646,8 +647,11 @@ static void frame_test_game_caps_and_operating_points(struct kunit *test)
 static void frame_test_source_loss(struct kunit *test)
 {
 	configured = true;
-	source_valid = true;
-	scene_active = true;
+	/* Establish real published state before testing source disconnection. */
+	frame_policy_scene("frame.policy.kunit.live-source", false, false);
+	flush_work(&control_work);
+	KUNIT_ASSERT_TRUE(test, source_valid);
+	KUNIT_ASSERT_TRUE(test, scene_active);
 	frame_policy_scene(NULL, true, false);
 	flush_work(&control_work);
 	KUNIT_EXPECT_FALSE(test, scene_active);
