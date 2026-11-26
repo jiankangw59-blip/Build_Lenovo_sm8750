@@ -1,6 +1,7 @@
 """Exercise the production aux client with private fake sysfs/ioctl boundaries."""
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import tempfile
@@ -39,6 +40,13 @@ int __wrap_openat(int directory,const char *path,int flags,...) {
     (flags&O_ACCMODE)==O_RDWR){fputs("AUX_INJECTED_GPU_EACCES\n",stderr);errno=EACCES;return -1;}
  return __real_openat(directory,path,flags,mode);
 }
+/* glibc fortifies openat with non-constant flags through this separate symbol.
+ * Route it through the same boundary rather than silently bypassing injection.
+ */
+int __wrap___openat_2(int directory,const char *path,int flags) {
+ if(getenv("AUX_DENY_GPU_WRITE"))fputs("AUX_FORTIFIED_OPENAT\n",stderr);
+ return __wrap_openat(directory,path,flags);
+}
 int __wrap_fstatfs(int fd,struct statfs *out) {
  int result=__real_fstatfs(fd,out);
  if(!result)out->f_type=getenv("AUX_BAD_FS")?0:0x62656572;
@@ -66,9 +74,10 @@ class AuxClient(unittest.TestCase):
         source = cls.root / "wrapper.c"
         source.write_text(WRAPPER)
         subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O1", "-fsanitize=undefined",
+                        "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=2",
                         f'-DFRAME_POLICY_DEVICE="{cls.node}"', f'-DFRAME_GPU_ROOT="{cls.root / "gpu"}"',
                         "-I", str(HERE.parent), str(HERE.parent / "framectl.c"), str(source),
-                        "-Wl,--wrap=open,--wrap=openat,--wrap=fstatfs,--wrap=ioctl",
+                        "-Wl,--wrap=open,--wrap=openat,--wrap=__openat_2,--wrap=fstatfs,--wrap=ioctl",
                         "-o", str(cls.binary)], check=True)
 
     @classmethod
@@ -182,6 +191,16 @@ class AuxClient(unittest.TestCase):
         self.assertEqual(before,{p.name:p.read_bytes() for p in self.gpu.iterdir() if p.is_file()})
         self.assertFalse(self.result.exists())
         denied=self.call("check-aux",enabled,AUX_DENY_GPU_WRITE="1")
+        if not all(marker in denied.stderr for marker in (b"AUX_FORTIFIED_OPENAT",b"AUX_INJECTED_GPU_EACCES")):
+            try:
+                symbols=subprocess.run(["nm","-u",str(self.binary)],capture_output=True,text=True,timeout=5)
+                imports="\n".join(line for line in symbols.stdout.splitlines()
+                                  if re.search(r"\b(?:__)?(?:open|openat)(?:64)?(?:_2)?(?:@|$)",line))
+                diagnostic=imports or f"<no open imports; nm exit {symbols.returncode}>"
+            except (OSError,subprocess.TimeoutExpired) as failure:
+                diagnostic=f"<nm unavailable: {failure}>"
+            self.fail(f"GPU injection boundary missed; stderr={denied.stderr[:512]!r}; "
+                      f"actual binary nm -u open imports:\n{diagnostic}")
         self.assertIn(b"AUX_INJECTED_GPU_EACCES",denied.stderr)
         self.assertNotEqual(denied.returncode,0)
         (self.gpu/"min_pwrlevel").unlink()
