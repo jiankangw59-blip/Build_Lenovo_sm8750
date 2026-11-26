@@ -1250,8 +1250,6 @@ void frame_policy_scene(const char *package, bool off, bool game)
 
 void frame_policy_task_event(struct task_struct *task)
 {
-	if (!READ_ONCE(configured))
-		return;
 	unsigned long flags;
 	unsigned int i;
 
