@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>原生帧调度配置</title>
+<style>
+body{font:15px system-ui;margin:20px;background:#101820;color:#e5edf3}h1{font-size:23px}p{line-height:1.6;color:#aebfcd}
+pre,textarea{box-sizing:border-box;width:100%;background:#192631;color:#e5edf3;border:1px solid #3c5262;border-radius:8px;padding:12px;line-height:1.5}
+textarea{height:48vh;font:13px monospace}pre{white-space:pre-wrap;font-size:13px}button{margin:12px 8px 8px 0;padding:11px 16px;border:0;border-radius:7px;background:#79d4c7;color:#102622}
+#message[data-error=true]{color:#ffadad}button:disabled{opacity:.5}
+</style>
+<h1>原生帧调度配置</h1>
+<p>开机一次载入，调度由内核执行。目标帧率可按游戏设置，请同时开启游戏内对应帧率。</p>
+<pre id="status">正在读取…</pre>
+<textarea id="editor" spellcheck="false" aria-label="调度配置"></textarea>
+<div><button id="save">保存并应用</button><button id="refresh">刷新</button><button id="rollback">恢复上次配置</button></div>
+<p id="message"></p>
+<p>sceneMode：powersave / balance / performance。fps 为默认帧率档位，games 中的包名可覆盖默认值。gameCpuMHz 按 policy0、policy6 顺序填写最低和最高频率。relations 控制原 FAS 的跨簇频率关系。</p>
+<p>GPU 与逐游戏配置以当前内核能力为准；原 FAS 模式余量、Scene 自动切换与 core_ctl 等功能仍待接入。</p>
+<script src="protocol.js"></script><script src="app.js"></script></html>

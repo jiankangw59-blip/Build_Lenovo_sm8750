@@ -1561,12 +1561,16 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 static ssize_t policy_read(struct file *file, char __user *data, size_t size, loff_t *offset)
 {
-	char status[1536];
+	char *status;
 	unsigned long flags;
 	u64 frames, used, errors, epoch, gpu_count, gpu_missing, gpu_average;
 	unsigned int level, gpu_level, fps;
 	int length;
+	ssize_t copied;
 
+	status = kmalloc(2048, GFP_KERNEL);
+	if (!status)
+		return -ENOMEM;
 	mutex_lock(&config_lock);
 	spin_lock_irqsave(&frame_lock, flags);
 	frames = frames_seen;
@@ -1580,7 +1584,7 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 	gpu_count = gpu_samples;
 	gpu_missing = gpu_unknown;
 	spin_unlock_irqrestore(&frame_lock, flags);
-	length = scnprintf(status, sizeof(status),
+	length = scnprintf(status, 2048,
 		"abi=%u\nconfigured=%u\nobserve=%u\nowner=%s\nforeground=%s\n"
 		"features=cpu,scene_pmu,game_frames,gpu,gpu_file_credentials,game_relations,fps_per_game\n"
 		"game_pid=%d\nprobe=%u\ngeneration=%llu\napplied_generation=%llu\n"
@@ -1605,7 +1609,9 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 		game_rules ? game_rules->count : 0,
 		switches, scene_samples, last_error, last_error_stage);
 	mutex_unlock(&config_lock);
-	return simple_read_from_buffer(data, size, offset, status, length);
+	copied = simple_read_from_buffer(data, size, offset, status, length);
+	kfree(status);
+	return copied;
 }
 
 static const struct file_operations policy_ops = {

@@ -1,0 +1,46 @@
+name: Build native frame policy configuration module
+
+on:
+  push:
+    branches: [codex/ace6-frame-policy]
+    paths:
+      - .github/workflows/Build_frame_policy_config.yml
+      - efficiency/frame_policy/framectl.c
+      - efficiency/frame_policy/frame_policy_uapi.h
+      - efficiency/frame_policy/ksu/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  module:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate the actual configuration protocol and client
+        run: |
+          set -euo pipefail
+          node efficiency/frame_policy/ksu/test_protocol.js --defaults
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
+            efficiency/frame_policy/framectl.c -o "$RUNNER_TEMP/framectl-host"
+          python3 efficiency/frame_policy/ksu/test_unpack.py --controller "$RUNNER_TEMP/framectl-host"
+          for file in efficiency/frame_policy/ksu/*.sh; do sh -n "$file"; done
+      - name: Build the small Android ARM64 client and package the module
+        run: |
+          set -euo pipefail
+          ndk="$ANDROID_HOME/ndk/28.2.13676358"
+          if [ ! -d "$ndk" ]; then sdkmanager 'ndk;28.2.13676358' >/dev/null; fi
+          compiler="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
+          "$compiler" -std=c11 -O2 -Wall -Wextra -Werror \
+            efficiency/frame_policy/framectl.c -o "$RUNNER_TEMP/framectl"
+          mkdir -p "$RUNNER_TEMP/module"
+          python3 efficiency/frame_policy/ksu/package.py --controller "$RUNNER_TEMP/framectl" \
+            --output "$RUNNER_TEMP/module/frame-policy-config.zip"
+          sha256sum "$RUNNER_TEMP/module/frame-policy-config.zip" > "$RUNNER_TEMP/module/SHA256SUMS"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: frame-policy-config-module
+          path: ${{ runner.temp }}/module/
+          if-no-files-found: error

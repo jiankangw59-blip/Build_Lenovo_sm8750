@@ -1,0 +1,211 @@
+{
+  "model": "PLQ110",
+  "libguiSha256": "13451276216c9bae18dea262075972b053ef7fb812a6b0987afc085d7b32d34a",
+  "cpuIds": [
+    0,
+    6
+  ],
+  "cpuBounds": [
+    [
+      384000,
+      3532800
+    ],
+    [
+      1017600,
+      4320000
+    ]
+  ],
+  "profiles": {
+    "powersave": "BAAAAAEAAAACAAAApQAAAPBlEAAAAAAAPyMD1f17uqn8bwGp+mcCqTNkMDAwMDAucWNvbSxrZ3NsLTNkMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQCQUAeIYQABAJBQB4hhAAEAkFAHiGEABpAAAAZAAAAP////8IAAAAAAAAAAAAAAAAbQsAAHgeAADcBQAA6DUAAH8IAAC7FwADAAAAAAAAAAAAAACWAAAAAJQRAGQAAAAAPxsARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGAAAAAAAAAACHDwAA4h0AAIcPAADrQQAAhw8AAMgZAAIAAAAAAAAAAAAAAJYAAAAAdRIAZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAeAAAALQAAADwAAABaAAAAeAAAAIIAAACQAAAApQAAAA==",
+    "balance": "BAAAAAEAAAACAAAApQAAAPBlEAAAAAAAPyMD1f17uqn8bwGp+mcCqTNkMDAwMDAucWNvbSxrZ3NsLTNkMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQCQUAeIYQABAJBQB4hhAAEAkFAHiGEABpAAAAZAAAAP////8IAAAAAAAAAAAAAAAApg4AAJ8kAADcBQAA6DUAAH8IAAC7FwADAAAAAAAAAAAAAADIAAAAALsXAIIAAAAAeB4AWgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGAAAAAAAAAACHDwAANSUAAIcPAADrQQAAhw8AAMgZAAIAAAAAAAAAAAAAAMgAAAAAyBkAggAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAeAAAALQAAADwAAABaAAAAeAAAAIIAAACQAAAApQAAAA==",
+    "performance": "BAAAAAEAAAACAAAApQAAAPBlEAAAAAAAPyMD1f17uqn8bwGp+mcCqTNkMDAwMDAucWNvbSxrZ3NsLTNkMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQCQUAeIYQABAJBQB4hhAAEAkFAHiGEABpAAAAZAAAAP////8IAAAAAAAAAAAAAAAAlBEAAOUpAADcBQAA6DUAAH8IAAC7FwADAAAAAAAAAAAAAADIAAAAAD8bAIIAAAAAnyQARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGAAAAAAAAAAB1EgAAXCsAAIcPAADrQQAAhw8AAMgZAAIAAAAAAAAAAAAAAMgAAAAA4h0AggAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAeAAAALQAAADwAAABaAAAAeAAAAIIAAACQAAAApQAAAA=="
+  },
+  "relations": {
+    "fallback": {
+      "0": [
+        2,
+        1,
+        -150000,
+        -100000
+      ]
+    },
+    "rules": {
+      "com.tencent.tmgp.sgame": {
+        "0": [
+          2,
+          1,
+          0,
+          0
+        ]
+      },
+      "com.levelinfinite.sgameGlobal": {
+        "0": [
+          2,
+          1,
+          0,
+          0
+        ]
+      },
+      "com.miHoYo.Yuanshen": {
+        "1": [
+          2,
+          0,
+          -400000,
+          -350000
+        ]
+      },
+      "com.miHoYo.ys.mi": {
+        "1": [
+          2,
+          0,
+          -400000,
+          -350000
+        ]
+      },
+      "com.miHoyo.ys.bilibili": {
+        "1": [
+          2,
+          0,
+          -400000,
+          -350000
+        ]
+      },
+      "com.miHoYo.GenshinImpact": {
+        "1": [
+          2,
+          0,
+          -400000,
+          -350000
+        ]
+      },
+      "com.tencent.KiHan": {
+        "0": [
+          2,
+          1,
+          -250000,
+          -200000
+        ]
+      },
+      "com.tencent.jkchess": {
+        "0": [
+          2,
+          1,
+          -250000,
+          -200000
+        ]
+      },
+      "com.netease.dwrg": {
+        "1": [
+          2,
+          0,
+          -250000,
+          -200000
+        ]
+      },
+      "com.tencent.tmgp.pubgmhd": {
+        "0": [
+          2,
+          1,
+          -350000,
+          -300000
+        ]
+      },
+      "com.tencent.ig": {
+        "0": [
+          2,
+          1,
+          -350000,
+          -300000
+        ]
+      },
+      "com.pubg.krmobile": {
+        "0": [
+          2,
+          1,
+          -350000,
+          -300000
+        ]
+      },
+      "com.tencent.litece": {
+        "0": [
+          2,
+          1,
+          -350000,
+          -300000
+        ]
+      },
+      "com.tencent.tmgp.cf": {
+        "0": [
+          2,
+          1,
+          -200000,
+          -150000
+        ]
+      },
+      "com.hypergryph.arknights": {
+        "0": [
+          2,
+          1,
+          -150000,
+          -100000
+        ]
+      },
+      "com.kurogame.mingchao": {
+        "0": [
+          2,
+          1,
+          -150000,
+          -100000
+        ]
+      },
+      "com.miHoYo.enterprise.NGHSoD": {
+        "0": [
+          2,
+          1,
+          -150000,
+          -100000
+        ]
+      },
+      "com.miHoYo.hkrpg": {
+        "0": [
+          2,
+          1,
+          -150000,
+          -100000
+        ]
+      },
+      "com.mojang.minecraftpe": {
+        "0": [
+          2,
+          1,
+          -150000,
+          -100000
+        ]
+      },
+      "com.netease.party": {
+        "0": [
+          2,
+          1,
+          -150000,
+          -100000
+        ]
+      },
+      "com.pwrd.hotta.laohu": {
+        "0": [
+          2,
+          1,
+          -150000,
+          -100000
+        ]
+      },
+      "com.shangyoo.neon": {
+        "0": [
+          2,
+          1,
+          -150000,
+          -100000
+        ]
+      }
+    }
+  }
+}
