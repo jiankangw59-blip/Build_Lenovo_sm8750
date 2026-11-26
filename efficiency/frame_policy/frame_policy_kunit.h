@@ -388,7 +388,8 @@ static void frame_test_nonblocking_source(struct kunit *test)
 	responded = wait_for_completion_timeout(&done, HZ);
 	mutex_unlock(&config_lock);
 	KUNIT_EXPECT_NE(test, responded, 0UL);
-	wait_for_completion(&done);
+	if (!responded)
+		wait_for_completion(&done);
 	kthread_stop(thread);
 	flush_work(&control_work);
 }
