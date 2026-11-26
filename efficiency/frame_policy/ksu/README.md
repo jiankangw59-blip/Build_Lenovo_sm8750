@@ -32,7 +32,9 @@ Before activation the client uses a pidfd to request graceful exit of the
 installed `fas-eventd` supervisor and waits for its exit event. It does not
 change the legacy module's persistent pause preference. A same-boot ownership
 record permits restoration on disable/uninstall, after native control has been
-removed. An unconfirmed legacy cleanup refuses activation. Other external
+removed. The client records boot/PID/starttime durably before SIGTERM and keeps
+pending handoffs visible until both the supervisor identity and worker journals
+confirm cleanup. An unconfirmed legacy cleanup refuses activation. Other external
 frequency controllers, including Scene performance scheduling, must remain off
 during this trial.
 
@@ -48,5 +50,9 @@ python3 efficiency/frame_policy/ksu/package.py --controller /path/to/framectl \
 
 Configuration generations remain private under `/data/adb/frame-policy` and are
 retained on uninstall. Concurrent editors use an expected content hash and
-flock; a failed load does not advance the saved generation. The WebUI reads
+flock; each immutable generation records its parent, while `current` is the sole
+atomic commit point. A failed load or commit restores the previous running
+configuration; failure to restore removes native requests before attempting a
+confirmed legacy restoration. Boot reads the selected generation after acquiring
+the same lock. The WebUI reads
 status on user actions and has no refresh timer.

@@ -1,5 +1,6 @@
 #!/system/bin/sh
 set -u
+umask 077
 module=${0%/*}
 state=/data/adb/frame-policy
 controller=$module/framectl
@@ -12,15 +13,29 @@ bootstrap() {
 }
 current_dir() {
     active=$module/defaults
+    name=defaults
     if [ -f "$state/current" ]; then
         name=$(cat "$state/current")
-        case "$name" in generation.*) ;; *) return 1;; esac
+        case "$name" in defaults|generation.*) ;; *) return 1;; esac
         case "$name" in *[!a-zA-Z0-9._-]*) return 1;; esac
-        active=$state/$name
+        if [ "$name" = defaults ]; then active=$module/defaults; else active=$state/$name; fi
         [ -d "$active" ] && [ ! -L "$active" ] || return 1
     fi
 }
+settle_handoff() {
+    if [ -e "$state/legacy-stop-pending" ]; then
+        clean=$("$controller" legacy-clean) || {
+            fail '旧 FAS 交接尚未确认，保留 pending 记录；未恢复旧控制器'; return 1;
+        }
+        if [ "$clean" = legacy_was_running=1 ]; then
+            cat /proc/sys/kernel/random/boot_id > "$state/suspended-legacy-boot.tmp.$$" &&
+                mv "$state/suspended-legacy-boot.tmp.$$" "$state/suspended-legacy-boot" || return 1
+        fi
+        rm -f "$state/legacy-stop-pending" || return 1
+    fi
+}
 resume_owned_legacy() {
+    settle_handoff || return 1
     if [ -f "$state/suspended-legacy-boot" ] && [ -f "$legacy" ]; then
         if [ "$(cat "$state/suspended-legacy-boot")" = "$(cat /proc/sys/kernel/random/boot_id)" ]; then
             sh "$legacy" start || return 1
@@ -55,10 +70,8 @@ apply_dir() {
     fi
     if [ -f "$legacy" ]; then
         stopped=$("$controller" suspend-legacy) || return 1
-        if [ "$stopped" = legacy_was_running=1 ]; then
-            cat /proc/sys/kernel/random/boot_id > "$state/suspended-legacy-boot"
-        fi
     fi
+    settle_handoff || return 1
     apply_touched=1
     "$controller" disable >/dev/null || return 1
     if printf '%s\n' "$native" | grep -q 'features=.*scene_table'; then
@@ -84,6 +97,58 @@ status() {
     else
         echo 'module_note=当前内核没有原生帧调度接口'
     fi
+    if [ -f "$state/legacy-stop-pending" ]; then
+        echo 'module_handoff=pending; cleanup must be confirmed before restoration'
+        cat "$state/legacy-stop-pending"
+    fi
+}
+
+# A generation is immutable once selected. Its parent is committed with its
+# files; state/current is the sole atomic commit point for runtime and history.
+record_parent() {
+    printf '%s\n' "${2##*/}" > "$1/parent-generation"
+}
+commit_current() {
+    printf '%s\n' "${1##*/}" > "$state/current.tmp.$$" &&
+        mv "$state/current.tmp.$$" "$state/current"
+}
+recover_current() {
+    if ! apply_dir "$1"; then
+        if [ ! -c /dev/frame_policy ] || "$controller" disable >/dev/null 2>&1; then
+            rm -f "$state/applied-boot"
+            resume_owned_legacy || return 1
+        else
+            fail '当前配置恢复及内核清理均失败；未启动旧 FAS'; return 1
+        fi
+        fail '当前配置恢复失败，已停止原生控制'; return 1
+    fi
+}
+stop_owned_native() {
+    this_boot=$(cat /proc/sys/kernel/random/boot_id) || return 1
+    for marker in applied-boot suspended-legacy-boot; do
+        if [ -f "$state/$marker" ] && [ "$(cat "$state/$marker")" = "$this_boot" ]; then
+            if [ -c /dev/frame_policy ]; then "$controller" disable >/dev/null || return 1; fi
+            rm -f "$state/applied-boot"
+            return 0
+        fi
+    done
+}
+transaction() {
+    candidate=$1
+    original=$2
+    if ! apply_dir "$candidate"; then
+        touched=$apply_touched
+        if [ "$touched" = 1 ]; then recover_current "$original" || :; fi
+        fail '应用失败，未保存新配置；请检查运行状态和 pending 记录'
+        return 1
+    fi
+    if ! commit_current "$candidate"; then
+        # Rename failure must not leave a new runtime behind an old pointer.
+        recover_current "$original" || :
+        fail '配置提交失败，已尝试恢复原运行配置；未保存新配置'
+        return 1
+    fi
+    status
 }
 
 bootstrap || exit 1
@@ -97,13 +162,28 @@ case "${1:-status}" in
     seed) cat "$module/defaults/seed.json";;
     scene-seed) cat "$module/defaults/scene-seed.json";;
     status) status;;
-    boot)
-        current_dir || exit 1
-        # An untouched/dormant module never changes an existing manual session.
-        [ "$(cat "$active/enabled")" = 1 ] || exit 0
+    teardown)
         exec 7>"$state/config.lock"
         flock -x 7 7>&7 || exit 1
-        apply_dir "$active" || { [ "$apply_touched" != 1 ] || "$controller" disable >/dev/null 2>&1; resume_owned_legacy; exit 1; }
+        stop_owned_native || exit 1
+        settle_handoff || exit 1
+        # A confirmed pending handoff can establish ownership after the first check.
+        stop_owned_native || exit 1
+        resume_owned_legacy || exit 1
+        ;;
+    boot)
+        exec 7>"$state/config.lock"
+        flock -x 7 7>&7 || exit 1
+        current_dir || exit 1
+        # Re-read only after locking: a concurrent save may select a new generation.
+        enabled=$(cat "$active/enabled") || exit 1
+        [ "$enabled" = 1 ] || exit 0
+        if ! apply_dir "$active"; then
+            if [ "$apply_touched" = 1 ]; then
+                if "$controller" disable >/dev/null 2>&1; then resume_owned_legacy || :; fi
+            fi
+            exit 1
+        fi
         ;;
     save)
         exec 7>"$state/config.lock"
@@ -114,36 +194,31 @@ case "${1:-status}" in
         [ "${2:-}" = "${hash%% *}" ] || { fail '配置已被修改，请刷新后重试'; exit 1; }
         pending=$(mktemp -d "$state/generation.XXXXXXXX") || exit 1
         "$controller" unpack-settings "$pending" || exit 1
-        if ! apply_dir "$pending"; then
-            touched=$apply_touched
-            if [ "$touched" = 1 ] && [ "$old" != "$module/defaults" ]; then
-                if ! apply_dir "$old"; then "$controller" disable >/dev/null 2>&1; resume_owned_legacy; fi
-            elif [ "$touched" = 1 ]; then
-                [ "$touched" != 1 ] || "$controller" disable >/dev/null 2>&1
-                resume_owned_legacy
-            fi
-            fail '应用失败，未保存新配置；请检查运行状态'
-            exit 1
-        fi
-        if [ "$old" != "$module/defaults" ]; then printf '%s\n' "${old##*/}" > "$state/previous"; fi
-        printf '%s\n' "${pending##*/}" > "$state/current.tmp.$$"
-        mv "$state/current.tmp.$$" "$state/current" || exit 1
-        status
+        record_parent "$pending" "$old" || exit 1
+        transaction "$pending" "$old" || exit 1
         ;;
     rollback)
         exec 7>"$state/config.lock"
         flock -x 7 7>&7 || exit 1
         current_dir || exit 1
         old=$active
-        previous=$(cat "$state/previous") || exit 1
-        case "$previous" in generation.*) ;; *) exit 1;; esac
+        if [ -f "$old/parent-generation" ]; then
+            previous=$(cat "$old/parent-generation") || exit 1
+        elif [ "$old" != "$module/defaults" ] && [ -f "$state/previous" ]; then
+            previous=$(cat "$state/previous") || exit 1 # Previous module format.
+        else
+            fail '没有可恢复的上一代配置'; exit 1
+        fi
+        case "$previous" in defaults|generation.*) ;; *) exit 1;; esac
         case "$previous" in *[!a-zA-Z0-9._-]*) exit 1;; esac
-        [ -d "$state/$previous" ] && [ ! -L "$state/$previous" ] || exit 1
-        apply_dir "$state/$previous" || exit 1
-        printf '%s\n' "${old##*/}" > "$state/previous"
-        printf '%s\n' "$previous" > "$state/current.tmp.$$"
-        mv "$state/current.tmp.$$" "$state/current" || exit 1
-        status
+        if [ "$previous" = defaults ]; then source=$module/defaults; else source=$state/$previous; fi
+        [ -d "$source" ] && [ ! -L "$source" ] || exit 1
+        pending=$(mktemp -d "$state/generation.XXXXXXXX") || exit 1
+        for leaf in settings.json config.bin games.bin scene.bin enabled scene-required; do
+            cat "$source/$leaf" > "$pending/$leaf" || exit 1
+        done
+        record_parent "$pending" "$old" || exit 1
+        transaction "$pending" "$old" || exit 1
         ;;
-    *) fail 'usage: config.sh read|seed|scene-seed|status|boot|save HASH|rollback'; exit 2;;
+    *) fail 'usage: config.sh read|seed|scene-seed|status|boot|save HASH|rollback|teardown'; exit 2;;
 esac

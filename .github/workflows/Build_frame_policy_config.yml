@@ -28,6 +28,8 @@ jobs:
           cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
             efficiency/frame_policy/framectl.c -o "$RUNNER_TEMP/framectl-host"
           python3 efficiency/frame_policy/ksu/test_unpack.py --controller "$RUNNER_TEMP/framectl-host"
+          python3 efficiency/frame_policy/ksu/test_transactions.py
+          python3 efficiency/frame_policy/ksu/test_handoff.py
           for file in efficiency/frame_policy/ksu/*.sh; do sh -n "$file"; done
       - uses: actions/setup-java@v5
         with:

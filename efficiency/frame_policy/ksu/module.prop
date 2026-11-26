@@ -1,6 +1,6 @@
 id=frame_policy_config
 name=原生帧调度配置
-version=0.2.0-test
-versionCode=200
+version=0.2.1-test
+versionCode=201
 author=Codex
 description=配置原生 CPU/GPU 调度、目标帧率与游戏频率关系。首次安装默认关闭。
