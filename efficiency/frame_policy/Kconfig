@@ -1,8 +1,7 @@
 config FRAME_POLICY
 	bool "Event-driven Android frame and Scene frequency policies"
 	depends on ARM64 && UPROBES && CPU_FREQ && PM && TRACING
-	depends on PERF_EVENTS && SYNC_FILE
-	select INPUT
+	depends on PERF_EVENTS && SYNC_FILE && INPUT
 	default n
 	help
 	  Provides mutually exclusive Scene and game frame frequency requests.
