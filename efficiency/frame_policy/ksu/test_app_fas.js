@@ -7,7 +7,7 @@ const {test} = require("node:test");
 
 async function app() {
   const elements = Object.create(null), calls = [], packets = [];
-  for (const id of ["editor", "message", "status", "fasMode", "fasMarginBase", "fasOverrides", "save", "refresh", "rollback"])
+  for (const id of ["editor", "message", "status", "fasMode", "fasMarginBase", "fasOverrides", "fallbackFps", "save", "refresh", "rollback"])
     elements[id] = {value: "", textContent: "", placeholder: "", dataset: {}, listeners: {},
       addEventListener(name, callback) { this.listeners[name] = callback; }};
   const seed = JSON.parse(fs.readFileSync(path.join(__dirname, "defaults/seed.json"), "utf8"));
@@ -50,12 +50,18 @@ test("legacy settings and FAS selector remain independent from Scene", async () 
   const state = await app(), e = state.elements;
   assert.equal(e.fasMode.value, "balance");
   assert.equal(e.fasMarginBase.value, "");
+  assert.equal(e.fallbackFps.value, "");
+  const advanced = JSON.parse(e.editor.value);
+  advanced.sceneBaseMode = "balance";
+  e.editor.value = JSON.stringify(advanced);
+  e.editor.listeners.input();
   e.fasMode.value = "fast";
   e.fasMode.listeners.change();
   assert.equal(JSON.parse(e.editor.value).sceneMode, "performance");
   await e.save.onclick();
   assert.equal(state.settings().fasMode, "fast");
   assert.equal(state.settings().sceneMode, "performance");
+  assert.equal(state.settings().sceneBaseMode, "balance");
   const packet = state.packets.at(-1), fas = packet.subarray(-80);
   assert.equal(fas.readUInt32LE(4), 3);
   assert.equal(fas.readUInt32LE(8), 0);
@@ -97,6 +103,42 @@ test("browser-invalid numeric input cannot be treated as an empty default", asyn
   e.fasMarginBase.value = "";
   e.fasMarginBase.validity = {badInput: true};
   e.fasMarginBase.listeners.change();
+  await e.save.onclick();
+  assert.equal(state.packets.length, 0);
+  assert.equal(e.message.dataset.error, "true");
+});
+
+test("fallback FPS stays independent and blank restores legacy inheritance", async () => {
+  const state = await app(), e = state.elements;
+  const settings = JSON.parse(e.editor.value);
+  settings.fps = [30, 60, 90, 120, 144, 165];
+  settings.sceneMode = "powersave";
+  settings.sceneBaseMode = "balance";
+  e.editor.value = JSON.stringify(settings);
+  e.editor.listeners.input();
+  e.fallbackFps.value = "30, 45, 60, 90, 120, 130, 144, 165";
+  e.fallbackFps.listeners.change();
+  await e.save.onclick();
+  assert.deepEqual(state.settings().fps, settings.fps);
+  assert.deepEqual(state.settings().fallbackFps, [30, 45, 60, 90, 120, 130, 144, 165]);
+  assert.equal(state.settings().sceneMode, "powersave");
+  assert.equal(state.settings().sceneBaseMode, "balance");
+  let packet = state.packets.at(-1), start = 32 + packet.readUInt32LE(4);
+  assert.equal(packet.readUInt32LE(start + 140), 6);
+  assert.equal(packet.readUInt32LE(start + 592 + 32 + 192), 8);
+  e.fallbackFps.value = "";
+  e.fallbackFps.listeners.change();
+  await e.save.onclick();
+  assert.equal(state.settings().fallbackFps, undefined);
+  assert.equal(state.settings().sceneBaseMode, "balance", "Changing normal controls must preserve advanced import data");
+  packet = state.packets.at(-1); start = 32 + packet.readUInt32LE(4);
+  assert.equal(packet.readUInt32LE(start + 592 + 32 + 192), 6);
+});
+
+test("invalid fallback FPS cannot silently save previous settings", async () => {
+  const state = await app(), e = state.elements;
+  e.fallbackFps.value = "60, 60";
+  e.fallbackFps.listeners.change();
   await e.save.onclick();
   assert.equal(state.packets.length, 0);
   assert.equal(e.message.dataset.error, "true");

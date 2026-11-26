@@ -6,6 +6,8 @@ on:
     paths:
       - .github/workflows/Test_frame_policy_kunit.yml
       - efficiency/frame_policy/**
+      - '!efficiency/frame_policy/ksu/**'
+      - '!efficiency/frame_policy/framectl.c'
   workflow_dispatch:
 
 permissions:

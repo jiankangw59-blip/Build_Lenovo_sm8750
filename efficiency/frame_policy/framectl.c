@@ -560,7 +560,7 @@ int main(int argc, char **argv)
 	struct fp_fas_tuning fas;
 	FILE *input;
 	int device, gpu = -1, result = 0;
-	char status[2048];
+	char status[4096];
 	ssize_t count;
 	bool load_fas = argc == 3 && !strcmp(argv[1], "load-fas");
 	bool check_fas = argc == 3 && !strcmp(argv[1], "check-fas");

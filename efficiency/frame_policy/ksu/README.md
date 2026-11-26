@@ -19,6 +19,17 @@ Setting `games["com.tencent.tmgp.sgame"]` to `[120]`, for example,
 qualifies only a 120 FPS submission cadence for that game's frame control; it
 does not change the game's graphics options or force the application to render
 120 FPS. Arrays such as `[30,45,60,90,120,130,144,165]` allow cadence selection.
+Optional `fallbackFps` independently selects FPS grades for games without an
+explicit `games` override, including relation-only entries imported from the
+seed. Omit it to inherit `fps`, preserving older settings. This can retain a
+six-grade global configuration while fallback and individual games use eight
+grades; neither list silently overwrites the other.
+Advanced imports may also retain `sceneBaseMode`, which selects the legacy base
+configuration independently from the active `sceneMode` table. If omitted, the
+old mapping is unchanged. A differing base/table selection requires native
+Scene table support and is preserved through GUI edits; it adds no ordinary
+panel control. This retains an existing balance base plus a powersave table
+without silently rewriting either configuration.
 
 Older ABI4 kernels without the optional game table receive global FPS settings
 only; status reports this limitation. GPU activation requires the kernel's

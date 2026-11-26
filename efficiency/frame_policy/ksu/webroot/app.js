@@ -4,6 +4,7 @@ let counter = 0, savedHash = "", seed, sceneSeed, busy = false;
 const editor = document.getElementById("editor"), message = document.getElementById("message");
 const fasMode = document.getElementById("fasMode"), fasBase = document.getElementById("fasMarginBase");
 const fasOverrides = document.getElementById("fasOverrides");
+const fallbackFps = document.getElementById("fallbackFps");
 const fasDefaults = {powersave: 3, balance: 1, performance: 0.3, fast: 0};
 let fasEditError = "";
 function showFasSettings(settings) {
@@ -14,6 +15,8 @@ function showFasSettings(settings) {
   const advanced = margin && typeof margin === "object" && !Array.isArray(margin);
   fasBase.value = margin === undefined ? "" : String(advanced ? margin.base : margin);
   fasOverrides.value = JSON.stringify(advanced ? Object.fromEntries(Object.entries(margin).filter(([key]) => key !== "base")) : {}, null, 2);
+  fallbackFps.value = settings.fallbackFps === undefined ? "" :
+    (Array.isArray(settings.fallbackFps) ? settings.fallbackFps.join(", ") : String(settings.fallbackFps));
 }
 function editFasSettings() {
   try {
@@ -22,19 +25,21 @@ function editFasSettings() {
     if (!overrides || typeof overrides !== "object" || Array.isArray(overrides) || Object.hasOwn(overrides, "base"))
       throw new Error("按帧率覆盖必须是帧率到余量的对象，不包含 base");
     settings.fasMode = fasMode.value;
+    if (fallbackFps.value.trim() === "") delete settings.fallbackFps;
+    else settings.fallbackFps = fallbackFps.value.trim().split(/[,，\s]+/).filter(Boolean).map(Number);
     if (fasBase.value.trim() === "" && !Object.keys(overrides).length) delete settings.fasMarginFps;
     else {
       const base = fasBase.value.trim() === "" ? fasDefaults[settings.fasMode] : Number(fasBase.value);
       settings.fasMarginFps = Object.keys(overrides).length ? {base, ...overrides} : base;
     }
-    frameFasProtocol(settings);
+    frameSettingsProtocol(settings, seed, sceneSeed);
     fasEditError = "";
     editor.value = JSON.stringify(settings, null, 2) + "\n";
     fasBase.placeholder = String(fasDefaults[settings.fasMode]);
-    message.textContent = "FAS 配置已编辑，点击保存并应用后生效。"; message.dataset.error = "false";
+    message.textContent = "配置已编辑，点击保存并应用后生效。"; message.dataset.error = "false";
   } catch (error) { fasEditError = error.message; message.textContent = error.message; message.dataset.error = "true"; }
 }
-for (const control of [fasMode, fasBase, fasOverrides]) control.addEventListener("change", editFasSettings);
+for (const control of [fasMode, fasBase, fasOverrides, fallbackFps]) control.addEventListener("change", editFasSettings);
 editor.addEventListener("input", () => { try { showFasSettings(JSON.parse(editor.value)); fasEditError = ""; } catch (_) {} });
 function execute(command) {
   return new Promise((resolve, reject) => {

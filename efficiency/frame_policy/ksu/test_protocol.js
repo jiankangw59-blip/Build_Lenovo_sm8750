@@ -72,10 +72,45 @@ const advancedPacket = frameSettingsProtocol(advanced, seed, sceneSeed);
 assert.equal(view(advancedPacket.payload).getUint32(28, true), 1);
 assert.equal(view(advancedPacket.scene).getUint32(4, true), 1);
 
+const splitRates = settings();
+splitRates.fps = [30, 60, 90, 120, 144, 165];
+splitRates.fallbackFps = [30, 45, 60, 90, 120, 130, 144, 165];
+splitRates.games["com.tencent.tmgp.sgame"] = [60, 120];
+const splitPacket = frameSettingsProtocol(splitRates, seed, sceneSeed), splitTable = view(splitPacket.table);
+assert.equal(view(splitPacket.config).getUint32(140, true), 6);
+assert.equal(splitTable.getUint32(32 + 192, true), 8);
+assert.deepEqual(Array.from({length: 8}, (_, i) => splitTable.getUint32(32 + 196 + i * 4, true)), splitRates.fallbackFps);
+const inheritedName = Object.keys(seed.relations.rules).find(name => !Object.hasOwn(splitRates.games, name));
+assert.ok(inheritedName, "Fixture must include a relation-only game");
+const inherited = rules(splitPacket.table).get(inheritedName);
+assert.equal(inherited.data.getUint32(inherited.start + 192, true), 8);
+assert.deepEqual(Array.from({length: 8}, (_, i) => inherited.data.getUint32(inherited.start + 196 + i * 4, true)), splitRates.fallbackFps);
+const explicitSplit = rules(splitPacket.table).get("com.tencent.tmgp.sgame");
+assert.equal(explicitSplit.data.getUint32(explicitSplit.start + 192, true), 2);
+assert.equal(explicitSplit.data.getUint32(explicitSplit.start + 196, true), 60);
+assert.equal(explicitSplit.data.getUint32(explicitSplit.start + 200, true), 120);
+const inheritedLegacy = settings();
+inheritedLegacy.fps = [60, 120];
+assert.equal(view(frameSettingsProtocol(inheritedLegacy, seed, sceneSeed).table).getUint32(32 + 192, true), 2);
+const sceneSplit = settings();
+sceneSplit.sceneMode = "powersave";
+sceneSplit.sceneBaseMode = "balance";
+const separateScene = frameSettingsProtocol(sceneSplit, seed, sceneSeed);
+assert.deepEqual(separateScene.config, packet.config, "Advanced base must preserve the requested legacy configuration");
+const powersaveScene = settings(); powersaveScene.sceneMode = "powersave";
+assert.deepEqual(separateScene.scene, frameSettingsProtocol(powersaveScene, seed, sceneSeed).scene);
+assert.equal(view(separateScene.payload).getUint32(28, true), 1, "Separated Scene/base requires native table support");
+assert.equal(view(packet.payload).getUint32(28, true), 0, "Legacy defaults must not acquire a new requirement");
+
 for (const modify of [
   x => { x.fps = [60, 60]; }, x => { x.fps = [130, 45]; },
   x => { x.fps = [241]; }, x => { x.fps = []; },
+  x => { x.fallbackFps = []; }, x => { x.fallbackFps = null; },
+  x => { x.fallbackFps = ""; }, x => { x.fallbackFps = [60, 60]; },
+  x => { x.fallbackFps = [120, 60]; }, x => { x.fallbackFps = [241]; },
   x => { x.sceneMode = "missing"; }, x => { x.cpu = "yes"; },
+  x => { x.sceneBaseMode = "missing"; }, x => { x.sceneBaseMode = ""; },
+  x => { x.sceneBaseMode = null; },
   x => { x.gameCpuMHz[1][1] = 4321; }, x => { x.gameCpuMHz[0] = [2000, 1000]; },
   x => { x.games["invalid;name"] = [60]; }, x => { x.unrecognized = true; },
   x => { x.enabled = true; x.cpu = false; x.gpu = false; },

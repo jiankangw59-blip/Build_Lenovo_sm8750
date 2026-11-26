@@ -9,6 +9,9 @@ test("private settings migration preserves GPU, Scene and every existing rule", 
     const settings = JSON.parse(fs.readFileSync(path.join(__dirname, "defaults/settings.json"), "utf8"));
     settings.enabled = settings.gpu = true;
     settings.sceneMode = "powersave";
+    settings.sceneBaseMode = "balance";
+    settings.fps = [30, 60, 90, 120, 144, 165];
+    settings.fallbackFps = [30, 45, 60, 90, 120, 130, 144, 165];
     settings.sceneApps = {"com.example.private": {mode: "performance", category: "Camera"}};
     settings.games["com.example.private"] = [60, 120];
     delete settings.fasMode;
@@ -24,6 +27,9 @@ test("private settings migration preserves GPU, Scene and every existing rule", 
     assert.deepEqual(JSON.parse(payload.subarray(32, 32 + length).toString("utf8")), {...settings, fasMode: "balance"});
     assert.equal(payload.subarray(-80).readUInt32LE(4), 1);
     assert.equal(payload.subarray(-80).readUInt32LE(8), 1000);
+    const configStart = 32 + length;
+    assert.equal(payload.readUInt32LE(configStart + 140), 6);
+    assert.equal(payload.readUInt32LE(configStart + 592 + 32 + 192), 8);
     assert.equal(fs.readFileSync(input, "utf8"), original);
     assert.notEqual(run().status, 0, "Existing output must not be overwritten");
     assert.notEqual(run(input).status, 0, "Private input must not be overwritten");

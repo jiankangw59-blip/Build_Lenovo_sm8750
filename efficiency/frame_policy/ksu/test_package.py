@@ -29,7 +29,7 @@ class Package(unittest.TestCase):
                 self.assertEqual(metadata["fas_tuning_abi"], 1)
                 self.assertEqual(metadata["settings_envelope"], 2)
                 self.assertFalse(metadata["resident_process_added"])
-                self.assertIn(b"version=0.3.0-test", archive.read("module.prop"))
+                self.assertIn(b"version=0.3.1-test", archive.read("module.prop"))
                 self.assertIn(b"load-fas", archive.read("config.sh"))
 
 

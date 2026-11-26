@@ -42,7 +42,7 @@ function frameFasProtocol(settings) {
 }
 
 function frameSettingsProtocol(settings, seed, sceneSeed) {
-  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "sceneApps", "fasMode", "fasMarginFps", "fps", "games", "relations", "gameCpuMHz"];
+  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "sceneBaseMode", "sceneApps", "fasMode", "fasMarginFps", "fps", "fallbackFps", "games", "relations", "gameCpuMHz"];
   for (const key of Object.keys(settings)) if (!fields.includes(key)) throw new Error(`未知配置项：${key}`);
   for (const key of ["enabled", "cpu", "gpu", "observe", "relations"])
     if (typeof settings[key] !== "boolean") throw new Error(`${key} 必须为布尔值`);
@@ -55,6 +55,7 @@ function frameSettingsProtocol(settings, seed, sceneSeed) {
     return value;
   };
   const fps = rates(settings.fps);
+  const fallback = Object.hasOwn(settings, "fallbackFps") ? rates(settings.fallbackFps) : fps;
   if (!settings.games || typeof settings.games !== "object" || Array.isArray(settings.games))
     throw new Error("games 必须为包名到帧率列表的映射");
   const games = Object.create(null);
@@ -64,7 +65,10 @@ function frameSettingsProtocol(settings, seed, sceneSeed) {
   }
   const fromBase64 = value => Uint8Array.from(typeof atob === "function" ? atob(value) :
     Buffer.from(value, "base64").toString("binary"), c => c.charCodeAt(0));
-  const baseMode = settings.sceneMode === "fast" ? "balance" : settings.sceneMode;
+  const selectedBase = Object.hasOwn(settings, "sceneBaseMode") ? settings.sceneBaseMode : settings.sceneMode;
+  if (!["powersave", "balance", "performance", "fast"].includes(selectedBase))
+    throw new Error("sceneBaseMode 必须为合法的 Scene 模式");
+  const baseMode = selectedBase === "fast" ? "balance" : selectedBase;
   if (!Object.hasOwn(seed.profiles, baseMode)) throw new Error("场景模式不存在");
   const config = fromBase64(seed.profiles[baseMode]);
   if (config.length !== 592) throw new Error("配置模板版本不匹配");
@@ -100,7 +104,7 @@ function frameSettingsProtocol(settings, seed, sceneSeed) {
       view.setInt32(start + 136 + i * 16, rel[2], true);
       view.setInt32(start + 140 + i * 16, rel[3], true);
     }
-    const values = games[name] ?? fps;
+    const values = games[name] ?? fallback;
     view.setUint32(start + 192, values.length, true);
     values.forEach((v, i) => view.setUint32(start + 196 + i * 4, v, true));
   }
@@ -113,7 +117,8 @@ function frameSettingsProtocol(settings, seed, sceneSeed) {
   if (json.length > 49152) throw new Error("配置文件过大");
   const encodeScene = typeof module !== "undefined" ? require("./scene_protocol.js").frameSceneProtocol : frameSceneProtocol;
   const scene = encodeScene(settings, sceneSeed).table;
-  const requiresScene = settings.sceneMode === "fast" || Object.keys(settings.sceneApps ?? {}).length > 0;
+  const requiresScene = settings.sceneMode === "fast" || Object.keys(settings.sceneApps ?? {}).length > 0 ||
+    selectedBase !== settings.sceneMode;
   const payload = new Uint8Array(32 + json.length + config.length + table.length + scene.length + fas.length);
   const envelope = new DataView(payload.buffer);
   [0x46505332, json.length, config.length, table.length, scene.length, fas.length, settings.enabled ? 1 : 0,

@@ -16,6 +16,7 @@ label{display:block;margin:10px 0}input,select{background:#192631;color:#e5edf3;
 <label>模式 <select id="fasMode"><option value="powersave">省电 powersave</option><option value="balance">均衡 balance</option><option value="performance">性能 performance</option><option value="fast">快速 fast</option></select></label>
 <label>基础帧率余量（FPS，可留空使用模式默认值） <input id="fasMarginBase" type="number" min="0" max="30" step="0.001"></label>
 <label>按帧率覆盖余量（可选，例如 {"165":0.3}）<textarea id="fasOverrides" spellcheck="false" aria-label="FAS 按帧率余量覆盖">{}</textarea></label>
+<label>未单独配置游戏的帧率（留空沿用全局） <input id="fallbackFps" type="text" placeholder="30, 45, 60, 90, 120, 130, 144, 165" aria-label="未单独配置游戏的帧率"></label>
 <p>FAS 模式只作用于游戏，与下方的 Scene 模式独立。余量留空时，省电、均衡、性能、快速的基础值分别为 3、1、0.3、0 FPS。</p>
 </fieldset>
 <textarea id="editor" spellcheck="false" aria-label="调度配置"></textarea>

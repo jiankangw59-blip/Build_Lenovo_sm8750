@@ -6,6 +6,8 @@ on:
     paths:
       - .github/workflows/Test_frame_policy.yml
       - efficiency/frame_policy/**
+      - '!efficiency/frame_policy/ksu/**'
+      - '!efficiency/frame_policy/framectl.c'
       - efficiency/thread_affinity/**
   workflow_dispatch:
 
