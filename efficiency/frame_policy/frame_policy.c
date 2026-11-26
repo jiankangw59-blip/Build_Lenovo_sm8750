@@ -86,7 +86,7 @@ static struct fp_control gpu_control;
 static struct fp_stream streams[FP_STREAMS];
 static char foreground[FP_PACKAGE];
 static bool configured, source_valid, source_game, display_off, registered;
-static bool game_active, scene_active;
+static bool game_active, scene_active, scene_trace;
 static u64 generation, applied_generation, last_frame_ns, last_work_ns;
 static u64 frames_seen, frames_used, frame_errors, switches;
 static u64 gpu_samples, gpu_unknown;
@@ -100,6 +100,8 @@ static void apply_control(struct work_struct *work);
 static void apply_frame(struct work_struct *work);
 static void expire_frame(struct work_struct *work);
 static void apply_scene(struct work_struct *work);
+static void scene_switch(void *data, bool preempt, struct task_struct *previous,
+			 struct task_struct *next, unsigned int prev_state);
 static DECLARE_WORK(control_work, apply_control);
 static DECLARE_WORK(frame_work, apply_frame);
 static DECLARE_WORK(scene_work, apply_scene);
@@ -114,6 +116,11 @@ static void stop_pmus(void)
 {
 	unsigned int cpu;
 
+	if (scene_trace) {
+		unregister_trace_sched_switch(scene_switch, NULL);
+		tracepoint_synchronize_unregister();
+		scene_trace = false;
+	}
 	if (!pmus)
 		return;
 	for_each_possible_cpu(cpu) {
@@ -163,6 +170,10 @@ static int start_pmus(void)
 		}
 		cpufreq_cpu_put(policy);
 	}
+	error = register_trace_sched_switch(scene_switch, NULL);
+	if (error)
+		goto fail;
+	scene_trace = true;
 	atomic64_set(&next_scene_sample, 0);
 	return 0;
 fail:
@@ -841,6 +852,8 @@ void frame_policy_task_event(struct task_struct *task)
 	unsigned long flags;
 	unsigned int i;
 
+	if (!READ_ONCE(configured))
+		return;
 	if (READ_ONCE(task->flags) & PF_EXITING) {
 		struct dma_fence *pending_fence = NULL;
 
@@ -1005,11 +1018,6 @@ static int __init frame_policy_init(void)
 	if (!policy_wq)
 		return -ENOMEM;
 	error = misc_register(&policy_device);
-	if (!error) {
-		error = register_trace_sched_switch(scene_switch, NULL);
-		if (error)
-			misc_deregister(&policy_device);
-	}
 	if (error) {
 		destroy_workqueue(policy_wq);
 		policy_wq = NULL;
@@ -1023,8 +1031,6 @@ static void __exit frame_policy_exit(void)
 	unsigned long flags;
 
 	misc_deregister(&policy_device);
-	unregister_trace_sched_switch(scene_switch, NULL);
-	tracepoint_synchronize_unregister();
 	mutex_lock(&config_lock);
 	configured = false;
 	source_valid = false;
