@@ -1,0 +1,29 @@
+name: Build Tricky Store AUTO key recovery
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  dex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '26'
+      - name: Prepare pinned source and AUTO recovery fix
+        run: python3 ci/tricky-store/build.py "$RUNNER_TEMP/tsoss" --prepare-only
+      - name: Install Android SDK platform
+        run: sdkmanager 'platforms;android-37' 'build-tools;37.0.0'
+      - name: Compile release DEX
+        working-directory: ${{ runner.temp }}/tsoss/TrickyStoreOSS
+        run: ./gradlew :app:minifyReleaseWithR8 --no-daemon --max-workers=2 -Dorg.gradle.jvmargs='-Xmx2048m -Dfile.encoding=UTF-8' -Pkotlin.compiler.execution.strategy=in-process --stacktrace
+      - name: Package with the verified ARM64 native baseline
+        run: python3 ci/tricky-store/build.py "$RUNNER_TEMP/tsoss" | tee "$RUNNER_TEMP/tsoss/checksums.txt"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: TrickyStore-OSS-maple3-auto1-arm64
+          path: |
+            ${{ runner.temp }}/tsoss/*-arm64.zip
+            ${{ runner.temp }}/tsoss/checksums.txt
