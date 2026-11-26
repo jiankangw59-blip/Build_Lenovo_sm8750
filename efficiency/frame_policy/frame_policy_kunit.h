@@ -658,6 +658,23 @@ static void frame_test_source_loss(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, gpu_device, NULL);
 }
 
+static void frame_test_source_deduplication(struct kunit *test)
+{
+	u64 epoch;
+
+	/* Duplicate accessibility/window notifications must not restart sampling. */
+	frame_policy_scene("frame.policy.kunit.dedup", false, false);
+	epoch = generation;
+	frame_policy_scene("frame.policy.kunit.dedup", false, false);
+	KUNIT_EXPECT_EQ(test, generation, epoch);
+	frame_policy_scene("frame.policy.kunit.dedup", true, false);
+	KUNIT_EXPECT_EQ(test, generation, epoch + 1);
+	frame_policy_scene("frame.policy.kunit.dedup", false, true);
+	KUNIT_EXPECT_EQ(test, generation, epoch + 2);
+	frame_policy_scene(NULL, true, false);
+	KUNIT_EXPECT_EQ(test, generation, epoch + 3);
+}
+
 static int fp_test_source_thread(void *data)
 {
 	struct completion *done = data;
@@ -712,6 +729,7 @@ static struct kunit_case frame_policy_cases[] = {
 	KUNIT_CASE(frame_test_game_runtime_events),
 	KUNIT_CASE(frame_test_game_caps_and_operating_points),
 	KUNIT_CASE(frame_test_source_loss),
+	KUNIT_CASE(frame_test_source_deduplication),
 	KUNIT_CASE(frame_test_nonblocking_source),
 	{}
 };

@@ -843,7 +843,7 @@ static void apply_control(struct work_struct *work)
 	epoch = generation;
 	spin_unlock_irqrestore(&frame_lock, flags);
 	if (applied_generation == epoch && target &&
-	    !(READ_ONCE(target->flags) & PF_EXITING))
+	    !(READ_ONCE(target->flags) & PF_EXITING) && READ_ONCE(target->mm) == target_mm)
 		goto out;
 	/*
 	 * This is the sole transition point. All old requests are removed before
@@ -1204,10 +1204,17 @@ out:
 void frame_policy_scene(const char *package, bool off, bool game)
 {
 	unsigned long flags;
+	bool valid = package && *package;
 
 	/* The affinity/event provider must never wait for PMU or probe teardown. */
 	spin_lock_irqsave(&frame_lock, flags);
-	pending_scene.valid = package && *package;
+	if (pending_scene.valid == valid && pending_scene.game == (valid && game) &&
+	    pending_scene.off == off &&
+	    !strncmp(pending_scene.package, valid ? package : "", sizeof(pending_scene.package))) {
+		spin_unlock_irqrestore(&frame_lock, flags);
+		return;
+	}
+	pending_scene.valid = valid;
 	strscpy(pending_scene.package, pending_scene.valid ? package : "",
 		 sizeof(pending_scene.package));
 	pending_scene.game = pending_scene.valid && game;
