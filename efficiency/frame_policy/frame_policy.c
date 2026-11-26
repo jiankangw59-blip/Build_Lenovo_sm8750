@@ -41,6 +41,8 @@
 #include "frame_rate.h"
 #include "game_constraints.h"
 #include "scene_policy.h"
+#include "scene_activity_backend.h"
+#include "scene_activity_profiles.h"
 #include "frame_policy_uapi.h"
 
 #define FP_PACKAGE 128
@@ -98,6 +100,7 @@ static DEFINE_MUTEX(config_lock);
 static DEFINE_SPINLOCK(frame_lock);
 static struct workqueue_struct *policy_wq;
 static struct irq_work scene_irq_work;
+static struct irq_work activity_control_irq;
 static struct fp_config configuration;
 static struct fp_game_rules *game_rules;
 static struct fp_scene_table *scene_table;
@@ -144,6 +147,8 @@ static char foreground[FP_PACKAGE];
 static struct {
 	char package[FP_PACKAGE];
 	bool valid, game, off;
+	bool inactive;
+	u64 provider_epoch;
 } pending_scene;
 static bool configured, source_valid, source_game, display_off, registered;
 static bool game_active, scene_active, scene_trace;
@@ -161,6 +166,11 @@ static int last_error;
 static const char *last_error_stage = "none";
 static atomic64_t next_scene_sample = ATOMIC64_INIT(0);
 static u64 scene_samples;
+/* Distinct from generation: an inactive QoS update must not reset its own input epoch. */
+static u64 scene_activity_epoch, scene_inactive_events;
+#if IS_ENABLED(CONFIG_FRAME_POLICY_KUNIT_TEST)
+static bool test_activity_present_at_game_start;
+#endif
 
 static void apply_control(struct work_struct *work);
 static void apply_frame(struct work_struct *work);
@@ -944,6 +954,14 @@ static int start_game(void)
 	ssize_t count;
 	int error;
 
+#if IS_ENABLED(CONFIG_FRAME_POLICY_KUNIT_TEST)
+	{
+		struct sab_status status;
+
+		scene_activity_backend_status(&status);
+		test_activity_present_at_game_start = status.registered || status.deadline_valid;
+	}
+#endif
 	target = find_game(foreground);
 	if (IS_ERR(target)) {
 		error = PTR_ERR(target);
@@ -992,6 +1010,58 @@ fail:
 	return error;
 }
 
+static void scene_activity_changed(u64 epoch, bool inactive)
+{
+	unsigned long flags;
+	bool changed = false;
+
+	/* Backend notifier never takes config_lock: sync teardown cannot self-deadlock. */
+	spin_lock_irqsave(&frame_lock, flags);
+	if (epoch == scene_activity_epoch && READ_ONCE(configured) && pending_scene.valid &&
+	    !pending_scene.game && !pending_scene.off && pending_scene.inactive != inactive) {
+		pending_scene.inactive = inactive;
+		generation++;
+		scene_inactive_events += inactive;
+		changed = true;
+	}
+	spin_unlock_irqrestore(&frame_lock, flags);
+	if (changed)
+		irq_work_queue(&activity_control_irq);
+}
+
+static void activity_control_irq_fn(struct irq_work *work)
+{
+	/* Input event_lock -> activity_lock -> frame_lock never reaches pool locks. */
+	if (READ_ONCE(configured))
+		queue_work(policy_wq, &control_work);
+}
+
+/* config_lock held. Own ordered backend queue permits synchronous cancellation. */
+static void reconcile_scene_activity(void)
+{
+	const struct fp_scene_profile *active, *inactive;
+	struct sa_context context = {};
+	unsigned long flags;
+	bool current_source;
+
+	spin_lock_irqsave(&frame_lock, flags);
+	context.epoch = scene_activity_epoch;
+	current_source = applied_generation == generation;
+	spin_unlock_irqrestore(&frame_lock, flags);
+	context.valid = source_valid;
+	context.screen_off = display_off;
+	context.game = source_game;
+	/* These are explicit launcher package identities, never a windowed app guess. */
+	context.launcher = !strcmp(foreground, "com.android.launcher") ||
+		!strcmp(foreground, "com.oplus.launcher");
+	active = fp_scene_select(scene_table, foreground, source_game, display_off, false);
+	inactive = fp_scene_select(scene_table, foreground, source_game, display_off, true);
+	context.enabled = configured && current_source && scene_table &&
+		fp_scene_activity_needed(active, inactive, configuration.flags, configuration.cpu_count);
+	scene_activity_backend_configure(&context,
+		configuration.cpu_count ? configuration.cpus[0].cpu : 0);
+}
+
 static void apply_control(struct work_struct *work)
 {
 	typeof(pending_scene) next;
@@ -1027,10 +1097,12 @@ static void apply_control(struct work_struct *work)
 		goto out;
 	}
 	if (source_game && !display_off) {
+		/* Transfer ownership before installing even the first game request. */
+		reconcile_scene_activity();
 		last_error = start_game();
 	} else {
 		scene_profile = fp_scene_select(scene_table, foreground, source_game,
-					       display_off, false);
+					       display_off, next.inactive);
 		/* An explicit ignored profile owns no CPU, GPU or PMU resources. */
 		if (scene_table && !scene_profile) {
 			last_error = release_gpu_mode();
@@ -1059,6 +1131,7 @@ static void apply_control(struct work_struct *work)
 		configured = false;
 	}
 out:
+	reconcile_scene_activity();
 	mutex_unlock(&config_lock);
 }
 
@@ -1146,6 +1219,8 @@ static void apply_scene(struct work_struct *work)
 	}
 	scene_samples++;
 out:
+	if (!configured)
+		reconcile_scene_activity();
 	mutex_unlock(&config_lock);
 }
 
@@ -1673,6 +1748,8 @@ failed:
 	release_gpu_mode();
 	configured = false;
 out:
+	if (!configured)
+		reconcile_scene_activity();
 	mutex_unlock(&config_lock);
 }
 
@@ -1709,7 +1786,7 @@ out:
 	mutex_unlock(&config_lock);
 }
 
-void frame_policy_scene(const char *package, bool off, bool game)
+void frame_policy_scene_full(const char *package, bool off, bool game, u64 source_epoch)
 {
 	unsigned long flags;
 	bool valid = package && *package;
@@ -1719,18 +1796,32 @@ void frame_policy_scene(const char *package, bool off, bool game)
 	if (pending_scene.valid == valid && pending_scene.game == (valid && game) &&
 	    pending_scene.off == off &&
 	    !strncmp(pending_scene.package, valid ? package : "", sizeof(pending_scene.package))) {
-		spin_unlock_irqrestore(&frame_lock, flags);
-		return;
+		if (pending_scene.provider_epoch == source_epoch || (valid && game && !off)) {
+			/* Keep latest visible/windowed epoch for a later Scene transition,
+			 * but never reprobe a continuing game's unchanged owner/package.
+			 */
+			pending_scene.provider_epoch = source_epoch;
+			spin_unlock_irqrestore(&frame_lock, flags);
+			return;
+		}
 	}
 	pending_scene.valid = valid;
 	strscpy(pending_scene.package, pending_scene.valid ? package : "",
 		 sizeof(pending_scene.package));
 	pending_scene.game = pending_scene.valid && game;
 	pending_scene.off = off;
+	pending_scene.inactive = false;
+	pending_scene.provider_epoch = source_epoch;
+	scene_activity_epoch++;
 	generation++;
 	spin_unlock_irqrestore(&frame_lock, flags);
 	if (policy_wq && READ_ONCE(configured))
 		queue_work(policy_wq, &control_work);
+}
+
+void frame_policy_scene(const char *package, bool off, bool game)
+{
+	frame_policy_scene_full(package, off, game, 0);
 }
 
 void frame_policy_task_event(struct task_struct *task)
@@ -1916,6 +2007,8 @@ static int replace_game_rules(unsigned long arg)
 	last_error = 0;
 	last_error_stage = "none";
 	spin_lock_irqsave(&frame_lock, flags);
+	scene_activity_epoch++;
+	pending_scene.inactive = false;
 	generation++;
 	spin_unlock_irqrestore(&frame_lock, flags);
 	mutex_unlock(&config_lock);
@@ -1965,6 +2058,8 @@ static int replace_scene_table(unsigned long arg)
 	last_error = 0;
 	last_error_stage = "none";
 	spin_lock_irqsave(&frame_lock, flags);
+	scene_activity_epoch++;
+	pending_scene.inactive = false;
 	generation++;
 	spin_unlock_irqrestore(&frame_lock, flags);
 	mutex_unlock(&config_lock);
@@ -2065,6 +2160,8 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (!error)
 		last_error_stage = "none";
 	spin_lock_irqsave(&frame_lock, flags);
+	scene_activity_epoch++;
+	pending_scene.inactive = false;
 	generation++;
 	spin_unlock_irqrestore(&frame_lock, flags);
 	mutex_unlock(&config_lock);
@@ -2078,20 +2175,15 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	return error;
 }
 
-#define FP_STATUS_SIZE 2048
+#define FP_STATUS_SIZE 4096
 
-static ssize_t policy_read(struct file *file, char __user *data, size_t size, loff_t *offset)
+static int format_policy_status(char *status, size_t capacity, const struct sab_status *activity)
 {
-	char *status;
 	unsigned long flags;
-	u64 frames, used, errors, epoch, gpu_count, gpu_missing, gpu_average, overflows;
+	u64 frames, used, errors, epoch, gpu_count, gpu_missing, gpu_average, overflows, inactive_events;
 	unsigned int level, gpu_level, fps;
 	int length, renderer;
-	ssize_t copied;
 
-	status = kmalloc(FP_STATUS_SIZE, GFP_KERNEL);
-	if (!status)
-		return -ENOMEM;
 	mutex_lock(&config_lock);
 	spin_lock_irqsave(&frame_lock, flags);
 	frames = frames_seen;
@@ -2106,10 +2198,11 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 	gpu_missing = gpu_unknown;
 	overflows = fas_overflows;
 	renderer = render_cpu;
+	inactive_events = scene_inactive_events;
 	spin_unlock_irqrestore(&frame_lock, flags);
-	length = scnprintf(status, FP_STATUS_SIZE,
+	length = scnprintf(status, capacity,
 		"abi=%u\nconfigured=%u\nobserve=%u\nowner=%s\nforeground=%s\n"
-		"features=cpu,scene_pmu,game_frames,gpu,gpu_file_credentials,game_relations,fps_per_game,scene_table,fas_common_p,fas_tuning,fas_task_util\n"
+		"features=cpu,scene_pmu,game_frames,gpu,gpu_file_credentials,game_relations,fps_per_game,scene_table,scene_activity,fas_common_p,fas_tuning,fas_task_util\n"
 		"game_pid=%d\nprobe=%u\ngeneration=%llu\napplied_generation=%llu\n"
 		"frames=%llu\nselected_frames=%llu\nframe_errors=%llu\nlevel=%u\n"
 		"qualified_fps=%u\n"
@@ -2125,7 +2218,10 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 		"cpu_requests=%u\ngpu_requests=%u\nscene_pmu=%u\nsource_valid=%u\n"
 		"gpu_mode_owned=%u\ngpu_mode_percent=%u\ngpu_mode_conflict=%u\n"
 		"game_constraint_rules=%u\n"
-		"scene_policy_rules=%u\nscene_profile=%d\nscene_inactive_events=0\n"
+		"scene_policy_rules=%u\nscene_profile=%d\nscene_inactive_events=%llu\nscene_activity_epoch=%llu\nscene_activity_phase=%u\n"
+		"scene_input_registered=%u\nscene_input_devices=%u\nscene_input_reliable=%u\nscene_contacts=%u\n"
+		"scene_input_events=%llu\nscene_activity_transitions=%llu\nscene_load_samples=%llu\nscene_load_errors=%llu\n"
+		"scene_load_permille=%u\nscene_activity_deadline=%llu\nscene_activity_error=%d\n"
 		"switches=%llu\nscene_samples=%llu\nlast_error=%d\nlast_error_stage=%s\n",
 		FP_ABI, configured, observe_only(), game_active ? "frame" : scene_active ? "scene" : "idle",
 		foreground, target ? task_pid_nr(target) : 0, registered, epoch,
@@ -2142,8 +2238,26 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 		game_rules ? game_rules->count : 0,
 		scene_table ? scene_table->count : 0,
 		scene_profile ? (int)(scene_profile - scene_table->profiles) : -1,
+		inactive_events, activity->epoch, activity->phase,
+		activity->registered, activity->devices, activity->reliable, activity->contacts,
+		activity->inputs, activity->transitions, activity->load_samples, activity->load_errors,
+		activity->load_permille, activity->deadline_valid ? activity->deadline_ms : 0, activity->error,
 		switches, scene_samples, last_error, last_error_stage);
 	mutex_unlock(&config_lock);
+	return length;
+}
+
+static ssize_t policy_read(struct file *file, char __user *data, size_t size, loff_t *offset)
+{
+	char *status = kmalloc(FP_STATUS_SIZE, GFP_KERNEL);
+	struct sab_status activity;
+	ssize_t copied;
+	int length;
+
+	if (!status)
+		return -ENOMEM;
+	scene_activity_backend_status(&activity);
+	length = format_policy_status(status, FP_STATUS_SIZE, &activity);
 	copied = simple_read_from_buffer(data, size, offset, status, length);
 	kfree(status);
 	return copied;
@@ -2172,11 +2286,15 @@ static int __init frame_policy_init(void)
 	consumer.ret_handler = probe_return;
 	consumer.filter = probe_filter;
 	init_irq_work(&scene_irq_work, scene_irq);
+	init_irq_work(&activity_control_irq, activity_control_irq_fn);
 	policy_wq = alloc_ordered_workqueue("frame_policy", WQ_FREEZABLE | WQ_POWER_EFFICIENT);
 	if (!policy_wq)
 		return -ENOMEM;
-	error = misc_register(&policy_device);
+	error = scene_activity_backend_init(scene_activity_changed);
+	if (!error)
+		error = misc_register(&policy_device);
 	if (error) {
+		scene_activity_backend_exit();
 		destroy_workqueue(policy_wq);
 		policy_wq = NULL;
 	}
@@ -2189,6 +2307,8 @@ static void __exit frame_policy_exit(void)
 	unsigned long flags;
 
 	misc_deregister(&policy_device);
+	scene_activity_backend_exit();
+	irq_work_sync(&activity_control_irq);
 	mutex_lock(&config_lock);
 	configured = false;
 	source_valid = false;

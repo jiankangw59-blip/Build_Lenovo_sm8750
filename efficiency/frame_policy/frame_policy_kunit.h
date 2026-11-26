@@ -5,12 +5,14 @@
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/kthread.h>
+#include <linux/input.h>
 #include <linux/uio.h>
 
 static unsigned int fp_test_frequency = 1000000;
 static bool fp_test_driver_registered;
 static struct platform_device *fp_test_gpu;
 static struct cpufreq_policy *fp_test_policy;
+static struct input_dev *fp_test_activity_input;
 static struct freq_qos_request fp_test_cpu_cap;
 static struct dev_pm_qos_request fp_test_gpu_cap;
 static bool fp_test_gpu_credential_check, fp_test_gpu_force_error;
@@ -52,13 +54,18 @@ static void fp_test_reset(void)
 {
 	unsigned long flags;
 
+	scene_activity_backend_test_resume_worker();
 	mutex_lock(&config_lock);
+	scene_activity_backend_test_connect_hook(NULL);
 	configured = false;
 	source_valid = false;
 	spin_lock_irqsave(&frame_lock, flags);
 	generation++;
+	scene_activity_epoch++;
 	memset(&pending_scene, 0, sizeof(pending_scene));
 	spin_unlock_irqrestore(&frame_lock, flags);
+	reconcile_scene_activity();
+	irq_work_sync(&activity_control_irq);
 	stop_game();
 	remove_requests();
 	kvfree(game_rules);
@@ -90,6 +97,10 @@ static void fp_test_reset(void)
 	cancel_work_sync(&frame_work);
 	cancel_work_sync(&scene_work);
 	cancel_delayed_work_sync(&expire_work);
+	if (fp_test_activity_input) {
+		input_unregister_device(fp_test_activity_input);
+		fp_test_activity_input = NULL;
+	}
 	if (freq_qos_request_active(&fp_test_cpu_cap))
 		freq_qos_remove_request(&fp_test_cpu_cap);
 	if (dev_pm_qos_request_active(&fp_test_gpu_cap))
@@ -119,6 +130,13 @@ static int fp_test_init(struct kunit *test)
 static void fp_test_exit(struct kunit *test)
 {
 	fp_test_reset();
+}
+
+static void fp_test_flush_activity_controls(void)
+{
+	scene_activity_backend_test_flush();
+	irq_work_sync(&activity_control_irq);
+	flush_work(&control_work);
 }
 
 static void frame_test_sched_switch_handoff(struct kunit *test)
@@ -1099,6 +1117,17 @@ static void frame_test_source_deduplication(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, generation, epoch + 1);
 	frame_policy_scene("frame.policy.kunit.dedup", false, true);
 	KUNIT_EXPECT_EQ(test, generation, epoch + 2);
+	/* Visible/windowed-only epochs do not restart a continuing FAS owner. */
+	streams[0].history.count = 61;
+	streams[0].history.sum_ns = 508333333;
+	streams[0].surface = 123;
+	frame_policy_scene_full("frame.policy.kunit.dedup", false, true, 47);
+	flush_work(&control_work);
+	KUNIT_EXPECT_EQ(test, generation, epoch + 2);
+	KUNIT_EXPECT_EQ(test, pending_scene.provider_epoch, 47ULL);
+	KUNIT_EXPECT_EQ(test, streams[0].history.count, 61U);
+	KUNIT_EXPECT_EQ(test, streams[0].history.sum_ns, 508333333ULL);
+	KUNIT_EXPECT_EQ(test, streams[0].surface, 123ULL);
 	frame_policy_scene(NULL, true, false);
 	KUNIT_EXPECT_EQ(test, generation, epoch + 3);
 }

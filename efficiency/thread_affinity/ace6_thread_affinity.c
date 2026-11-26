@@ -100,6 +100,7 @@ static unsigned int revision;
 static unsigned int validated;
 static unsigned int lease_count;
 static unsigned int context_switches;
+static u64 scene_source_epoch;
 static unsigned int scene_captured_groups, scene_captured_threads;
 static atomic_t pending;
 static atomic_long_t dropped, changed, clamped, failed, adapted;
@@ -931,8 +932,9 @@ static int replace_scene(struct file *file, struct scene_context *next)
 	    strcmp(previous->foreground, next->foreground)))
 		stop_game();
 	scene = next;
-	frame_policy_scene(next ? next->foreground : NULL,
-			   next && next->display_off, next && next->game);
+	/* A real visible/windowed change invalidates old input/load deadlines too. */
+	frame_policy_scene_full(next ? next->foreground : NULL,
+			   next && next->display_off, next && next->game, ++scene_source_epoch);
 	WRITE_ONCE(scene_owner, next ? file : NULL);
 	context_switches++;
 	if (rescan && ret) {
@@ -1036,7 +1038,7 @@ static ssize_t control_read(struct file *file, char __user *user,
 	mutex_lock(&policy_lock);
 	len = scnprintf(stats, sizeof(stats),
 		"revision=%u\nrules=%u\nvalidated=%u\nleases=%u\npending=%d\nchanged=%ld\nclamped=%ld\nfailed=%ld\ndropped=%ld\n"
-		"profile_wire=1\nwire_lines=%u\nstored_rules=%u\nprofiles=%u\nprofile_bindings=%u\n"
+		"profile_wire=1\ncontext_windowed=1\nwire_lines=%u\nstored_rules=%u\nprofiles=%u\nprofile_bindings=%u\n"
 		"adaptive=%s\nforeground=%s\ndisplay_off=%u\ncontext_switches=%u\nadapted=%ld\n"
 		"game_tgid=%d\ngame_top=%d,%d,%d\ngame_samples=%u\ngame_finalized=%u\n"
 		"snapshot_capacity=%u\nsnapshot_growths=%u\nscene_group_capacity=%u\n"

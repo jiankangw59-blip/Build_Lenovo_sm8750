@@ -55,6 +55,15 @@ jobs:
           cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
             efficiency/thread_affinity/test_scene_activity_policy.c -o "$RUNNER_TEMP/scene-activity"
           "$RUNNER_TEMP/scene-activity"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/thread_affinity/test_scene_activity_load.c -o "$RUNNER_TEMP/scene-activity-load"
+          "$RUNNER_TEMP/scene-activity-load"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/thread_affinity/test_scene_context.c -o "$RUNNER_TEMP/scene-context"
+          "$RUNNER_TEMP/scene-context"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/frame_policy/test_scene_activity_profiles.c -o "$RUNNER_TEMP/scene-activity-profiles"
+          "$RUNNER_TEMP/scene-activity-profiles"
           cc -std=c11 -O2 -Wall -Wextra -Werror \
             efficiency/frame_policy/framectl.c -o "$RUNNER_TEMP/framectl-host"
           python3 -m py_compile efficiency/frame_policy/compile_config.py \

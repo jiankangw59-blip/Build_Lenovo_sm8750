@@ -18,8 +18,12 @@ def install(kernel, for_kunit=False):
     for name in ("Kconfig", "Makefile", "frame_policy.c", "frame_control.h", "frame_policy_uapi.h",
                  "fas_control.h", "fas_tuning_uapi.h", "fas_frames.h", "fas_task_load.h",
                  "frame_policy_kunit.h", "frame_rate.h", "game_constraints.h",
-                 "scene_policy.h", "scene_policy_uapi.h", "scene_policy_kunit.h"):
+                 "scene_policy.h", "scene_policy_uapi.h", "scene_policy_kunit.h",
+                 "scene_activity_profiles.h"):
         shutil.copyfile(HERE / name, destination / name)
+    for name in ("scene_activity_policy.h", "scene_activity_backend.h",
+                 "scene_activity_backend.c", "scene_activity_load.h"):
+        shutil.copyfile(HERE.parent / "thread_affinity" / name, destination / name)
     shutil.copyfile(HERE / "frame_policy.h", root / "frame_policy.h")
     additions = {
         kernel / "init/Kconfig": 'source "kernel/sched/frame_policy/Kconfig"',

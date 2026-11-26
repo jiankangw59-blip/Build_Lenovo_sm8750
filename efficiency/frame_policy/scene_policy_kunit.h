@@ -245,10 +245,212 @@ static void frame_test_scene_control_ownership(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, dev_pm_qos_read_value(&fp_test_gpu->dev, DEV_PM_QOS_MAX_FREQUENCY), 1083000);
 }
 
-/* Add these five entries to the existing frame_policy suite's case array. */
+static void fp_test_connect_before_open(struct input_dev *dev)
+{
+	if (dev == fp_test_activity_input) {
+		/* The handle is still closed: no handler callback can report this key. */
+		input_report_key(dev, BTN_TOUCH, 1);
+		input_sync(dev);
+	}
+}
+
+static void frame_test_scene_input_inactive_and_epoch(struct kunit *test)
+{
+	struct fp_scene_table *table;
+	struct fp_scene_profile *active, *inactive;
+	struct sab_status status;
+	u64 previous_epoch;
+	int error;
+
+	error = cpufreq_register_driver(&fp_test_cpufreq_driver);
+	KUNIT_ASSERT_EQ(test, error, 0);
+	fp_test_driver_registered = true;
+	fp_test_policy = cpufreq_cpu_get(0);
+	KUNIT_ASSERT_NOT_NULL(test, fp_test_policy);
+	fp_test_gpu = platform_device_register_simple("frame-kunit-gpu", -1, NULL, 0);
+	if (IS_ERR(fp_test_gpu)) {
+		fp_test_gpu = NULL;
+		KUNIT_FAIL(test, "Cannot register activity GPU fixture");
+		return;
+	}
+	fp_test_activity_input = input_allocate_device();
+	KUNIT_ASSERT_NOT_NULL(test, fp_test_activity_input);
+	fp_test_activity_input->name = "frame-policy-scene-touch";
+	input_set_capability(fp_test_activity_input, EV_KEY, BTN_TOUCH);
+	input_set_abs_params(fp_test_activity_input, ABS_X, 0, 100, 0, 0);
+	error = input_register_device(fp_test_activity_input);
+	if (error) {
+		input_free_device(fp_test_activity_input);
+		fp_test_activity_input = NULL;
+		KUNIT_FAIL(test, "Cannot register real kernel input fixture");
+		return;
+	}
+	table = kvzalloc(sizeof(*table), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, table);
+	scene_table = table;
+	table->abi = FP_SCENE_ABI;
+	table->cpu_count = 1;
+	table->cpu_ids[0] = 0;
+	table->profile_count = 2;
+	table->defaults[FP_SCENE_ACTIVE] = 0;
+	table->defaults[FP_SCENE_INACTIVE] = 1;
+	table->defaults[FP_SCENE_OFF] = 1;
+	active = &table->profiles[0]; inactive = &table->profiles[1];
+	active->flags = inactive->flags = FP_SCENE_ENABLED;
+	active->gpu = (struct fp_limits){330000, 1083000};
+	inactive->gpu = (struct fp_limits){300000, 600000};
+	active->cpus[0].limits = (struct fp_limits){750000, 2000000};
+	inactive->cpus[0].limits = (struct fp_limits){500000, 1000000};
+	KUNIT_ASSERT_TRUE(test, fp_scene_table_valid(table));
+	configuration.cpu_count = 1;
+	configuration.cpus[0].cpu = 0;
+	strscpy(configuration.gpu_device, "frame-kunit-gpu", sizeof(configuration.gpu_device));
+	configuration.flags = FP_CPU | FP_GPU;
+	configured = true;
+	scene_activity_backend_test_connect_hook(fp_test_connect_before_open);
+	frame_policy_scene_full("frame.policy.kunit.scene", false, false, 100);
+	flush_work(&control_work);
+	scene_activity_backend_test_flush();
+	scene_activity_backend_test_connect_hook(NULL);
+	scene_activity_backend_status(&status);
+	KUNIT_ASSERT_EQ(test, last_error, 0);
+	KUNIT_ASSERT_TRUE(test, status.registered);
+	KUNIT_ASSERT_TRUE(test, status.reliable);
+	KUNIT_EXPECT_EQ(test, status.contacts, 1U);
+	KUNIT_EXPECT_FALSE(test, status.deadline_valid);
+	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
+	KUNIT_EXPECT_EQ(test, cpu_floors[0], 750000U);
+	input_report_key(fp_test_activity_input, BTN_TOUCH, 1); input_sync(fp_test_activity_input);
+	scene_activity_backend_test_flush();
+	scene_activity_backend_status(&status);
+	KUNIT_EXPECT_EQ(test, status.contacts, 1U);
+	KUNIT_EXPECT_FALSE(test, status.deadline_valid);
+	input_report_key(fp_test_activity_input, BTN_TOUCH, 0); input_sync(fp_test_activity_input);
+	scene_activity_backend_test_flush();
+	scene_activity_backend_status(&status);
+	KUNIT_ASSERT_TRUE(test, status.deadline_valid);
+	/* Deterministic clock/load fixture; the input->IRQ->worker and QoS are real. */
+	KUNIT_ASSERT_EQ(test, scene_activity_backend_test_deadline(650), 0);
+	fp_test_flush_activity_controls();
+	KUNIT_EXPECT_PTR_EQ(test, scene_profile, inactive);
+	KUNIT_EXPECT_EQ(test, cpu_floors[0], 500000U);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 1000000);
+	KUNIT_EXPECT_EQ(test, dev_pm_qos_read_value(&fp_test_gpu->dev, DEV_PM_QOS_MAX_FREQUENCY), 600000);
+	/* Stop the backend worker: input must invalidate inactive synchronously,
+	 * even while its usual input->worker path cannot run. Keep core QoS blocked
+	 * too, proving the pending intent changes before the next core consumption.
+	 */
+	KUNIT_ASSERT_EQ(test, scene_activity_backend_test_pause_worker(), 0);
+	mutex_lock(&config_lock);
+	input_report_key(fp_test_activity_input, BTN_TOUCH, 1); input_sync(fp_test_activity_input);
+	KUNIT_EXPECT_FALSE(test, READ_ONCE(pending_scene.inactive));
+	KUNIT_EXPECT_PTR_EQ(test, scene_profile, inactive);
+	mutex_unlock(&config_lock);
+	scene_activity_backend_test_resume_worker();
+	fp_test_flush_activity_controls();
+	KUNIT_EXPECT_PTR_EQ(test, scene_profile, active);
+	KUNIT_EXPECT_EQ(test, cpu_floors[0], 750000U);
+	scene_activity_backend_status(&status); previous_epoch = status.epoch;
+	/* A windowed/visible-only source change gets a new epoch despite same fg. */
+	frame_policy_scene_full("frame.policy.kunit.scene", false, false, 101);
+	flush_work(&control_work);
+	scene_activity_changed(previous_epoch, true); fp_test_flush_activity_controls();
+	KUNIT_EXPECT_PTR_EQ(test, scene_profile, active);
+	scene_activity_backend_status(&status);
+	KUNIT_EXPECT_NE(test, status.epoch, previous_epoch);
+	/* GPU-only Scene differences must still get real input/inactive events. */
+	configuration.flags = FP_GPU;
+	inactive->cpus[0] = active->cpus[0];
+	frame_policy_scene_full("frame.policy.kunit.scene", false, false, 102);
+	flush_work(&control_work);
+	scene_activity_backend_status(&status);
+	KUNIT_EXPECT_TRUE(test, status.registered);
+	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, NULL);
+	input_report_key(fp_test_activity_input, BTN_TOUCH, 0); input_sync(fp_test_activity_input);
+	scene_activity_backend_test_flush();
+	KUNIT_ASSERT_EQ(test, scene_activity_backend_test_deadline(650), 0);
+	fp_test_flush_activity_controls();
+	KUNIT_EXPECT_EQ(test, dev_pm_qos_read_value(&fp_test_gpu->dev, DEV_PM_QOS_MAX_FREQUENCY), 600000);
+	test_activity_present_at_game_start = true;
+	frame_policy_scene_full("frame.policy.kunit.missing-game", false, true, 103);
+	flush_work(&control_work);
+	KUNIT_EXPECT_FALSE(test, test_activity_present_at_game_start);
+	scene_activity_backend_status(&status);
+	KUNIT_EXPECT_FALSE(test, status.registered);
+	KUNIT_EXPECT_FALSE(test, scene_active);
+	KUNIT_EXPECT_PTR_EQ(test, gpu_device, NULL);
+	frame_policy_scene_full("frame.policy.kunit.scene", true, false, 104);
+	flush_work(&control_work);
+	scene_activity_backend_status(&status);
+	KUNIT_EXPECT_FALSE(test, status.registered);
+	KUNIT_EXPECT_FALSE(test, status.deadline_valid);
+	/* Static policies consume zero input handles and zero deadlines. */
+	table->defaults[FP_SCENE_INACTIVE] = 0;
+	frame_policy_scene_full("frame.policy.kunit.scene", false, false, 105);
+	flush_work(&control_work);
+	scene_activity_backend_status(&status);
+	KUNIT_EXPECT_FALSE(test, status.registered);
+	KUNIT_EXPECT_FALSE(test, status.deadline_valid);
+	KUNIT_EXPECT_TRUE(test, scene_active);
+}
+
+static void frame_test_scene_status_preserves_error_tail(struct kunit *test)
+{
+	u64 *counters[] = { &generation, &applied_generation, &frames_seen, &frames_used,
+		&frame_errors, &gpu_samples, &gpu_unknown, &fas_overflows, &fas_steps,
+		&fas_late_steps, &fas_task_samples, &fas_task_sample_errors, &fas_task_rollbacks,
+		&switches, &scene_samples, &scene_inactive_events };
+	u32 *limits[] = { &cpu_floors[0], &cpu_floors[1], &gpu_floor,
+		&cpu_ceilings[0], &cpu_ceilings[1], &cpu_loads[0], &cpu_loads[1], &active_fps };
+	u32 saved_limits[ARRAY_SIZE(limits)];
+	struct sab_status activity = {
+		.epoch = U64_MAX, .inputs = U64_MAX, .transitions = U64_MAX,
+		.load_samples = U64_MAX, .load_errors = U64_MAX, .deadline_ms = U64_MAX,
+		.devices = U32_MAX, .contacts = U32_MAX, .load_permille = U32_MAX,
+		.phase = U32_MAX, .registered = true, .reliable = true,
+		.deadline_valid = true, .error = -EIO,
+	};
+	u64 *saved;
+	char *text, *old_foreground;
+	const char *old_stage = last_error_stage;
+	int old_error = last_error, length;
+	unsigned int i;
+
+	text = kunit_kzalloc(test, FP_STATUS_SIZE, GFP_KERNEL);
+	saved = kunit_kcalloc(test, ARRAY_SIZE(counters), sizeof(*saved), GFP_KERNEL);
+	old_foreground = kunit_kzalloc(test, sizeof(foreground), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, text);
+	KUNIT_ASSERT_NOT_NULL(test, saved);
+	KUNIT_ASSERT_NOT_NULL(test, old_foreground);
+	memcpy(old_foreground, foreground, sizeof(foreground));
+	memset(foreground, 'x', sizeof(foreground) - 1);
+	foreground[sizeof(foreground) - 1] = 0;
+	for (i = 0; i < ARRAY_SIZE(counters); i++) {
+		saved[i] = *counters[i]; *counters[i] = U64_MAX;
+	}
+	last_error = -EIO;
+	last_error_stage = "scene_activity_status_tail_fixture";
+	for (i = 0; i < ARRAY_SIZE(limits); i++) {
+		saved_limits[i] = *limits[i]; *limits[i] = U32_MAX;
+	}
+	length = format_policy_status(text, FP_STATUS_SIZE, &activity);
+	for (i = 0; i < ARRAY_SIZE(limits); i++) *limits[i] = saved_limits[i];
+	for (i = 0; i < ARRAY_SIZE(counters); i++) *counters[i] = saved[i];
+	memcpy(foreground, old_foreground, sizeof(foreground));
+	last_error = old_error; last_error_stage = old_stage;
+	KUNIT_EXPECT_GT(test, length, 2048);
+	KUNIT_EXPECT_LT(test, length, FP_STATUS_SIZE - 1);
+	KUNIT_EXPECT_NOT_NULL(test, strstr(text, "scene_activity_error="));
+	KUNIT_EXPECT_NOT_NULL(test, strstr(text,
+		"last_error=-5\nlast_error_stage=scene_activity_status_tail_fixture\n"));
+}
+
+/* Add these seven entries to the existing frame_policy suite's case array. */
 #define FP_SCENE_KUNIT_CASES \
 	KUNIT_CASE(frame_test_scene_selection_and_game_exclusion), \
 	KUNIT_CASE(frame_test_scene_validation_boundaries), \
 	KUNIT_CASE(frame_test_scene_static_and_dynamic_feedback), \
 	KUNIT_CASE(frame_test_scene_table_topology), \
-	KUNIT_CASE(frame_test_scene_control_ownership)
+	KUNIT_CASE(frame_test_scene_control_ownership), \
+	KUNIT_CASE(frame_test_scene_input_inactive_and_epoch), \
+	KUNIT_CASE(frame_test_scene_status_preserves_error_tail)

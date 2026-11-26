@@ -18,7 +18,7 @@
 #define DEVICE "/dev/ace6_thread_affinity"
 #define PACKAGE_SIZE 128
 #define VISIBLE_SIZE 1024
-#define NOTICE_SIZE (PACKAGE_SIZE + VISIBLE_SIZE + 32)
+#define NOTICE_SIZE (PACKAGE_SIZE + 2 * VISIBLE_SIZE + 32)
 #define SNAPSHOT_EVENTS (IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE | IN_MOVED_FROM)
 
 struct source {
@@ -26,6 +26,7 @@ struct source {
 	const char *name;
 	int watch;
 };
+static bool context_windowed_cap;
 
 static bool package_name(char dst[PACKAGE_SIZE], const char *value)
 {
@@ -47,7 +48,7 @@ static int compare_names(const void *a, const void *b)
 	return strcmp(a, b);
 }
 
-static void visible_packages(char out[VISIBLE_SIZE], char *value)
+static int visible_packages(char out[VISIBLE_SIZE], char *value)
 {
 	char names[32][PACKAGE_SIZE];
 	char *next;
@@ -56,10 +57,11 @@ static void visible_packages(char out[VISIBLE_SIZE], char *value)
 
 	out[0] = '\0';
 	for (token = strtok_r(value, ", |\t\r\n", &next);
-	     token && count < sizeof(names) / sizeof(names[0]);
+	     token;
 	     token = strtok_r(NULL, ", |\t\r\n", &next)) {
-		if (package_name(names[count], token))
-			count++;
+		if (count == sizeof(names) / sizeof(names[0])) { errno = E2BIG; return -1; }
+		if (!package_name(names[count], token)) { errno = EINVAL; return -1; }
+		count++;
 	}
 	qsort(names, count, sizeof(names[0]), compare_names);
 	for (i = 0; i < count; i++) {
@@ -67,16 +69,17 @@ static void visible_packages(char out[VISIBLE_SIZE], char *value)
 
 		if (i && !strcmp(names[i], names[i - 1]))
 			continue;
-		if (used + (used != 0) + len >= VISIBLE_SIZE)
-			break;
+		if (used + (used != 0) + len >= VISIBLE_SIZE) { errno = E2BIG; return -1; }
 		if (used)
 			out[used++] = ',';
 		memcpy(out + used, names[i], len + 1);
 		used += len;
 	}
+	return 0;
 }
 
-static void read_scene(const char *path, char foreground[PACKAGE_SIZE], char visible[VISIBLE_SIZE])
+static int read_scene(const char *path, char foreground[PACKAGE_SIZE], char visible[VISIBLE_SIZE],
+		       char windowed[VISIBLE_SIZE])
 {
 	char candidates[3][PACKAGE_SIZE] = {};
 	char line[4096];
@@ -85,8 +88,9 @@ static void read_scene(const char *path, char foreground[PACKAGE_SIZE], char vis
 
 	foreground[0] = '\0';
 	visible[0] = '\0';
+	windowed[0] = '\0';
 	if (!file)
-		return;
+		return 0;
 	while (fgets(line, sizeof(line), file)) {
 		if (!strncmp(line, "scene_foreground_pkg=", 21))
 			package_name(candidates[0], line + 21);
@@ -94,8 +98,11 @@ static void read_scene(const char *path, char foreground[PACKAGE_SIZE], char vis
 			package_name(candidates[1], line + 12);
 		else if (!strncmp(line, "active_pkg=", 11))
 			package_name(candidates[2], line + 11);
-		else if (!strncmp(line, "visible_pkgs=", 13))
-			visible_packages(visible, line + 13);
+		else if (!strncmp(line, "visible_pkgs=", 13)) {
+			if (visible_packages(visible, line + 13)) { fclose(file); return -1; }
+		} else if (!strncmp(line, "windowed_pkgs=", 14)) {
+			if (visible_packages(windowed, line + 14)) { fclose(file); return -1; }
+		}
 	}
 	if (!ferror(file)) {
 		for (i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
@@ -106,8 +113,10 @@ static void read_scene(const char *path, char foreground[PACKAGE_SIZE], char vis
 		}
 	} else {
 		visible[0] = '\0';
+		windowed[0] = '\0';
 	}
 	fclose(file);
+	return 0;
 }
 
 static bool display_off(const char *path)
@@ -129,7 +138,7 @@ static bool is_scene_game(const char *path, const char *package)
 	bool game = false;
 	FILE *file;
 
-	if (!*package || !strcmp(package, "com.oplus.games") ||
+	if (!path || !*package || !strcmp(package, "com.oplus.games") ||
 	    !strcmp(package, "com.nearme.gamecenter") || !strcmp(package, "com.xiaoji.egggame") ||
 	    !strcmp(package, "com.antutu.ABenchMark") || !strncmp(package, "com.winlator", 12))
 		return false;
@@ -150,18 +159,21 @@ static bool is_scene_game(const char *path, const char *package)
 static int submit_context(int ctl, const char *node, const char *brightness, const char *games,
 			  char last[NOTICE_SIZE])
 {
-	char foreground[PACKAGE_SIZE], visible[VISIBLE_SIZE], text[NOTICE_SIZE];
+	char foreground[PACKAGE_SIZE], visible[VISIBLE_SIZE], windowed[VISIBLE_SIZE], text[NOTICE_SIZE];
 	bool off;
 	int len;
 	ssize_t wrote;
 
-	read_scene(node, foreground, visible);
+	if (read_scene(node, foreground, visible, windowed))
+		return -1;
 	off = display_off(brightness);
 	len = snprintf(text, sizeof(text), "?context\t%s\t%s\t%d",
 		       foreground[0] ? foreground : "-", visible[0] ? visible : "-",
 		       off);
-	if (games)
+	if (games || context_windowed_cap)
 		len += snprintf(text + len, sizeof(text) - len, "\t%d", !off && is_scene_game(games, foreground));
+	if (context_windowed_cap)
+		len += snprintf(text + len, sizeof(text) - len, "\t%s", windowed[0] ? windowed : "-");
 	text[len++] = '\n';
 	text[len] = '\0';
 	if (!strcmp(text, last))
@@ -180,9 +192,17 @@ static int refresh_context(int *ctl, const char *node, const char *brightness, c
 			   char last[NOTICE_SIZE], bool *deferred)
 {
 	if (*ctl < 0) {
-		*ctl = open(DEVICE, O_WRONLY | O_CLOEXEC);
+		char features[1024];
+		ssize_t length;
+
+		*ctl = open(DEVICE, O_RDWR | O_CLOEXEC);
 		if (*ctl < 0)
 			return -1;
+		length = read(*ctl, features, sizeof(features) - 1);
+		if (length < 0)
+			return -1;
+		features[length] = '\0';
+		context_windowed_cap = strstr(features, "\ncontext_windowed=1\n") != NULL;
 	}
 	if (!submit_context(*ctl, node, brightness, games, last)) {
 		if (*deferred)

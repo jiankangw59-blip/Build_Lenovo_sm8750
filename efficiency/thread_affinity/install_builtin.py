@@ -13,6 +13,7 @@ SOURCES = (
     "ace6_thread_affinity.c",
     "affinity_rules.h",
     "adaptive_policy.h",
+    "scene_context_wire.h",
     "ace6_sched_affinity.h",
     "ace6_sched_affinity.inc",
 )
