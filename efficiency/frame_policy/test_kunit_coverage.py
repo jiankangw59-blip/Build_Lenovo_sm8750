@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from prepare_ci_evidence import verify_kunit
-from run_kunit import HERE, expected_cases, validate_cases
+from run_kunit import HERE, expected_cases, legacy_sched_switch_source, validate_cases
 
 
 class CoverageTests(unittest.TestCase):
@@ -42,6 +42,35 @@ class CoverageTests(unittest.TestCase):
                 validate_cases(changed, self.expected)
         with self.assertRaises(ValueError):
             validate_cases({}, self.expected)
+
+
+class LegacySourceTests(unittest.TestCase):
+    def setUp(self):
+        self.source = (HERE / "frame_policy.c").read_text(encoding="utf-8")
+        self.old = "\t\tirq_work_queue(&scene_irq_work);"
+        self.boundary = self.old + "\n}\n\nstatic void scene_irq("
+
+    def test_only_sched_switch_changes_with_other_irq_call_sites(self):
+        unrelated = "\nstatic void unrelated(void)\n{\n" + self.old + "\n}\n"
+        source = unrelated + self.source + unrelated
+        self.assertEqual(source.count(self.boundary), 1)
+        expected = source.replace(self.boundary,
+            "\t\tqueue_work(policy_wq, &scene_work);\n}\n\nstatic void scene_irq(", 1)
+        self.assertEqual(legacy_sched_switch_source(source), expected)
+        self.assertEqual(expected.count(self.old), source.count(self.old) - 1)
+
+    def test_missing_target_cannot_replace_another_irq_call(self):
+        source = self.source.replace(self.boundary, "\n}\n\nstatic void scene_irq(", 1)
+        self.assertIn(self.old, source)
+        with self.assertRaises(ValueError):
+            legacy_sched_switch_source(source)
+
+    def test_multiple_targets_or_functions_fail_closed(self):
+        duplicate_target = self.source.replace(self.boundary, self.old + "\n" + self.boundary, 1)
+        for source in (duplicate_target, self.source + self.source):
+            with self.subTest(duplicate_function=source == self.source + self.source):
+                with self.assertRaises(ValueError):
+                    legacy_sched_switch_source(source)
 
 
 class ArtifactIdentityTests(unittest.TestCase):

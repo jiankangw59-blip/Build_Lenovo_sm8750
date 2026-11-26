@@ -45,6 +45,22 @@ def validate_cases(result, expected):
             "all_passed": True, "case_count": len(names)}
 
 
+def legacy_sched_switch_source(text):
+    # Exclude the forward declaration and other legitimate IRQ bridges. The
+    # following function is a second boundary check for the reviewed fixture.
+    matches = list(re.finditer(
+        r"^static void scene_switch\([^;{}]*\)\n\{(?P<body>.*?)^\}\n\nstatic void scene_irq\(",
+        text, re.MULTILINE | re.DOTALL))
+    if len(matches) != 1:
+        raise ValueError("Cannot isolate the scene_switch legacy comparison")
+    start, end = matches[0].span("body")
+    body = text[start:end]
+    old = "\t\tirq_work_queue(&scene_irq_work);"
+    if body.count(old) != 1:
+        raise ValueError("Cannot isolate the one-line legacy comparison in scene_switch")
+    return text[:start] + body.replace(old, "\t\tqueue_work(policy_wq, &scene_work);", 1) + text[end:]
+
+
 def main(kernel, output, report):
     report.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=True)
@@ -88,10 +104,11 @@ def main(kernel, output, report):
 
     source = kernel / "kernel/sched/frame_policy/frame_policy.c"
     text = source.read_text(encoding="utf-8")
-    old = "\t\tirq_work_queue(&scene_irq_work);"
-    if text.count(old) != 1:
-        raise SystemExit("Cannot isolate the one-line legacy comparison")
-    source.write_text(text.replace(old, "\t\tqueue_work(policy_wq, &scene_work);"), encoding="utf-8")
+    try:
+        legacy_source = legacy_sched_switch_source(text)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    source.write_text(legacy_source, encoding="utf-8")
     if run(["build", *common, "--jobs=2"], "legacy-build"):
         raise SystemExit("Legacy comparison did not compile")
     legacy = run(["exec", *common, "--timeout=40", "--kernel_args=panic_on_warn=1",
