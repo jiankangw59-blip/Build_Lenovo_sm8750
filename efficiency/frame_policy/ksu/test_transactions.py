@@ -19,7 +19,7 @@ import unittest
 HERE = Path(__file__).resolve().parent
 
 CONTROLLER = r'''
-import json,os,pathlib,shutil,sys
+import json,os,pathlib,shutil,struct,sys
 s=pathlib.Path(os.environ['TRANSACTION_STATE'])
 def log(text):
  with (s/'calls').open('a') as f:f.write(text+'\n')
@@ -32,8 +32,13 @@ def clean():
 a=sys.argv[1];log(a)
 if a=='unpack-settings':
  source=pathlib.Path(os.environ['TRANSACTION_FIXTURES'])/sys.stdin.read().strip()
- for name in ('settings.json','config.bin','games.bin','scene.bin','enabled','scene-required'):
+ for name in ('settings.json','config.bin','games.bin','scene.bin','fas.bin','enabled','scene-required'):
   shutil.copyfile(source/name,pathlib.Path(sys.argv[2])/name)
+elif a=='check-fas':
+ value=pathlib.Path(sys.argv[2]).read_bytes()
+ if 'fas_tuning' not in (s/'features').read_text().strip().split(',') or len(value)!=80:sys.exit(1)
+ abi,mode,base,count=struct.unpack_from('<4I',value)
+ if abi!=1 or mode>=4 or base>30000 or count>8:sys.exit(1)
 elif a=='suspend-legacy':
  if (s/'legacy-running').exists():
   boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
@@ -44,12 +49,15 @@ elif a=='legacy-clean':sys.exit(clean())
 elif a=='disable':
  if (s/'disable-blocked').exists():sys.exit(1)
  (s/'runtime').write_text('none')
-elif a in ('load','load-scene','load-rules'):
+elif a in ('load','load-scene','load-rules','load-fas'):
  identity=json.loads((pathlib.Path(sys.argv[2]).parent/'settings.json').read_text())['identity']
  log(a+':'+identity)
+ if a=='load-fas' and (s/('fail-fas-'+identity)).exists():
+  (s/('fail-fas-'+identity)).unlink();sys.exit(1)
  if a=='load' and (s/('fail-load-'+identity)).exists():
   (s/('fail-load-'+identity)).unlink();sys.exit(1)
  if a=='load':(s/'runtime').write_text(identity)
+ if a=='load-fas':(s/'runtime-fas').write_bytes(pathlib.Path(sys.argv[2]).read_bytes())
 else:sys.exit(2)
 status()
 '''
@@ -100,7 +108,7 @@ import os,pathlib,sys
 (pathlib.Path(os.environ['TRANSACTION_STATE'])/'lock-requested').touch()
 os.execv({shutil.which('flock')!r},['flock']+sys.argv[1:])
 """)
-        (self.state / "features").write_text("cpu,gpu_file_credentials,game_relations,fps_per_game,scene_table")
+        (self.state / "features").write_text("cpu,gpu_file_credentials,game_relations,fps_per_game,scene_table,fas_tuning")
         (self.state / "runtime").write_text("none")
         self.generation("defaults", enabled=False, destination=self.module / "defaults")
         (self.module / "defaults/libgui.sha256").write_text(hashlib.sha256(b"test libgui").hexdigest() + "\n")
@@ -125,6 +133,8 @@ os.execv({shutil.which('flock')!r},['flock']+sys.argv[1:])
         (target / "config.bin").write_bytes(struct.pack("<2I", 4, 1) + bytes(584))
         (target / "games.bin").write_bytes(b"rules")
         (target / "scene.bin").write_bytes(b"scene")
+        mode = {"A": 0, "B": 2}.get(identity, 1)
+        (target / "fas.bin").write_bytes(struct.pack("<4I", 1, mode, [3000, 1000, 300, 0][mode], 0) + bytes(64))
         return target
 
     def select(self, identity, parent=None):
@@ -134,6 +144,7 @@ os.execv({shutil.which('flock')!r},['flock']+sys.argv[1:])
             (target / "parent-generation").write_text(parent + "\n")
         (self.state / "current").write_text(target.name + "\n")
         (self.state / "runtime").write_text(identity)
+        (self.state / "runtime-fas").write_bytes((target / "fas.bin").read_bytes())
         return target
 
     def current(self):
@@ -168,6 +179,7 @@ os.execv({shutil.which('flock')!r},['flock']+sys.argv[1:])
         self.assertEqual((self.state / "runtime").read_text(), "A")
         self.assertFalse((self.state / "legacy-running").exists())
         self.assertEqual((self.state / "paused").read_text(), "keep user preference")
+        self.assertEqual((self.state / "runtime-fas").read_bytes(), (self.fixtures / "A/fas.bin").read_bytes())
 
     def test_failed_rollback_restores_current_runtime_and_pointer(self):
         self.select("B")
@@ -177,6 +189,7 @@ os.execv({shutil.which('flock')!r},['flock']+sys.argv[1:])
         self.assertEqual(self.current(), original)
         self.assertEqual((self.state / "runtime").read_text(), "A")
         self.assertEqual((original / "parent-generation").read_text().strip(), "generation.B")
+        self.assertEqual((self.state / "runtime-fas").read_bytes(), (original / "fas.bin").read_bytes())
 
     def test_failed_pointer_commit_restores_runtime_without_rewriting_history(self):
         original = self.select("A", parent="defaults")
@@ -225,6 +238,51 @@ os.execv({shutil.which('flock')!r},['flock']+sys.argv[1:])
         calls = (self.state / "calls").read_text().splitlines()
         self.assertNotIn("disable", calls)
         self.assertNotIn("suspend-legacy", calls)
+
+    def test_missing_fas_capability_is_rejected_before_stopping_legacy_or_native(self):
+        original = self.select("A")
+        (self.state / "legacy-running").touch()
+        (self.state / "features").write_text("cpu,gpu_file_credentials,game_relations,fps_per_game,scene_table,fas_tuning_pending")
+        self.save("B", success=False)
+        self.assertEqual(self.current(), original)
+        self.assertEqual((self.state / "runtime").read_text(), "A")
+        self.assertTrue((self.state / "legacy-running").exists())
+        calls = (self.state / "calls").read_text().splitlines()
+        self.assertIn("check-fas", calls)
+        self.assertNotIn("disable", calls)
+        self.assertNotIn("suspend-legacy", calls)
+
+    def test_invalid_fas_blob_is_rejected_without_controller_mutation(self):
+        original = self.select("A")
+        (self.fixtures / "B/fas.bin").write_bytes(b"")
+        self.save("B", success=False)
+        self.assertEqual(self.current(), original)
+        self.assertEqual((self.state / "runtime-fas").read_bytes(), (original / "fas.bin").read_bytes())
+        calls = (self.state / "calls").read_text().splitlines()
+        self.assertNotIn("disable", calls)
+        self.assertNotIn("suspend-legacy", calls)
+
+    def test_fas_ioctl_failure_restores_entire_previous_generation(self):
+        original = self.select("A")
+        (self.state / "fail-fas-B").touch()
+        self.save("B", success=False)
+        self.assertEqual(self.current(), original)
+        self.assertEqual((self.state / "runtime").read_text(), "A")
+        self.assertEqual((self.state / "runtime-fas").read_bytes(), (original / "fas.bin").read_bytes())
+        calls = (self.state / "calls").read_text().splitlines()
+        self.assertLess(calls.index("check-fas"), calls.index("suspend-legacy"))
+        self.assertIn("load-fas:B", calls)
+        self.assertIn("load-fas:A", calls)
+
+    def test_old_generation_without_fas_uses_balance_without_rewriting_source(self):
+        source = self.select("B")
+        (source / "fas.bin").unlink()
+        original = self.select("A", parent="generation.B")
+        self.run_command("rollback")
+        self.assertEqual((self.state / "runtime-fas").read_bytes(), (self.module / "defaults/fas.bin").read_bytes())
+        self.assertEqual((self.current() / "fas.bin").read_bytes(), (self.module / "defaults/fas.bin").read_bytes())
+        self.assertFalse((source / "fas.bin").exists())
+        self.assertEqual((self.current() / "parent-generation").read_text().strip(), original.name)
 
     def test_teardown_stops_native_and_waits_for_confirmed_handoff_before_restore(self):
         self.select("A")

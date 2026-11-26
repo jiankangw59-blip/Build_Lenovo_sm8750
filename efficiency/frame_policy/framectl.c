@@ -16,6 +16,56 @@
 
 #include "frame_policy_uapi.h"
 #include "scene_policy_uapi.h"
+#include "fas_control.h"
+
+#ifndef FRAME_POLICY_DEVICE
+#define FRAME_POLICY_DEVICE "/dev/frame_policy"
+#endif
+_Static_assert(sizeof(struct fp_fas_tuning) == 80, "FAS tuning ABI must be 80 bytes");
+
+static int read_fas_tuning(const char *path, struct fp_fas_tuning *tuning)
+{
+	FILE *input = fopen(path, "rb");
+	int valid = input && fread(tuning, sizeof(*tuning), 1, input) == 1 &&
+		fgetc(input) == EOF && !ferror(input) && fp_fas_tuning_valid(tuning);
+
+	if (input)
+		fclose(input);
+	if (!valid) {
+		fprintf(stderr, "FAS tuning must be a valid, exact 80-byte ABI1 configuration\n");
+		return -1;
+	}
+	return 0;
+}
+
+/* Read-only capability gate; never probe by changing a live configuration. */
+static int require_fas_tuning(void)
+{
+	FILE *input = fopen(FRAME_POLICY_DEVICE, "re");
+	char line[2048];
+	int found = 0;
+
+	if (!input) {
+		perror("read frame policy capabilities");
+		return -1;
+	}
+	while (fgets(line, sizeof(line), input)) {
+		char *save, *token;
+
+		if (strncmp(line, "features=", 9))
+			continue;
+		for (token = strtok_r(line + 9, ",\r\n", &save); token;
+		     token = strtok_r(NULL, ",\r\n", &save))
+			if (!strcmp(token, "fas_tuning"))
+				found = 1;
+	}
+	if (ferror(input))
+		found = 0;
+	fclose(input);
+	if (!found)
+		fprintf(stderr, "Current kernel does not advertise FAS tuning capability\n");
+	return found ? 0 : -1;
+}
 
 /* kernfs requires a write mode bit even for a privileged open. Scene can lock it. */
 static int open_gpu_control(void)
@@ -97,20 +147,34 @@ static int write_setting_file(int directory, const char *name, const void *bytes
 
 static int unpack_settings(const char *path)
 {
-	__u32 header[7], rules_abi, scene_abi;
+	__u32 header[8] = {0}, rules_abi, scene_abi, enabled, scene_required;
 	unsigned char *payload;
 	struct fp_config config;
-	size_t length;
+	struct fp_fas_tuning fas = { .abi = FP_FAS_ABI, .mode = 1, .margin_base_mfps = 1000 };
+	size_t length, words, fas_size;
 	int directory, result;
 
-	if (fread(header, sizeof(header), 1, stdin) != 1 || header[0] != 0x46505331U ||
+	if (fread(header, sizeof(header[0]), 1, stdin) != 1 ||
+	    (header[0] != 0x46505331U && header[0] != 0x46505332U)) {
+		fprintf(stderr, "Invalid settings envelope version\n");
+		return 1;
+	}
+	words = header[0] == 0x46505331U ? 7 : 8;
+	if (fread(header + 1, sizeof(header[0]), words - 1, stdin) != words - 1) {
+		fprintf(stderr, "Truncated settings envelope\n");
+		return 1;
+	}
+	fas_size = words == 8 ? header[5] : 0;
+	enabled = header[words - 2];
+	scene_required = header[words - 1];
+	if (
 	    !header[1] || header[1] > 49152 || header[2] != sizeof(config) ||
 	    header[3] != sizeof(struct fp_game_rules) || header[4] != sizeof(struct fp_scene_table) ||
-	    header[5] > 1 || header[6] > 1) {
+	    (words == 8 && fas_size != sizeof(fas)) || enabled > 1 || scene_required > 1) {
 		fprintf(stderr, "Invalid settings envelope\n");
 		return 1;
 	}
-	length = header[1] + header[2] + header[3] + header[4];
+	length = header[1] + header[2] + header[3] + header[4] + fas_size;
 	payload = malloc(length);
 	if (!payload)
 		return 1;
@@ -123,7 +187,10 @@ static int unpack_settings(const char *path)
 	/* JSON need not end at an aligned address. */
 	memcpy(&rules_abi, payload + header[1] + header[2], sizeof(rules_abi));
 	memcpy(&scene_abi, payload + header[1] + header[2] + header[3], sizeof(scene_abi));
-	if (config.abi != FP_ABI || rules_abi != FP_GAME_RULES_ABI || scene_abi != FP_SCENE_ABI) {
+	if (fas_size)
+		memcpy(&fas, payload + header[1] + header[2] + header[3] + header[4], sizeof(fas));
+	if (config.abi != FP_ABI || rules_abi != FP_GAME_RULES_ABI || scene_abi != FP_SCENE_ABI ||
+	    !fp_fas_tuning_valid(&fas)) {
 		free(payload);
 		return 1;
 	}
@@ -136,8 +203,9 @@ static int unpack_settings(const char *path)
 		write_setting_file(directory, "config.bin", payload + header[1], header[2]) ||
 		write_setting_file(directory, "games.bin", payload + header[1] + header[2], header[3]) ||
 		write_setting_file(directory, "scene.bin", payload + header[1] + header[2] + header[3], header[4]) ||
-		write_setting_file(directory, "enabled", header[5] ? "1\n" : "0\n", 2) ||
-		write_setting_file(directory, "scene-required", header[6] ? "1\n" : "0\n", 2);
+		write_setting_file(directory, "fas.bin", &fas, sizeof(fas)) ||
+		write_setting_file(directory, "enabled", enabled ? "1\n" : "0\n", 2) ||
+		write_setting_file(directory, "scene-required", scene_required ? "1\n" : "0\n", 2);
 	close(directory);
 	free(payload);
 	return result ? 1 : 0;
@@ -489,10 +557,13 @@ static int suspend_legacy(void)
 int main(int argc, char **argv)
 {
 	struct fp_config config;
+	struct fp_fas_tuning fas;
 	FILE *input;
 	int device, gpu = -1, result = 0;
 	char status[2048];
 	ssize_t count;
+	bool load_fas = argc == 3 && !strcmp(argv[1], "load-fas");
+	bool check_fas = argc == 3 && !strcmp(argv[1], "check-fas");
 
 	if (argc == 3 && !strcmp(argv[1], "unpack-settings"))
 		return unpack_settings(argv[2]);
@@ -500,19 +571,26 @@ int main(int argc, char **argv)
 		return suspend_legacy();
 	if (argc == 2 && !strcmp(argv[1], "legacy-clean"))
 		return legacy_clean();
+	if ((load_fas || check_fas) &&
+	    (read_fas_tuning(argv[2], &fas) || require_fas_tuning()))
+		return 1;
+	if (check_fas)
+		return 0;
 	if (argc < 2 || argc > 3 ||
 	    (strcmp(argv[1], "status") && strcmp(argv[1], "disable") &&
 	     !(argc == 3 && (!strcmp(argv[1], "load") || !strcmp(argv[1], "load-rules") ||
-			    !strcmp(argv[1], "load-scene"))))) {
-		fprintf(stderr, "Usage: %s status | disable | load CONFIG.bin | load-rules RULES.bin | load-scene TABLE.bin\n", argv[0]);
+			    !strcmp(argv[1], "load-scene") || load_fas)))) {
+		fprintf(stderr, "Usage: %s status | disable | load CONFIG.bin | load-rules RULES.bin | load-scene TABLE.bin | load-fas TUNING.bin | check-fas TUNING.bin\n", argv[0]);
 		return 2;
 	}
-	device = open("/dev/frame_policy", O_RDWR | O_CLOEXEC);
+	device = open(FRAME_POLICY_DEVICE, O_RDWR | O_CLOEXEC);
 	if (device < 0) {
 		perror("open frame policy");
 		return 1;
 	}
-	if (!strcmp(argv[1], "load-rules") || !strcmp(argv[1], "load-scene")) {
+	if (load_fas) {
+		result = ioctl(device, FP_FAS_TUNING, &fas);
+	} else if (!strcmp(argv[1], "load-rules") || !strcmp(argv[1], "load-scene")) {
 		int scene = !strcmp(argv[1], "load-scene");
 		size_t length = scene ? sizeof(struct fp_scene_table) : sizeof(struct fp_game_rules);
 		__u32 abi, expected = scene ? FP_SCENE_ABI : FP_GAME_RULES_ABI;

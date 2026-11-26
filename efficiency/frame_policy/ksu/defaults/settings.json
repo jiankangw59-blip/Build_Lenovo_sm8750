@@ -5,6 +5,7 @@
   "observe": false,
   "sceneMode": "balance",
   "sceneApps": {},
+  "fasMode": "balance",
   "fps": [
     30,
     45,

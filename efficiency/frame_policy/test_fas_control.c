@@ -18,7 +18,8 @@ int main(void)
 	assert(fp_fas_proportional(16666667, 59000) == -4999);
 	assert(fp_fas_proportional(20000000, 60000) == 60000);
 	assert(fp_fas_proportional(0, 60000) == 0);
-	assert(fp_fas_proportional(1000000000, 60000) == 0);
+	assert(fp_fas_proportional(400000000, 60000) == 6900000);
+	assert(fp_fas_proportional(1000000001, 60000) == 0);
 	tuning.override_count = 1;
 	tuning.overrides[0].fps = 165;
 	tuning.overrides[0].margin_mfps = 300;

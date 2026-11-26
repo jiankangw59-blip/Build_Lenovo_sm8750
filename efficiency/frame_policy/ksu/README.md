@@ -26,7 +26,39 @@ only; status reports this limitation. GPU activation requires the kernel's
 `scene_table` capability; unsupported kernels reject those settings before any
 control changes. Basic presets can fall back to their global CPU/GPU bounds.
 The module does not enable Scene's original
-userspace performance scheduler, or implement FAS mode margins/core_ctl.
+userspace performance scheduler or core_ctl.
+
+FAS mode is independent from Scene: `fasMode` accepts `powersave`, `balance`,
+`performance`, or `fast`. Optional `fasMarginFps` is a number or an advanced
+object such as `{"base":1,"120":0.5,"165":0.3}`. Without an explicit margin the
+four mode bases are 3, 1, 0.3 and 0 FPS. Numbers have at most three decimal places;
+the base is at most 30 FPS, and up to eight per-FPS overrides are accepted.
+Activation requires the exact `fas_tuning` kernel capability. The read-only
+`framectl check-fas` validates capability and the 80-byte tuning before either
+controller is stopped. `load-fas` issues the actual tuning ioctl before the main
+configuration is enabled. A built blob or passing host test is not evidence
+that this new controller has been flashed or accepted on a physical device.
+
+Settings use FPS2 envelopes with a separate FAS blob. FPS1 envelopes and older
+settings without FAS keys remain readable and gain balance/1 FPS tuning only.
+Existing GPU switches, Scene selections and app/game rules are preserved.
+Old immutable generations without `fas.bin` use the module's balance default;
+rollback copies it into a new generation, never into the old directory.
+
+To adopt an existing private settings file, use the production encoder directly
+instead of replacing it with factory settings:
+
+```sh
+node efficiency/frame_policy/ksu/encode_settings.js \
+  --settings /private/current-settings.json --output /private/settings-fps2.bin
+```
+
+The encoder writes a new private envelope and does not contact a device or
+change its input. Pass the envelope to the existing `config.sh save HASH` stdin
+transaction, using the fresh hash from `config.sh read`, or paste that same JSON
+in WebUI and save. Optional `--seed` and `--scene-seed` accept matching private
+seed files. An existing GPU=true/Scene=powersave selection remains that way;
+only a missing FAS mode gains balance. Never upload private settings to source.
 
 Before activation the client uses a pidfd to request graceful exit of the
 installed `fas-eventd` supervisor and waits for its exit event. It does not

@@ -9,10 +9,30 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from prepare_boot import compiled_notes
+from run_kunit import expected_cases, validate_cases
+
+HERE = Path(__file__).resolve().parent
 
 
 def read(path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def verify_kunit(kunit, source):
+    if (kunit / "workflow-commit.txt").read_text().strip() != source:
+        raise ValueError("KUnit source differs from the full candidate build")
+    provenance = read(kunit / "kunit-provenance.json")
+    if provenance.get("source") != source:
+        raise ValueError("KUnit artifact provenance differs from the requested source")
+    coverage = validate_cases(read(kunit / "fixed.json"), expected_cases())
+    recorded = read(kunit / "case-coverage.json")
+    if any(recorded.get(key) != value for key, value in coverage.items()):
+        raise ValueError("KUnit coverage manifest differs from the executed exact-name suite")
+    headers = {name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
+               for name in ("frame_policy_kunit.h", "scene_policy_kunit.h")}
+    if recorded.get("test_header_sha256") != headers:
+        raise ValueError("KUnit coverage was produced by different test declarations")
+    return coverage
 
 
 def verify(candidate, baseline, kunit, output, source):
@@ -39,10 +59,7 @@ def verify(candidate, baseline, kunit, output, source):
         image_hash = hashlib.file_digest(stream, "sha256").hexdigest()
     if image_hash != proof["kernel_sha256"] or image.stat().st_size != proof["kernel_bytes"]:
         raise ValueError("Exported Image differs from the packaged kernel provenance")
-    results = read(kunit / "fixed.json")
-    cases = [case for group in results["sub_groups"] for case in group["test_cases"]]
-    if len(cases) < 14 or any(case["status"] != "PASS" for case in cases):
-        raise ValueError("Expected the successful real-kernel suite with at least fourteen cases")
+    coverage = verify_kunit(kunit, source)
     comparison = read(kunit / "comparison.json")
     if not comparison["fixed_all_cases_passed"] or not comparison["legacy_detected"]:
         raise ValueError("The locking regression comparison did not pass")
@@ -56,8 +73,12 @@ def verify(candidate, baseline, kunit, output, source):
         shutil.copyfile(candidate / name, destination)
     shutil.copyfile(kunit / "fixed.json", output / "kunit-fixed.json")
     shutil.copyfile(kunit / "comparison.json", output / "kunit-comparison.json")
+    shutil.copyfile(kunit / "case-coverage.json", output / "kunit-case-coverage.json")
+    shutil.copyfile(kunit / "workflow-commit.txt", output / "kunit-workflow-commit.txt")
+    shutil.copyfile(kunit / "kunit-provenance.json", output / "kunit-provenance.json")
     (output / "compiled-kernel-notes.bin").write_bytes(notes)
-    report = {"source": source, "passed": True, "kmi_imports": 32921, "kernel_cases": len(cases),
+    report = {"source": source, "passed": True, "kmi_imports": 32921,
+              "kernel_cases": coverage["case_count"], "kernel_case_names": coverage["executed"],
               "image_sha256": image_hash, "image_bytes": image.stat().st_size,
               "kernel_notes": notes_proof, "config_added": added, "config_removed": removed,
               "baseline_source": (baseline / "workflow-commit.txt").read_text().strip(),

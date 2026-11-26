@@ -74,6 +74,9 @@ static void fp_test_reset(void)
 	gpu_mode_conflict = false;
 	applied_generation = generation;
 	memset(&configuration, 0, sizeof(configuration));
+	fas_tuning = (struct fp_fas_tuning){
+		.abi = FP_FAS_ABI, .mode = 1, .margin_base_mfps = 1000,
+	};
 	configuration.flags = FP_OBSERVE;
 	configuration.target_fps = 60;
 	configuration.fps_count = 1;
@@ -547,6 +550,15 @@ static void frame_test_cadence_gate_and_qos_release(struct kunit *test)
 		active_fps = fp_rate_sample(&rate, 16666667, rates, 2);
 	streams[selected_stream].control.samples = 8;
 	streams[selected_stream].control.average_ns = 16666667;
+	streams[selected_stream].history.count = FP_FAS_MIN_INTERVALS - 1;
+	last_frame_ns = ktime_get_ns();
+	apply_frame(&frame_work);
+	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, NULL);
+	streams[selected_stream].history.count = FP_FAS_MIN_INTERVALS;
+	KUNIT_ASSERT_TRUE(test, enqueue_fas_frame((struct fp_fas_event){
+		.ended_ns = ktime_get_ns(), .interval_ns = 16666667,
+		.fps = 60, .margin_mfps = 1000,
+	}));
 	last_frame_ns = ktime_get_ns();
 	apply_frame(&frame_work);
 	KUNIT_EXPECT_EQ(test, active_fps, 60U);
@@ -767,6 +779,295 @@ static void frame_test_invalid_game_relations(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, validate_game_rules(rules), -EINVAL);
 }
 
+static void frame_test_fas_task_identity_and_affinity(struct kunit *test)
+{
+	struct fp_fas_task_sample *previous, *latest;
+	struct fp_fas_task_load load;
+	unsigned int i;
+
+	previous = kunit_kcalloc(test, 8, sizeof(*previous), GFP_KERNEL);
+	latest = kunit_kcalloc(test, 8, sizeof(*latest), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, previous);
+	KUNIT_ASSERT_NOT_NULL(test, latest);
+	for (i = 0; i < 8; i++) {
+		previous[i] = (struct fp_fas_task_sample){
+			.tid = 100 + i, .cpu = i % 4, .start_time = i + 1,
+			.runtime_ns = 100000, .allowed_mask = i < 6 ? 0xff : 0xc0,
+		};
+		latest[i] = previous[i];
+		latest[i].runtime_ns += (8 - i) * 100000;
+	}
+	/* One busy thread moving cores is 80% of one CPU, never per-CPU 40%.
+	 * Six unrestricted workers do not turn two deliberately bound workers
+	 * into an all-core critical mask. */
+	latest[0].cpu = 3;
+	KUNIT_ASSERT_TRUE(test, fp_fas_task_measure(previous, 8, latest, 8,
+						  1000000, &load));
+	KUNIT_EXPECT_EQ(test, load.measured, 8U);
+	KUNIT_EXPECT_EQ(test, load.util_permille, 800U);
+	KUNIT_EXPECT_EQ(test, load.critical_mask, 0xc0ULL);
+	latest[1].start_time++; /* PID reuse is an exit and a fresh identity. */
+	latest[2].runtime_ns = previous[2].runtime_ns - 1;
+	KUNIT_ASSERT_TRUE(test, fp_fas_task_measure(previous, 8, latest, 7,
+						  1000000, &load));
+	KUNIT_EXPECT_EQ(test, load.new_tasks, 1U);
+	KUNIT_EXPECT_EQ(test, load.exited, 2U); /* Reused identity plus final exit. */
+	KUNIT_EXPECT_EQ(test, load.rollback, 1U);
+	KUNIT_EXPECT_EQ(test, load.measured, 5U);
+	KUNIT_EXPECT_EQ(test, load.util_permille, 800U);
+	latest[0].cpu = 64;
+	KUNIT_EXPECT_FALSE(test, fp_fas_task_measure(previous, 8, latest, 7,
+						   1000000, &load));
+	KUNIT_EXPECT_EQ(test, load.error, FP_FAS_TASK_INVALID_CPU);
+	KUNIT_EXPECT_FALSE(test, load.valid);
+}
+
+static int fp_test_prepare_fas(void)
+{
+	int error = cpufreq_register_driver(&fp_test_cpufreq_driver);
+
+	if (error)
+		return error;
+	fp_test_driver_registered = true;
+	fp_test_policy = cpufreq_cpu_get(0);
+	if (!fp_test_policy)
+		return -ENODEV;
+	configuration.flags = FP_CPU;
+	configuration.cpu_count = 1;
+	configuration.cpus[0].cpu = 0;
+	configuration.cpus[0].game = (struct fp_limits){500000, 4000000};
+	configured = game_active = true;
+	applied_generation = generation;
+	active_fps = 60;
+	selected_stream = 0;
+	streams[0].history.count = FP_FAS_MIN_INTERVALS;
+	last_frame_ns = ktime_get_ns();
+	last_frame_interval_ns = 16666667;
+	game_cap_valid[0] = true;
+	game_targets[0] = 2010000;
+	fas_last_rate_generation = rate_generation;
+	fas_feedback.util_sample_ns = last_frame_ns;
+	/* Explicit input fixture: isolate the frame-to-QoS path from new task
+	 * samples. Collector behavior is not inferred from these cases. */
+	fas_task_attempt_ns = U64_MAX;
+	fas_util_valid = false;
+	fas_critical_mask = 0;
+	return 0;
+}
+
+static void frame_test_fas_batch_preserves_each_step(struct kunit *test)
+{
+	u64 before = fas_steps;
+	unsigned int i;
+
+	KUNIT_ASSERT_EQ(test, fp_test_prepare_fas(), 0);
+	fas_critical_mask = 1;
+	for (i = 0; i < 3; i++)
+		KUNIT_ASSERT_TRUE(test, enqueue_fas_frame((struct fp_fas_event){
+			.ended_ns = last_frame_ns - (3 - i) * 16666667ULL,
+			.interval_ns = 16666667, .fps = 60, .margin_mfps = 1000,
+		}));
+	apply_frame(&frame_work);
+	KUNIT_ASSERT_NOT_NULL(test, cpu_requests[0].policy);
+	KUNIT_EXPECT_EQ(test, last_error, 0);
+	KUNIT_EXPECT_EQ(test, fas_steps, before + 3);
+	KUNIT_EXPECT_EQ(test, fas_last_adjustment, -4999LL);
+	KUNIT_EXPECT_EQ(test, game_targets[0], 1995003U);
+	/* One lost/coalesced P step would round to 3MHz instead of 2MHz. */
+	KUNIT_EXPECT_EQ(test, cpu_ceilings[0], 2000000U);
+	KUNIT_EXPECT_EQ(test, cpu_floors[0], 2000000U);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 2000000);
+	KUNIT_EXPECT_EQ(test, fas_events.count, 0U);
+}
+
+static void frame_test_fas_long_frame_preserves_thermal_cap(struct kunit *test)
+{
+	KUNIT_ASSERT_EQ(test, fp_test_prepare_fas(), 0);
+	KUNIT_ASSERT_GE(test, freq_qos_add_request(&fp_test_policy->constraints,
+						 &fp_test_cpu_cap, FREQ_QOS_MAX, 1800000), 0);
+	fas_util_valid = true;
+	fas_util_permille = 250;
+	KUNIT_ASSERT_TRUE(test, enqueue_fas_frame((struct fp_fas_event){
+		.ended_ns = last_frame_ns, .interval_ns = 400000000,
+		.fps = 60, .janked = true, .margin_mfps = 0,
+	}));
+	apply_frame(&frame_work);
+	KUNIT_ASSERT_NOT_NULL(test, cpu_requests[0].policy);
+	KUNIT_EXPECT_EQ(test, fas_last_adjustment, 6900000LL);
+	KUNIT_EXPECT_EQ(test, game_targets[0], 4000000U);
+	KUNIT_EXPECT_FALSE(test, fas_util_valid);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 1800000);
+	remove_requests();
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 1800000);
+}
+
+static void frame_test_fas_tuning_hot_change(struct kunit *test)
+{
+	struct fp_fas_tuning next = {.abi = FP_FAS_ABI, .mode = 3};
+	struct fp_fas_tuning saved;
+	u64 before = fas_steps, epoch = generation;
+	struct cpufreq_policy *owned;
+
+	KUNIT_ASSERT_EQ(test, fp_test_prepare_fas(), 0);
+	KUNIT_ASSERT_EQ(test, add_requests(true), 0);
+	owned = cpu_requests[0].policy;
+	KUNIT_ASSERT_TRUE(test, enqueue_fas_frame((struct fp_fas_event){
+		.ended_ns = last_frame_ns, .interval_ns = 16666667,
+		.fps = 60, .margin_mfps = 1000,
+	}));
+	KUNIT_EXPECT_EQ(test, sizeof(next), (size_t)80);
+	KUNIT_EXPECT_EQ(test, _IOC_SIZE(FP_FAS_TUNING), 80U);
+	KUNIT_ASSERT_EQ(test, set_fas_tuning(&next), 0);
+	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, owned);
+	KUNIT_EXPECT_EQ(test, generation, epoch);
+	KUNIT_EXPECT_EQ(test, game_targets[0], 2010000U);
+	KUNIT_EXPECT_EQ(test, fas_events.count, 1U);
+	saved = fas_tuning;
+	next.mode = FP_FAS_MODES;
+	KUNIT_EXPECT_EQ(test, set_fas_tuning(&next), -EINVAL);
+	KUNIT_EXPECT_EQ(test, memcmp(&fas_tuning, &saved, sizeof(saved)), 0);
+	next = saved;
+	next.overrides[0].fps = 60; /* Unused tail cannot smuggle an active override. */
+	KUNIT_EXPECT_EQ(test, set_fas_tuning(&next), -EINVAL);
+	KUNIT_EXPECT_EQ(test, memcmp(&fas_tuning, &saved, sizeof(saved)), 0);
+	KUNIT_ASSERT_TRUE(test, enqueue_fas_frame((struct fp_fas_event){
+		.ended_ns = last_frame_ns + 16666667, .interval_ns = 16666667,
+		.fps = 60, .margin_mfps = fp_fas_margin(&fas_tuning, 60),
+	}));
+	apply_frame(&frame_work);
+	KUNIT_EXPECT_EQ(test, fas_steps, before + 2);
+	/* Old queued event keeps its original margin, the next uses fast mode. */
+	KUNIT_EXPECT_EQ(test, game_targets[0], 2005001U);
+	KUNIT_EXPECT_EQ(test, fas_last_adjustment, 0LL);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 3000000);
+}
+
+static void frame_test_fas_overflow_releases_votes(struct kunit *test)
+{
+	u64 before = fas_overflows;
+	unsigned int i;
+
+	KUNIT_ASSERT_EQ(test, fp_test_prepare_fas(), 0);
+	KUNIT_ASSERT_EQ(test, add_requests(true), 0);
+	KUNIT_ASSERT_NOT_NULL(test, cpu_requests[0].policy);
+	for (i = 0; i < FP_FAS_EVENTS; i++)
+		KUNIT_ASSERT_TRUE(test, enqueue_fas_frame((struct fp_fas_event){
+			.ended_ns = last_frame_ns, .interval_ns = 16666667, .fps = 60,
+		}));
+	KUNIT_EXPECT_FALSE(test, enqueue_fas_frame((struct fp_fas_event){.fps = 60}));
+	KUNIT_EXPECT_TRUE(test, fas_overflowed);
+	KUNIT_EXPECT_EQ(test, fas_overflows, before + 1);
+	apply_frame(&frame_work);
+	KUNIT_EXPECT_EQ(test, last_error, -EOVERFLOW);
+	KUNIT_EXPECT_STREQ(test, last_error_stage, "fas_queue_overflow");
+	KUNIT_EXPECT_FALSE(test, configured);
+	KUNIT_EXPECT_FALSE(test, game_active);
+	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, gpu_device, NULL);
+	KUNIT_EXPECT_EQ(test, fas_events.count, 0U);
+	KUNIT_EXPECT_FALSE(test, delayed_work_pending(&expire_work));
+}
+
+static void frame_test_fas_stale_generation_has_no_votes(struct kunit *test)
+{
+	u64 before = fas_steps;
+	unsigned long flags;
+
+	KUNIT_ASSERT_EQ(test, fp_test_prepare_fas(), 0);
+	KUNIT_ASSERT_TRUE(test, enqueue_fas_frame((struct fp_fas_event){
+		.ended_ns = last_frame_ns, .interval_ns = 20000000, .fps = 60,
+	}));
+	spin_lock_irqsave(&frame_lock, flags);
+	generation++;
+	spin_unlock_irqrestore(&frame_lock, flags);
+	apply_frame(&frame_work);
+	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, NULL);
+	KUNIT_EXPECT_EQ(test, fas_steps, before);
+	KUNIT_EXPECT_EQ(test, game_targets[0], 2010000U);
+	KUNIT_EXPECT_FALSE(test, delayed_work_pending(&expire_work));
+}
+
+static void frame_test_fas_late_deadline_is_once(struct kunit *test)
+{
+	struct fp_fas_event event = {};
+	u64 anchor, deadline, first_deadline, fresh;
+	unsigned long flags;
+	bool early, due, twice, old_frame, rearmed, old_rate, old_epoch;
+	u32 queued;
+
+	KUNIT_ASSERT_EQ(test, fp_test_prepare_fas(), 0);
+	anchor = last_frame_ns;
+	mutex_lock(&config_lock);
+	spin_lock_irqsave(&frame_lock, flags);
+	late_frame_ns = anchor;
+	late_rate_generation = rate_generation;
+	late_sent = false;
+	deadline = anchor + FP_INACTIVITY_NS;
+	early = queue_late_frame(anchor + FP_LATE_MIN_NS - 1, &deadline);
+	first_deadline = deadline;
+	due = queue_late_frame(anchor + 60000000, &deadline);
+	twice = queue_late_frame(anchor + 90000000, &deadline);
+	queued = fas_events.count;
+	fp_fas_event_pop(&fas_events, &event);
+	/* Future fixture anchor keeps the actual delayed work safely pending
+	 * until cancellation; logical due times below are explicit test inputs. */
+	fresh = ktime_get_ns() + NSEC_PER_SEC;
+	last_frame_ns = fresh;
+	late_sent = false;
+	old_frame = queue_late_frame(fresh + 60000000, &deadline);
+	spin_unlock_irqrestore(&frame_lock, flags);
+	/* Exercise the same arming function used after a new real submission. */
+	arm_frame_expiry(generation, rate_generation, fresh);
+	mutex_unlock(&config_lock);
+	cancel_delayed_work_sync(&expire_work);
+	mutex_lock(&config_lock);
+	spin_lock_irqsave(&frame_lock, flags);
+	rearmed = queue_late_frame(fresh + 60000000, &deadline);
+	rate_generation++;
+	late_sent = false;
+	old_rate = queue_late_frame(fresh + 90000000, &deadline);
+	late_rate_generation = rate_generation;
+	generation++;
+	old_epoch = queue_late_frame(fresh + 90000000, &deadline);
+	spin_unlock_irqrestore(&frame_lock, flags);
+	mutex_unlock(&config_lock);
+	KUNIT_EXPECT_FALSE(test, early);
+	KUNIT_EXPECT_EQ(test, first_deadline, anchor + FP_LATE_MIN_NS);
+	KUNIT_EXPECT_TRUE(test, due);
+	KUNIT_EXPECT_FALSE(test, twice);
+	KUNIT_EXPECT_EQ(test, queued, 1U);
+	KUNIT_EXPECT_TRUE(test, event.late);
+	KUNIT_EXPECT_EQ(test, event.interval_ns, 60000000ULL);
+	KUNIT_EXPECT_FALSE(test, old_frame);
+	KUNIT_EXPECT_TRUE(test, rearmed);
+	KUNIT_EXPECT_FALSE(test, old_rate);
+	KUNIT_EXPECT_FALSE(test, old_epoch);
+}
+
+static void frame_test_fas_inactivity_releases_without_poll(struct kunit *test)
+{
+	u64 before = fas_steps;
+	unsigned long flags;
+
+	KUNIT_ASSERT_EQ(test, fp_test_prepare_fas(), 0);
+	KUNIT_ASSERT_EQ(test, add_requests(true), 0);
+	KUNIT_ASSERT_NOT_NULL(test, cpu_requests[0].policy);
+	spin_lock_irqsave(&frame_lock, flags);
+	last_frame_ns = ktime_get_ns() - FP_INACTIVITY_NS - 1;
+	spin_unlock_irqrestore(&frame_lock, flags);
+	expire_frame(&expire_work.work);
+	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, gpu_device, NULL);
+	KUNIT_EXPECT_EQ(test, active_fps, 0U);
+	KUNIT_EXPECT_EQ(test, streams[selected_stream].history.count, 0U);
+	KUNIT_EXPECT_EQ(test, fas_events.count, 0U);
+	KUNIT_EXPECT_FALSE(test, delayed_work_pending(&expire_work));
+	KUNIT_EXPECT_EQ(test, fas_steps, before);
+	expire_frame(&expire_work.work);
+	KUNIT_EXPECT_FALSE(test, delayed_work_pending(&expire_work));
+	KUNIT_EXPECT_EQ(test, fas_steps, before);
+}
+
 static void frame_test_source_loss(struct kunit *test)
 {
 	configured = true;
@@ -861,6 +1162,14 @@ static struct kunit_case frame_policy_cases[] = {
 	KUNIT_CASE(frame_test_game_caps_and_operating_points),
 	KUNIT_CASE(frame_test_per_game_relations),
 	KUNIT_CASE(frame_test_invalid_game_relations),
+	KUNIT_CASE(frame_test_fas_task_identity_and_affinity),
+	KUNIT_CASE(frame_test_fas_batch_preserves_each_step),
+	KUNIT_CASE(frame_test_fas_long_frame_preserves_thermal_cap),
+	KUNIT_CASE(frame_test_fas_tuning_hot_change),
+	KUNIT_CASE(frame_test_fas_overflow_releases_votes),
+	KUNIT_CASE(frame_test_fas_stale_generation_has_no_votes),
+	KUNIT_CASE(frame_test_fas_late_deadline_is_once),
+	KUNIT_CASE(frame_test_fas_inactivity_releases_without_poll),
 	KUNIT_CASE(frame_test_source_loss),
 	KUNIT_CASE(frame_test_source_deduplication),
 	KUNIT_CASE(frame_test_nonblocking_source),

@@ -6,14 +6,22 @@ body{font:15px system-ui;margin:20px;background:#101820;color:#e5edf3}h1{font-si
 pre,textarea{box-sizing:border-box;width:100%;background:#192631;color:#e5edf3;border:1px solid #3c5262;border-radius:8px;padding:12px;line-height:1.5}
 textarea{height:48vh;font:13px monospace}pre{white-space:pre-wrap;font-size:13px}button{margin:12px 8px 8px 0;padding:11px 16px;border:0;border-radius:7px;background:#79d4c7;color:#102622}
 #message[data-error=true]{color:#ffadad}button:disabled{opacity:.5}
+label{display:block;margin:10px 0}input,select{background:#192631;color:#e5edf3;border:1px solid #3c5262;border-radius:6px;padding:8px}
+#fasOverrides{height:85px}fieldset{border:1px solid #3c5262;border-radius:8px;margin:14px 0}
 </style>
 <h1>原生帧调度配置</h1>
 <p>开机一次载入，调度由内核执行。目标帧率可按游戏设置，请同时开启游戏内对应帧率。</p>
 <pre id="status">正在读取…</pre>
+<fieldset><legend>游戏 FAS 模式</legend>
+<label>模式 <select id="fasMode"><option value="powersave">省电 powersave</option><option value="balance">均衡 balance</option><option value="performance">性能 performance</option><option value="fast">快速 fast</option></select></label>
+<label>基础帧率余量（FPS，可留空使用模式默认值） <input id="fasMarginBase" type="number" min="0" max="30" step="0.001"></label>
+<label>按帧率覆盖余量（可选，例如 {"165":0.3}）<textarea id="fasOverrides" spellcheck="false" aria-label="FAS 按帧率余量覆盖">{}</textarea></label>
+<p>FAS 模式只作用于游戏，与下方的 Scene 模式独立。余量留空时，省电、均衡、性能、快速的基础值分别为 3、1、0.3、0 FPS。</p>
+</fieldset>
 <textarea id="editor" spellcheck="false" aria-label="调度配置"></textarea>
 <div><button id="save">保存并应用</button><button id="refresh">刷新</button><button id="rollback">恢复上次配置</button></div>
 <p id="message"></p>
 <p>sceneMode：powersave / balance / performance / fast。sceneApps 可按包名设置 mode 和 category（normal / Camera / Reader / Music 等），模式 ignore 表示交回系统。游戏中使用帧调度，游戏外使用 Scene 策略。</p>
 <p>fps 为默认帧率档位，games 中的包名可覆盖默认值。gameCpuMHz 按 policy0、policy6 顺序填写最低和最高频率。relations 控制原 FAS 的跨簇频率关系。</p>
-<p>实际功能以运行状态为准。原 FAS 模式余量、Scene 交互闲置状态与 core_ctl 等功能仍待接入。</p>
+<p>实际功能以运行状态为准。FAS 模式需要内核支持；Scene 交互闲置状态与 core_ctl 等功能仍待接入。</p>
 <script src="scene_protocol.js"></script><script src="protocol.js"></script><script src="app.js"></script></html>

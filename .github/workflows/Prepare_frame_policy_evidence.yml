@@ -1,11 +1,6 @@
 name: Verify and trim an existing frame policy candidate
 
 on:
-  push:
-    branches: [codex/ace6-frame-policy]
-    paths:
-      - .github/workflows/Prepare_frame_policy_evidence.yml
-      - efficiency/frame_policy/prepare_ci_evidence.py
   workflow_dispatch:
     inputs:
       build_run:

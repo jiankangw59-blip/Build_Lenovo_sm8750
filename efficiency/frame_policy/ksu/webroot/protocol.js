@@ -1,7 +1,48 @@
 "use strict";
 
+function frameFasProtocol(settings) {
+  const modes = ["powersave", "balance", "performance", "fast"];
+  const mode = Object.hasOwn(settings, "fasMode") ? settings.fasMode : "balance";
+  const index = modes.indexOf(mode);
+  if (index < 0) throw new Error("fasMode 必须为 powersave / balance / performance / fast");
+  const milli = value => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+      throw new Error("FAS 余量必须为非负有限数值");
+    const text = String(value);
+    if (!/^(0|[1-9]\d*)(\.\d{1,3})?$/.test(text))
+      throw new Error("FAS 余量最多保留三位小数");
+    const [whole, fraction = ""] = text.split(".");
+    const result = Number(whole) * 1000 + Number(fraction.padEnd(3, "0"));
+    if (!Number.isSafeInteger(result)) throw new Error("FAS 余量超出范围");
+    return result;
+  };
+  const margin = Object.hasOwn(settings, "fasMarginFps") ? settings.fasMarginFps : [3, 1, 0.3, 0][index];
+  let base, overrides = [];
+  if (margin && typeof margin === "object" && !Array.isArray(margin)) {
+    if (!Object.hasOwn(margin, "base")) throw new Error("高级 FAS 余量必须包含 base");
+    base = milli(margin.base);
+    for (const [key, value] of Object.entries(margin)) {
+      if (key === "base") continue;
+      if (!/^(0|[1-9]\d*)$/.test(key)) throw new Error("FAS 覆盖帧率必须为规范整数");
+      const fps = Number(key), amount = milli(value);
+      if (!Number.isSafeInteger(fps) || fps < 15 || fps > 240 || amount > fps * 1000 - 4000)
+        throw new Error("FAS 帧率覆盖余量超出范围");
+      overrides.push([fps, amount]);
+    }
+    overrides.sort((a, b) => a[0] - b[0]);
+  } else base = milli(margin);
+  if (base > 30000 || overrides.length > 8) throw new Error("FAS 基础余量或覆盖数量超出范围");
+  const blob = new Uint8Array(80), view = new DataView(blob.buffer);
+  [1, index, base, overrides.length].forEach((value, i) => view.setUint32(i * 4, value, true));
+  overrides.forEach(([fps, amount], i) => {
+    view.setUint32(16 + i * 8, fps, true);
+    view.setUint32(20 + i * 8, amount, true);
+  });
+  return {blob, mode, base, overrides};
+}
+
 function frameSettingsProtocol(settings, seed, sceneSeed) {
-  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "sceneApps", "fps", "games", "relations", "gameCpuMHz"];
+  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "sceneApps", "fasMode", "fasMarginFps", "fps", "games", "relations", "gameCpuMHz"];
   for (const key of Object.keys(settings)) if (!fields.includes(key)) throw new Error(`未知配置项：${key}`);
   for (const key of ["enabled", "cpu", "gpu", "observe", "relations"])
     if (typeof settings[key] !== "boolean") throw new Error(`${key} 必须为布尔值`);
@@ -66,19 +107,22 @@ function frameSettingsProtocol(settings, seed, sceneSeed) {
   rule("", 0, seed.relations.fallback);
   names.forEach((name, i) => rule(name, i + 1, Object.hasOwn(seed.relations.rules, name) ?
     seed.relations.rules[name] : seed.relations.fallback));
-  const json = new TextEncoder().encode(JSON.stringify(settings, null, 2) + "\n");
+  const tuning = frameFasProtocol(settings), fas = tuning.blob;
+  const normalized = {...settings, fasMode: tuning.mode};
+  const json = new TextEncoder().encode(JSON.stringify(normalized, null, 2) + "\n");
   if (json.length > 49152) throw new Error("配置文件过大");
   const encodeScene = typeof module !== "undefined" ? require("./scene_protocol.js").frameSceneProtocol : frameSceneProtocol;
   const scene = encodeScene(settings, sceneSeed).table;
   const requiresScene = settings.sceneMode === "fast" || Object.keys(settings.sceneApps ?? {}).length > 0;
-  const payload = new Uint8Array(28 + json.length + config.length + table.length + scene.length);
+  const payload = new Uint8Array(32 + json.length + config.length + table.length + scene.length + fas.length);
   const envelope = new DataView(payload.buffer);
-  [0x46505331, json.length, config.length, table.length, scene.length, settings.enabled ? 1 : 0,
+  [0x46505332, json.length, config.length, table.length, scene.length, fas.length, settings.enabled ? 1 : 0,
     requiresScene ? 1 : 0].forEach((v, i) => envelope.setUint32(i * 4, v, true));
-  payload.set(json, 28); payload.set(config, 28 + json.length);
-  payload.set(table, 28 + json.length + config.length);
-  payload.set(scene, 28 + json.length + config.length + table.length);
-  return {payload, config, table, scene};
+  payload.set(json, 32); payload.set(config, 32 + json.length);
+  payload.set(table, 32 + json.length + config.length);
+  payload.set(scene, 32 + json.length + config.length + table.length);
+  payload.set(fas, payload.length - fas.length);
+  return {payload, config, table, scene, fas, settings: normalized};
 }
 
-if (typeof module !== "undefined") module.exports = {frameSettingsProtocol};
+if (typeof module !== "undefined") module.exports = {frameSettingsProtocol, frameFasProtocol};

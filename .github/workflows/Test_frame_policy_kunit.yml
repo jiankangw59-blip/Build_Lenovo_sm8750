@@ -17,6 +17,23 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+      - name: Record the source identity inside the evidence artifact
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          source = os.environ['GITHUB_SHA']
+          if not re.fullmatch(r'[0-9a-f]{40}', source):
+              raise SystemExit('Missing exact KUnit workflow source')
+          report = pathlib.Path(os.environ['RUNNER_TEMP']) / 'frame-kunit-report'
+          report.mkdir(exist_ok=False)
+          (report / 'workflow-commit.txt').write_text(source + '\n')
+          (report / 'kunit-provenance.json').write_text(json.dumps({
+              'source': source, 'repository': os.environ['GITHUB_REPOSITORY'],
+              'workflow_run_id': os.environ['GITHUB_RUN_ID'],
+              'kernel_source': '65b954a773b183a9999b06bb1b2f921f12eaaf11',
+              'production_image': False, 'device_testing': False,
+          }, indent=2) + '\n')
+          PY
       - name: Prepare an isolated ARM64 kernel test environment
         run: |
           set -euo pipefail

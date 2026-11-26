@@ -1,11 +1,48 @@
 """Run real ARM64 kernel tests and check that the old unsafe path is detected."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
 HERE = Path(__file__).resolve().parent
+
+
+def expected_cases():
+    names = []
+    for name in ("frame_policy_kunit.h", "scene_policy_kunit.h"):
+        names.extend(re.findall(r"\bKUNIT_CASE\((frame_test_[A-Za-z0-9_]+)\)",
+                                (HERE / name).read_text(encoding="utf-8")))
+    if not names or len(set(names)) != len(names):
+        raise ValueError("The reviewed KUnit declarations are empty or duplicated")
+    return sorted(names)
+
+
+def validate_cases(result, expected):
+    cases = []
+
+    def visit(item):
+        if isinstance(item, dict):
+            declared = item.get("test_cases", [])
+            if not isinstance(declared, list):
+                raise ValueError("Malformed KUnit case list")
+            cases.extend(declared)
+            for group in item.get("sub_groups", []):
+                visit(group)
+
+    visit(result)
+    if any(not isinstance(item, dict) or not isinstance(item.get("name"), str)
+           or item.get("status") != "PASS" for item in cases):
+        raise ValueError("A kernel case is malformed or did not pass")
+    names = [item["name"] for item in cases]
+    if len(set(names)) != len(names) or sorted(names) != sorted(expected):
+        raise ValueError("Kernel case coverage differs: missing="
+                         + repr(sorted(set(expected) - set(names))) + " unexpected="
+                         + repr(sorted(set(names) - set(expected))))
+    return {"expected": sorted(expected), "executed": sorted(names),
+            "all_passed": True, "case_count": len(names)}
 
 
 def main(kernel, output, report):
@@ -38,23 +75,16 @@ def main(kernel, output, report):
     if any(marker in fixed_log for marker in markers):
         raise SystemExit("The fixed kernel emitted a locking or memory-safety warning")
     result = json.loads((report / "fixed.json").read_text(encoding="utf-8"))
-    statuses = []
-
-    def visit(item):
-        if isinstance(item, dict):
-            if "status" in item:
-                statuses.append(item["status"])
-            for value in item.values():
-                visit(value)
-        elif isinstance(item, list):
-            for value in item:
-                visit(value)
-
-    visit(result)
-    if len(statuses) != 22 or set(statuses) != {"PASS"}:
-        raise SystemExit("The kernel suite did not report exactly twenty-two passing cases")
+    try:
+        coverage = validate_cases(result, expected_cases())
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    coverage["test_header_sha256"] = {
+        name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
+        for name in ("frame_policy_kunit.h", "scene_policy_kunit.h")}
+    (report / "case-coverage.json").write_text(json.dumps(coverage, indent=2) + "\n", encoding="utf-8")
     shutil.copyfile(output / ".config", report / "debug.config")
-    print("Fixed kernel passed scheduler context and fence lifecycle tests", flush=True)
+    print(f"Fixed kernel passed all {coverage['case_count']} declared cases", flush=True)
 
     source = kernel / "kernel/sched/frame_policy/frame_policy.c"
     text = source.read_text(encoding="utf-8")

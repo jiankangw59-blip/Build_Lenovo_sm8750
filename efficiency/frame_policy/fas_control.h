@@ -69,12 +69,18 @@ static inline void fp_fas_util_event(struct fp_fas_feedback *state, u64 now,
 		state->util_offset_mfps = 0;
 }
 
+static inline u32 fp_fas_effective_rate_margin(const struct fp_fas_feedback *state,
+					       u32 fps, u32 margin_mfps)
+{
+	__s64 rate = (__s64)fps * 1000 + state->util_offset_mfps - margin_mfps;
+
+	return rate < 1000 ? 1000 : rate;
+}
+
 static inline u32 fp_fas_effective_rate(const struct fp_fas_tuning *tuning,
 					const struct fp_fas_feedback *state, u32 fps)
 {
-	__s64 rate = (__s64)fps * 1000 + state->util_offset_mfps - fp_fas_margin(tuning, fps);
-
-	return rate < 1000 ? 1000 : rate;
+	return fp_fas_effective_rate_margin(state, fps, fp_fas_margin(tuning, fps));
 }
 
 /* kp=0.0003 kHz per normalized nanosecond, represented exactly as 3/10000. */
@@ -82,7 +88,9 @@ static inline __s64 fp_fas_proportional(u64 interval_ns, u32 effective_mfps)
 {
 	__s64 normalized;
 
-	if (!interval_ns || interval_ns > 250000000ULL || !effective_mfps || effective_mfps > 240000)
+	/* Keep a genuine long frame: rejecting 400ms would erase its recovery
+	 * feedback. A one-second submission gap is handled by the owner deadline. */
+	if (!interval_ns || interval_ns > 1000000000ULL || !effective_mfps || effective_mfps > 240000)
 		return 0;
 	normalized = (__s64)(interval_ns * effective_mfps / 1000) - 1000000000LL;
 	return normalized * 3 / 10000;

@@ -1,5 +1,1 @@
-defaults/config.bin
-defaults/games.bin
-defaults/scene.bin
-defaults/scene-required
-__pycache__/
+/defaults/fas.bin

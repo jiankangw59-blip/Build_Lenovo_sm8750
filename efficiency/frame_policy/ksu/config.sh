@@ -68,6 +68,13 @@ apply_dir() {
        ! printf '%s\n' "$native" | grep -q 'features=.*scene_table'; then
         fail '当前内核尚未接入 Scene 策略表，不能应用 fast 或逐应用 Scene 配置'; return 1
     fi
+    # Older immutable generations predate FAS data. Their compatibility value
+    # is always balance/1 FPS, supplied by the module without rewriting history.
+    fas=$chosen/fas.bin
+    [ -f "$fas" ] || fas=$module/defaults/fas.bin
+    # Validate exact bytes AND the kernel capability before stopping either
+    # controller. check-fas is read-only; load-fas below performs the real ioctl.
+    "$controller" check-fas "$fas" >/dev/null || return 1
     if [ -f "$legacy" ]; then
         stopped=$("$controller" suspend-legacy) || return 1
     fi
@@ -80,6 +87,7 @@ apply_dir() {
     if printf '%s\n' "$native" | grep -q 'features=.*game_relations'; then
         "$controller" load-rules "$chosen/games.bin" >/dev/null || return 1
     fi
+    "$controller" load-fas "$fas" >/dev/null || return 1
     "$controller" load "$chosen/config.bin" > "$state/last-apply.txt" || return 1
     grep -qx 'last_error=0' "$state/last-apply.txt" || return 1
     cat /proc/sys/kernel/random/boot_id > "$state/applied-boot" || return 1
@@ -93,6 +101,9 @@ status() {
         fi
         if ! grep -q 'features=.*scene_table' /dev/frame_policy; then
             echo 'module_note=当前内核只支持基础全局 Scene 频率模板'
+        fi
+        if ! grep -q 'features=.*fas_tuning' /dev/frame_policy; then
+            echo 'module_note=当前内核缺少 FAS 调优接口，启用前需要包含 fas_tuning 的内核'
         fi
     else
         echo 'module_note=当前内核没有原生帧调度接口'
@@ -217,6 +228,11 @@ case "${1:-status}" in
         for leaf in settings.json config.bin games.bin scene.bin enabled scene-required; do
             cat "$source/$leaf" > "$pending/$leaf" || exit 1
         done
+        if [ -f "$source/fas.bin" ]; then
+            cat "$source/fas.bin" > "$pending/fas.bin" || exit 1
+        else
+            cat "$module/defaults/fas.bin" > "$pending/fas.bin" || exit 1
+        fi
         record_parent "$pending" "$old" || exit 1
         transaction "$pending" "$old" || exit 1
         ;;

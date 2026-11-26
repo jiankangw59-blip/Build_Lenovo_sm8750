@@ -20,7 +20,7 @@ static inline u32 fp_rate_sample(struct fp_rate *state, u64 interval_ns,
 {
 	u32 fps, candidate = 0, i;
 
-	if (!interval_ns || interval_ns > 250000000ULL) {
+	if (!interval_ns || interval_ns >= 1000000000ULL) {
 		fp_rate_reset(state);
 		return 0;
 	}

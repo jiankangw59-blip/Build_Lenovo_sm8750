@@ -43,16 +43,37 @@ GPU control uses the acquire fence's remaining wait. These are submission and
 fence measurements, not proof of displayed FPS or GPU execution time. The
 controller is independently authored GPL-2.0 code, not copied FAS-RS GPLv3 code.
 
-The game CPU branch now adjusts maximum frequency as well as minimum requests.
-It accumulates the target mm's actual scheduled runtime on context switches,
-without periodic sampling, task-list scans or PMU counters. Matching frames can
-lower a ceiling with load headroom; slow frames raise it with bounded slew.
-The rendering policy and heavily used policies lock min/max to a supported OPP;
-other policies retain their hardware floor. Continuous targets are kept separate
-from OPP rounding so small reductions accumulate rather than getting stuck at a
-frequency step. Requests start from the current frequency after warmup, not an
-unconditional maximum-frequency boost. This is an independent implementation of
-frame/load feedback, not exact reproduction of every FAS-RS tuning policy.
+After warmup, each selected successful submission supplies its raw interval to
+the FAS CPU controller. It starts from the maximum continuous target across CPU
+policies and adds a proportional correction with gain 0.0003 kHz per normalized
+nanosecond. The effective FPS is the qualified grade minus its configured margin
+plus a utilization offset bounded to -3 to 0 FPS. When the long submission
+window is below the grade by more than 2 FPS, the controller invalidates the
+cached utilization and skips the utilization cap. Otherwise a current sample
+caps the common target at the highest reported current policy frequency times
+the busiest game thread's utilization divided by 0.5.
+
+Frame work samples only the target game's threads, at most once per 300 ms.
+Runtime deltas are matched by thread ID and start time, including threads that
+migrate between CPUs. The eight busiest measured threads supply affinity masks.
+If the masks differ, the most common mask is excluded before taking their union.
+Policies intersecting that union get matching min/max votes at a supported OPP.
+Other policies retain their configured floor, bounded by the hardware minimum.
+The per-CPU `sched_switch` counters remain available as diagnostics.
+
+Each event applies the configured CPU relations before saving the continuous
+targets, starting from the configured game maxima within hardware limits. OPP
+rounding happens when a batch is submitted to QoS, so sub-OPP reductions carry
+into later events. The worker coalesces frequency writes over roughly 20 ms.
+Queue overflow is fatal and reported as `fas_queue_overflow`; it removes the
+component's votes and game probe. GPU feedback remains a separate fence-based
+extension. With an established grade, an actual submission can arm one late
+CPU recovery step after two frame budgets or 50 ms, whichever is longer. If no
+new submission arrives, that step uses the larger of elapsed time and the last
+real interval. Late recovery does not sample tasks, update GPU votes, or repeat
+during the same stall. The existing one-second inactivity deadline then removes
+the frequency votes. System thermal management remains in force. The separate
+FAS-RS temperature-driven FPS offset is outside this implementation.
 
 `compile_game_rules.py` imports static `set_extra_policy_rel` package branches
 from the existing FAS extension and per-game FPS arrays from its TOML files.
@@ -71,17 +92,23 @@ python3 efficiency/frame_policy/compile_game_rules.py \
 framectl load-rules games.bin
 ```
 
-Mode-specific FAS margin parameters and the original extension's CPU hotplug
-actions are not implemented by this importer. Those must not be reported as
-applied merely because their configuration files were readable.
+`compile_fas_tuning.py` imports the active mode's base FPS margin and optional
+per-grade overrides from the FAS TOML files. `framectl load-fas TUNING.bin` loads
+the 80-byte ABI 1 tuning independently of the existing configuration and rule
+tables. `powersave`, `balance`, `performance`, and `fast` affect the next real
+frame, preserving continuous targets and the margin captured by older queued
+frames. The original extension's CPU hotplug actions are outside the importer.
 
 Frequency requests require a configured FPS grade to match observed cadence
 over two consecutive 500 ms windows. Optional `fps_candidates` contains up to eight increasing
 grades ending at `target_fps`; omission means only the explicit target is allowed.
 A 60 FPS menu under a 165-only profile creates no frequency requests. Return-time
-bursts do not reset a valid grade, and one unmatched window is tolerated. A grade
-change, sustained unknown cadence or a long pause resets controller history; stale GPU
-fences cannot feed a different grade. Observed cadence cannot distinguish an
+bursts do not reset a valid grade, and one unmatched window is tolerated. Each
+new grade or selected surface warms up with 60 intervals before voting. The
+long submission window holds up to five seconds' worth at the qualified grade.
+A grade change, sustained unknown cadence or a long pause clears frame history
+and the effective-FPS offset. Stale GPU fences cannot feed a different grade.
+Observed cadence cannot distinguish an
 intentional frame cap from sustained rendering overload, so grade selection is
 a bounded submission heuristic, not a recovery of a game's rendering intent.
 
