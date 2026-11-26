@@ -26,3 +26,13 @@ of display overrides. Filtering a snapshot does not prevent a stale catalog
 from racing a later resolution change. LTPO/ramp flags likewise describe
 execution requirements, not an implemented backend. No display-setting request
 has been exercised or enabled by this addition.
+
+`scene_refresh_config.c` reads the original per-app/global configuration files
+without modifying them. It dynamically preserves rules and unknown global keys,
+keeps last duplicate assignment, validates a complete candidate, and leaves the
+old snapshot intact on parse/allocation/read-race errors. Atomic publication
+returns a retired snapshot; the caller must wait for readers before freeing it.
+Read-only parsing of the phone's original 28 rules and eight global keys passed.
+Twenty-three host cases include allocation failures, concurrent rename, large
+inputs, min>max preservation and nonregular files. This adapter is still not a
+production file watcher or a claim of completed boot restoration.

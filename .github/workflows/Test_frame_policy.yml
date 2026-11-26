@@ -37,6 +37,13 @@ jobs:
             efficiency/thread_affinity/test_scene_refresh_display.c \
             efficiency/thread_affinity/scene_refresh_display.c -lm -o "$RUNNER_TEMP/refresh-display"
           "$RUNNER_TEMP/refresh-display"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined -fno-omit-frame-pointer -DSRCFG_TEST_WRAP \
+            efficiency/thread_affinity/scene_refresh_config.c \
+            efficiency/thread_affinity/test_scene_refresh_config.c \
+            -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=read,--wrap=__read_chk \
+            -o "$RUNNER_TEMP/refresh-config"
+          "$RUNNER_TEMP/refresh-config"
           cc -std=c11 -O2 -Wall -Wextra -Werror \
             efficiency/frame_policy/framectl.c -o "$RUNNER_TEMP/framectl-host"
           python3 -m py_compile efficiency/frame_policy/compile_config.py \
