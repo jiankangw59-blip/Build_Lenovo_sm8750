@@ -1,0 +1,49 @@
+name: Verify native frame and Scene frequency policies
+
+on:
+  push:
+    branches: [codex/ace6-frame-policy]
+    paths:
+      - .github/workflows/Test_frame_policy.yml
+      - efficiency/frame_policy/**
+      - efficiency/thread_affinity/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check controller, ABI and source imports
+        run: |
+          set -euo pipefail
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
+            efficiency/frame_policy/test_control.c -o "$RUNNER_TEMP/frame-control"
+          "$RUNNER_TEMP/frame-control"
+          cc -std=c11 -O2 -Wall -Wextra -Werror \
+            efficiency/frame_policy/framectl.c -o "$RUNNER_TEMP/framectl-host"
+          python3 -m py_compile efficiency/frame_policy/compile_config.py \
+            efficiency/frame_policy/install_builtin.py
+          python3 efficiency/thread_affinity/test_snapshot_growth.py
+      - name: Compile against the pinned ARM64 6.6.118 kernel
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq --no-install-recommends bc bison clang flex libelf-dev lld llvm
+          kernel="$RUNNER_TEMP/kernel"
+          out="$RUNNER_TEMP/out"
+          mkdir -p "$kernel"
+          curl --fail --location --retry 3 --silent --show-error \
+            https://codeload.github.com/OnePlusOSS/android_kernel_common_oneplus_sm8750/tar.gz/65b954a773b183a9999b06bb1b2f921f12eaaf11 \
+            | tar xz -C "$kernel" --strip-components=1
+          python3 efficiency/thread_affinity/install_builtin.py --kernel "$kernel"
+          python3 efficiency/frame_policy/install_builtin.py --kernel "$kernel"
+          make -s -C "$kernel" O="$out" ARCH=arm64 LLVM=1 gki_defconfig
+          grep -qx CONFIG_FRAME_POLICY=y "$out/.config"
+          make -s -C "$kernel" -j2 O="$out" ARCH=arm64 LLVM=1 \
+            kernel/sched/frame_policy/built-in.a kernel/sched/ace6_thread_affinity.o
+          llvm-ar t "$out/kernel/sched/frame_policy/built-in.a"

@@ -25,6 +25,7 @@
 #include <linux/workqueue.h>
 
 #include "adaptive_policy.h"
+#include "frame_policy.h"
 
 #define MAX_PENDING 4096
 #define INITIAL_SNAPSHOT 16384
@@ -611,11 +612,13 @@ static void on_rename(void *data, struct task_struct *task, const char *name)
 static void on_exec(void *data, struct task_struct *task, pid_t old_pid,
 		    struct linux_binprm *bprm)
 {
+	frame_policy_task_event(task);
 	queue_event(task, NULL, false);
 }
 
 static void on_exit(void *data, struct task_struct *task)
 {
+	frame_policy_task_event(task);
 	queue_event(task, NULL, true);
 }
 
@@ -928,6 +931,8 @@ static int replace_scene(struct file *file, struct scene_context *next)
 	    strcmp(previous->foreground, next->foreground)))
 		stop_game();
 	scene = next;
+	frame_policy_scene(next ? next->foreground : NULL,
+			   next && next->display_off, next && next->game);
 	WRITE_ONCE(scene_owner, next ? file : NULL);
 	context_switches++;
 	if (rescan && ret) {

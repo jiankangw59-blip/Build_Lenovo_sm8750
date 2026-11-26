@@ -34,6 +34,7 @@ def install(kernel):
 
     for name in SOURCES:
         shutil.copyfile(HERE / name, sched / name)
+    shutil.copyfile(HERE.parent / "frame_policy" / "frame_policy.h", sched / "frame_policy.h")
     if CORE_INCLUDE not in core_text:
         core.write_text(
             core_text.replace(CORE_SEAM, f"\n{CORE_INCLUDE}\n" + CORE_SEAM),

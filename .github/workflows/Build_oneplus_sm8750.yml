@@ -85,6 +85,11 @@ on:
         type: boolean
         default: false
 
+      enable_frame_policy:
+        description: "Build the opt-in frame/Scene CPU and GPU frequency backend"
+        type: boolean
+        default: false
+
       custom_kernel_suffix:
         description: "✏️ 自定义内核名称- (-开头 留空则默认官方）"
         required: false
@@ -998,6 +1003,17 @@ jobs:
           python3 efficiency/xcy-reclaim/install_builtin.py --kernel kernel_workspace/common \
             --report kernel_workspace/preflash/efficiency/xcy-reclaim-source.json
 
+      - name: Attach event-driven frame and Scene frequency policies
+        if: ${{ inputs.enable_frame_policy }}
+        run: |
+          set -euo pipefail
+          test "${{ inputs.enable_thread_affinity }}" = true
+          test "$DEVICES_NAME:$KERNEL_VERSION:$KERNEL_SOURCE_REF" = "oneplus_ace_6:6.6.118:65b954a773b183a9999b06bb1b2f921f12eaaf11"
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
+            efficiency/frame_policy/test_control.c -o "$RUNNER_TEMP/frame-control-test"
+          "$RUNNER_TEMP/frame-control-test"
+          python3 efficiency/frame_policy/install_builtin.py --kernel kernel_workspace/common
+
       - name: 🔧 Set Kernel name (设置内核名称)
         run: |
           cd kernel_workspace
@@ -1223,6 +1239,13 @@ jobs:
             grep -E '[[:space:]]__initcall__.*_xcy_reclaim_init7$' out/System.map \
               | tee ../preflash/efficiency/xcy-reclaim-initcall.txt
             test -s ../preflash/efficiency/xcy-reclaim-initcall.txt
+          fi
+
+          if [ "${{ inputs.enable_frame_policy }}" = true ]; then
+            grep -qx 'CONFIG_FRAME_POLICY=y' out/.config
+            grep -E '[[:space:]]__initcall__.*_frame_policy_init6$' out/System.map \
+              | tee ../preflash/efficiency/frame-policy-initcall.txt
+            test -s ../preflash/efficiency/frame-policy-initcall.txt
           fi
 
           if [ "$EFFICIENCY_PROFILE" != off ]; then
