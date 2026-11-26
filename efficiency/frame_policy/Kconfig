@@ -7,3 +7,8 @@ config FRAME_POLICY
 	  Provides mutually exclusive Scene and game frame frequency requests.
 	  Runtime configuration and an existing Scene event owner are required.
 	  CPU and GPU policies can be enabled independently.
+
+config FRAME_POLICY_KUNIT_TEST
+	bool "Frame policy context and fence lifecycle KUnit tests"
+	depends on FRAME_POLICY && KUNIT=y
+	default n

@@ -1061,3 +1061,7 @@ static void __exit frame_policy_exit(void)
 module_exit(frame_policy_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Mutually exclusive Scene and frame frequency requests");
+
+#if IS_ENABLED(CONFIG_FRAME_POLICY_KUNIT_TEST)
+#include "frame_policy_kunit.h"
+#endif
