@@ -9,6 +9,11 @@
 #define FP_MAX_CPUS 4
 #define FP_MAX_MARGINS 8
 #define FP_MAX_RATES 8
+#define FP_MAX_GAME_RULES 32
+#define FP_GAME_RULES_ABI 1
+#define FP_REL_NONE 0U
+#define FP_REL_ABSOLUTE 1U
+#define FP_REL_POLICY 2U
 #define FP_CPU 1U
 #define FP_GPU 2U
 #define FP_OBSERVE 4U
@@ -52,7 +57,32 @@ struct fp_config {
 	__u32 fps_values[FP_MAX_RATES];
 };
 
+struct fp_relation {
+	__u32 kind;
+	__u32 reference;
+	__s32 minimum_khz;
+	__s32 maximum_khz;
+};
+
+struct fp_game_rule {
+	char package[128];
+	struct fp_relation cpus[FP_MAX_CPUS];
+	__u32 fps_count;
+	__u32 fps_values[FP_MAX_RATES];
+};
+
+struct fp_game_rules {
+	__u32 abi;
+	__u32 count;
+	__u32 cpu_count;
+	__u32 reserved;
+	__u32 cpu_ids[FP_MAX_CPUS];
+	struct fp_game_rule fallback;
+	struct fp_game_rule rules[FP_MAX_GAME_RULES];
+};
+
 #define FP_CONFIG _IOW('F', 0x80, struct fp_config)
 #define FP_DISABLE _IO('F', 0x81)
+#define FP_GAME_RULES _IOW('F', 0x82, struct fp_game_rules)
 
 #endif

@@ -2,6 +2,7 @@
 /* Frame events and Scene frequency requests. All arithmetic is integer based. */
 #include <linux/capability.h>
 #include <linux/cred.h>
+#include <linux/ctype.h>
 #include <linux/cpufreq.h>
 #include <linux/dma-fence.h>
 #include <linux/file.h>
@@ -35,6 +36,7 @@
 
 #include "frame_control.h"
 #include "frame_rate.h"
+#include "game_constraints.h"
 #include "frame_policy_uapi.h"
 
 #define FP_PACKAGE 128
@@ -84,6 +86,8 @@ static DEFINE_SPINLOCK(frame_lock);
 static struct workqueue_struct *policy_wq;
 static struct irq_work scene_irq_work;
 static struct fp_config configuration;
+static struct fp_game_rules *game_rules;
+static u32 active_game_fps[FP_MAX_RATES], active_game_fps_count;
 static struct fp_cpu_request cpu_requests[FP_MAX_CPUS];
 static struct fp_pmu *pmus;
 static struct fp_game_cpu *game_cpus;
@@ -133,6 +137,7 @@ static void scene_switch(void *data, bool preempt, struct task_struct *previous,
 			 struct task_struct *next, unsigned int prev_state);
 static void game_switch(void *data, bool preempt, struct task_struct *previous,
 			struct task_struct *next, unsigned int prev_state);
+static const struct fp_game_rule *active_game_rule(void);
 static DECLARE_WORK(control_work, apply_control);
 static DECLARE_WORK(frame_work, apply_frame);
 static DECLARE_WORK(scene_work, apply_scene);
@@ -747,8 +752,7 @@ static int probe_return(struct uprobe_consumer *self, unsigned long function,
 		u64 dt = now - stream->previous_ns;
 		u32 previous_fps = stream->rate.target;
 
-		fps = fp_rate_sample(&stream->rate, dt, configuration.fps_values,
-				     configuration.fps_count);
+		fps = fp_rate_sample(&stream->rate, dt, active_game_fps, active_game_fps_count);
 		if (fps != previous_fps)
 			fp_control_reset(&stream->control);
 		if (fps)
@@ -786,6 +790,7 @@ out:
 
 static int start_game(void)
 {
+	const struct fp_game_rule *rule = active_game_rule();
 	u8 bytes[sizeof(configuration.probe_bytes)];
 	loff_t offset = configuration.probe_offset;
 	unsigned long flags;
@@ -817,6 +822,9 @@ static int start_game(void)
 		goto fail;
 	}
 	spin_lock_irqsave(&frame_lock, flags);
+	active_game_fps_count = rule && rule->fps_count ? rule->fps_count : configuration.fps_count;
+	memcpy(active_game_fps, rule && rule->fps_count ? rule->fps_values : configuration.fps_values,
+	       sizeof(active_game_fps));
 	memset(calls, 0, sizeof(calls));
 	memset(streams, 0, sizeof(streams));
 	fp_control_reset(&gpu_control);
@@ -1100,6 +1108,19 @@ static int update_cpu_bounds(unsigned int index, u32 floor, u32 ceiling)
 	return 0;
 }
 
+/* config_lock protects both this table and the active foreground identity. */
+static const struct fp_game_rule *active_game_rule(void)
+{
+	unsigned int i;
+
+	if (!game_rules)
+		return NULL;
+	for (i = 0; i < game_rules->count; i++)
+		if (!strcmp(game_rules->rules[i].package, foreground))
+			return &game_rules->rules[i];
+	return &game_rules->fallback;
+}
+
 static void apply_frame(struct work_struct *work)
 {
 	unsigned long flags;
@@ -1107,6 +1128,10 @@ static void apply_frame(struct work_struct *work)
 	u64 now, last, dt, average;
 	int renderer;
 	int error = 0;
+	u32 targets[FP_MAX_CPUS] = {};
+	struct fp_limits bounds[FP_MAX_CPUS];
+	bool ready[FP_MAX_CPUS] = {};
+	const struct fp_game_rule *rule;
 
 	mutex_lock(&config_lock);
 	now = ktime_get_ns();
@@ -1140,15 +1165,30 @@ static void apply_frame(struct work_struct *work)
 	for (i = 0; i < configuration.cpu_count; i++) {
 		const struct fp_limits *limits = &configuration.cpus[i].game;
 		struct cpufreq_policy *policy = cpu_requests[i].policy;
-		u32 floor = limits->min_khz, ceiling, previous, target_khz;
+		u32 previous;
 
+		bounds[i] = *limits;
 		if (!policy || !dt || samples < 8)
 			continue;
 		previous = game_cap_valid[i] ? game_targets[i] :
 			clamp(READ_ONCE(policy->cur), limits->min_khz, limits->max_khz);
-		target_khz = fp_game_ceiling(previous, limits->min_khz, limits->max_khz,
-					     cpu_loads[i], average, fps, dt);
-		ceiling = snap_game_ceiling(policy, target_khz, limits);
+		targets[i] = fp_game_ceiling(previous, limits->min_khz, limits->max_khz,
+					    cpu_loads[i], average, fps, dt);
+		ready[i] = true;
+	}
+	rule = active_game_rule();
+	if (ready[0] && rule && !fp_apply_relations(targets, bounds, rule->cpus,
+						   configuration.cpu_count)) {
+		error = -EINVAL;
+		goto failed;
+	}
+	for (i = 0; i < configuration.cpu_count; i++) {
+		struct cpufreq_policy *policy = cpu_requests[i].policy;
+		u32 floor = bounds[i].min_khz, ceiling;
+
+		if (!ready[i])
+			continue;
+		ceiling = snap_game_ceiling(policy, targets[i], &bounds[i]);
 		if (!ceiling) {
 			error = -ERANGE;
 			goto failed;
@@ -1162,7 +1202,7 @@ static void apply_frame(struct work_struct *work)
 		if (error < 0)
 			goto failed;
 		game_cap_valid[i] = true;
-		game_targets[i] = target_khz;
+		game_targets[i] = targets[i];
 	}
 	if (gpu_device) {
 		const struct fp_limits *limits = &configuration.gpu_game;
@@ -1336,6 +1376,113 @@ static int validate_configuration(const struct fp_config *config)
 	return 0;
 }
 
+static bool rules_match_cpus(const struct fp_game_rules *rules, const struct fp_config *config)
+{
+	unsigned int i;
+
+	if (rules->cpu_count != config->cpu_count)
+		return false;
+	for (i = 0; i < rules->cpu_count; i++)
+		if (rules->cpu_ids[i] != config->cpus[i].cpu)
+			return false;
+	return true;
+}
+
+static int validate_game_rules(const struct fp_game_rules *rules)
+{
+	u32 order[FP_MAX_CPUS];
+	unsigned int i, j;
+
+	if (rules->abi != FP_GAME_RULES_ABI || rules->count > FP_MAX_GAME_RULES ||
+	    !rules->cpu_count || rules->cpu_count > FP_MAX_CPUS || rules->reserved ||
+	    rules->fallback.package[0])
+		return -EINVAL;
+	for (i = 0; i < FP_MAX_CPUS; i++) {
+		if (i >= rules->cpu_count) {
+			if (rules->cpu_ids[i])
+				return -EINVAL;
+			continue;
+		}
+		if (rules->cpu_ids[i] >= nr_cpu_ids || !cpu_possible(rules->cpu_ids[i]))
+			return -EINVAL;
+		for (j = 0; j < i; j++)
+			if (rules->cpu_ids[i] == rules->cpu_ids[j])
+				return -EINVAL;
+	}
+	for (i = 0; i <= rules->count; i++) {
+		const struct fp_game_rule *rule = i ? &rules->rules[i - 1] : &rules->fallback;
+		const char *name = rule->package;
+
+		if (!memchr(name, 0, sizeof(rule->package)) || (i && !*name) ||
+		    !fp_relation_order(rule->cpus, rules->cpu_count, order) || rule->fps_count > FP_MAX_RATES)
+			return -EINVAL;
+		for (j = 0; j < FP_MAX_RATES; j++) {
+			u32 fps = rule->fps_values[j];
+
+			if (j >= rule->fps_count) {
+				if (fps)
+					return -EINVAL;
+			} else if (fps < 15 || fps > 240 || (j && fps <= rule->fps_values[j - 1])) {
+				return -EINVAL;
+			}
+		}
+		for (; *name; name++)
+			if (!isalnum(*name) && *name != '.' && *name != '_')
+				return -EINVAL;
+		for (j = 0; i && j + 1 < i; j++)
+			if (!strcmp(rule->package, rules->rules[j].package))
+				return -EINVAL;
+		for (j = rules->cpu_count; j < FP_MAX_CPUS; j++)
+			if (rule->cpus[j].kind || rule->cpus[j].reference ||
+			    rule->cpus[j].minimum_khz || rule->cpus[j].maximum_khz)
+				return -EINVAL;
+	}
+	return 0;
+}
+
+static int replace_game_rules(unsigned long arg)
+{
+	struct fp_game_rules *next, *previous;
+	unsigned long flags;
+	int error;
+
+	next = kvmalloc(sizeof(*next), GFP_KERNEL);
+	if (!next)
+		return -ENOMEM;
+	if (copy_from_user(next, (void __user *)arg, sizeof(*next))) {
+		kvfree(next);
+		return -EFAULT;
+	}
+	error = validate_game_rules(next);
+	if (error) {
+		kvfree(next);
+		return error;
+	}
+	mutex_lock(&config_lock);
+	if (configuration.cpu_count && !rules_match_cpus(next, &configuration)) {
+		mutex_unlock(&config_lock);
+		kvfree(next);
+		return -EINVAL;
+	}
+	stop_game();
+	remove_requests();
+	previous = game_rules;
+	game_rules = next;
+	last_error = 0;
+	last_error_stage = "none";
+	spin_lock_irqsave(&frame_lock, flags);
+	generation++;
+	spin_unlock_irqrestore(&frame_lock, flags);
+	mutex_unlock(&config_lock);
+	kvfree(previous);
+	queue_work(policy_wq, &control_work);
+	flush_work(&control_work);
+	mutex_lock(&config_lock);
+	error = last_error;
+	mutex_unlock(&config_lock);
+	return error;
+}
+
 static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct fp_config next;
@@ -1345,6 +1492,8 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
+	if (cmd == FP_GAME_RULES)
+		return replace_game_rules(arg);
 	if (cmd != FP_CONFIG && cmd != FP_DISABLE)
 		return -ENOTTY;
 	if (cmd == FP_CONFIG) {
@@ -1366,6 +1515,12 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		}
 	}
 	mutex_lock(&config_lock);
+	if (cmd == FP_CONFIG && game_rules && !rules_match_cpus(game_rules, &next)) {
+		mutex_unlock(&config_lock);
+		if (governor)
+			fput(governor);
+		return -EINVAL;
+	}
 	stop_game();
 	remove_requests();
 	error = release_gpu_mode();
@@ -1427,6 +1582,7 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 	spin_unlock_irqrestore(&frame_lock, flags);
 	length = scnprintf(status, sizeof(status),
 		"abi=%u\nconfigured=%u\nobserve=%u\nowner=%s\nforeground=%s\n"
+		"features=cpu,scene_pmu,game_frames,gpu,gpu_file_credentials,game_relations,fps_per_game\n"
 		"game_pid=%d\nprobe=%u\ngeneration=%llu\napplied_generation=%llu\n"
 		"frames=%llu\nselected_frames=%llu\nframe_errors=%llu\nlevel=%u\n"
 		"qualified_fps=%u\n"
@@ -1436,6 +1592,7 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 		"cpu0_busy_permille=%u\ncpu1_busy_permille=%u\ngame_sched_hook=%u\n"
 		"cpu_requests=%u\ngpu_requests=%u\nscene_pmu=%u\nsource_valid=%u\n"
 		"gpu_mode_owned=%u\ngpu_mode_percent=%u\ngpu_mode_conflict=%u\n"
+		"game_constraint_rules=%u\n"
 		"switches=%llu\nscene_samples=%llu\nlast_error=%d\nlast_error_stage=%s\n",
 		FP_ABI, configured, observe_only(), game_active ? "frame" : scene_active ? "scene" : "idle",
 		foreground, target ? task_pid_nr(target) : 0, registered, epoch,
@@ -1445,6 +1602,7 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 		cpu_ceilings[0], cpu_ceilings[1], cpu_loads[0], cpu_loads[1], game_trace,
 		!!cpu_requests[0].policy, !!gpu_device, !!pmus, source_valid,
 		gpu_mode_owned, gpu_mode_last, gpu_mode_conflict,
+		game_rules ? game_rules->count : 0,
 		switches, scene_samples, last_error, last_error_stage);
 	mutex_unlock(&config_lock);
 	return simple_read_from_buffer(data, size, offset, status, length);
@@ -1498,6 +1656,8 @@ static void __exit frame_policy_exit(void)
 	spin_unlock_irqrestore(&frame_lock, flags);
 	stop_game();
 	remove_requests();
+	kvfree(game_rules);
+	game_rules = NULL;
 	release_gpu_mode();
 	if (gpu_governor_file) {
 		fput(gpu_governor_file);

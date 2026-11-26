@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include "frame_control.h"
 #include "frame_rate.h"
+#include "game_constraints.h"
 #include "frame_policy_uapi.h"
 
 int main(void)
@@ -17,6 +18,20 @@ int main(void)
 
 	assert(sizeof(struct fp_config) == 592);
 	assert(offsetof(struct fp_config, cpus) == 144);
+	assert(sizeof(struct fp_game_rules) == 7556);
+	{
+		struct fp_relation relations[FP_MAX_CPUS] = { { FP_REL_POLICY, 1, 0, 0 } };
+		struct fp_limits limits[FP_MAX_CPUS] = { {384000, 3532800}, {1017600, 4320000} };
+		u32 targets[FP_MAX_CPUS] = { 500000, 2000000 };
+
+		assert(fp_apply_relations(targets, limits, relations, 2));
+		assert(targets[0] == 2000000 && targets[1] == 2000000);
+		targets[1] = 4320000;
+		assert(fp_apply_relations(targets, limits, relations, 2));
+		assert(targets[0] == 3532800);
+		relations[1] = (struct fp_relation){ FP_REL_POLICY, 0, 0, 0 };
+		assert(!fp_apply_relations(targets, limits, relations, 2));
+	}
 	for (i = 0; i < 600; i++)
 		assert(fp_rate_sample(&rate, 16666667, high_only, 1) == 0);
 	fp_rate_reset(&rate);

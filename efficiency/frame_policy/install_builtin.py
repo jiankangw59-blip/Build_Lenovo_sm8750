@@ -16,7 +16,7 @@ def install(kernel, for_kunit=False):
     destination = root / "frame_policy"
     destination.mkdir(exist_ok=True)
     for name in ("Kconfig", "Makefile", "frame_policy.c", "frame_control.h", "frame_policy_uapi.h",
-                 "frame_policy_kunit.h", "frame_rate.h"):
+                 "frame_policy_kunit.h", "frame_rate.h", "game_constraints.h"):
         shutil.copyfile(HERE / name, destination / name)
     shutil.copyfile(HERE / "frame_policy.h", root / "frame_policy.h")
     additions = {

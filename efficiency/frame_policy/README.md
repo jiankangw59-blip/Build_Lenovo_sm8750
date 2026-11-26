@@ -54,6 +54,27 @@ frequency step. Requests start from the current frequency after warmup, not an
 unconditional maximum-frequency boost. This is an independent implementation of
 frame/load feedback, not exact reproduction of every FAS-RS tuning policy.
 
+`compile_game_rules.py` imports static `set_extra_policy_rel` package branches
+from the existing FAS extension and per-game FPS arrays from its TOML files.
+It rejects unknown active statements and cyclic graphs. `framectl load-rules`
+installs the bounded table once; foreground events select the matching game or
+fallback rule inside the kernel. CPU dependencies are applied in order before
+per-policy OPP rounding, with hardware/thermal limits retaining priority.
+The table supports 32 exceptions and independent target FPS arrays, including
+45/130 FPS grades. No Lua interpreter or rules daemon runs in the kernel.
+
+```sh
+python3 efficiency/frame_policy/compile_game_rules.py \
+  --lua /path/to/installed-extension.lua --controls /path/to/explicit-controls.json \
+  --standard-games /path/to/standard-games.toml --user-games /path/to/user-games.toml \
+  --output games.bin
+framectl load-rules games.bin
+```
+
+Mode-specific FAS margin parameters and the original extension's CPU hotplug
+actions are not implemented by this importer. Those must not be reported as
+applied merely because their configuration files were readable.
+
 Frequency requests require a configured FPS grade to match observed cadence
 over two consecutive 500 ms windows. Optional `fps_candidates` contains up to eight increasing
 grades ending at `target_fps`; omission means only the explicit target is allowed.
@@ -104,8 +125,9 @@ swap. An already-running unregistered build can use `--inherit-policy-from`
 with the previously verified kernel notes SHA256. Early boot applies the
 existing Scene size and compressor after reboot.
 
-The current loader explicitly selects one Scene limiter and the allowed FPS
-grades for a bounded trial. Automatic per-app/mode configuration is not implemented.
+The base loader explicitly selects one Scene limiter. Per-game CPU relationships
+and FPS overrides use the optional table above. Automatic per-app/mode Scene
+configuration is not implemented.
 Scene `core_ctl`, touch boost, CPU excludes/prefer, and the full proprietary
 Scene policy are not implemented. This candidate must not be presented
 as complete Scene/FAS behavior parity or as a measured power improvement.

@@ -61,6 +61,8 @@ static void fp_test_reset(void)
 	spin_unlock_irqrestore(&frame_lock, flags);
 	stop_game();
 	remove_requests();
+	kvfree(game_rules);
+	game_rules = NULL;
 	release_gpu_mode();
 	if (gpu_governor_file) {
 		fput(gpu_governor_file);
@@ -683,6 +685,78 @@ static void frame_test_game_caps_and_operating_points(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 1800000);
 }
 
+static void frame_test_per_game_relations(struct kunit *test)
+{
+	struct fp_game_rules *rules = kvzalloc(sizeof(*rules), GFP_KERNEL);
+	const struct fp_game_rule *rule;
+	struct fp_limits limits[FP_MAX_CPUS] = { {384000, 3532800}, {1017600, 4320000} };
+	u32 targets[FP_MAX_CPUS] = { 500000, 2000000 };
+
+	KUNIT_ASSERT_NOT_NULL(test, rules);
+	game_rules = rules;
+	rules->abi = FP_GAME_RULES_ABI;
+	rules->cpu_count = 2;
+	rules->cpu_ids[1] = 1;
+	rules->count = 2;
+	rules->fallback.cpus[0] = (struct fp_relation){ FP_REL_POLICY, 1, -150000, -100000 };
+	strscpy(rules->rules[0].package, "com.tencent.tmgp.sgame", 128);
+	rules->rules[0].cpus[0] = (struct fp_relation){ FP_REL_POLICY, 1, 0, 0 };
+	rules->rules[0].fps_count = 2;
+	rules->rules[0].fps_values[0] = 60;
+	rules->rules[0].fps_values[1] = 165;
+	strscpy(rules->rules[1].package, "com.miHoYo.Yuanshen", 128);
+	rules->rules[1].cpus[1] = (struct fp_relation){ FP_REL_POLICY, 0, -400000, -350000 };
+	KUNIT_ASSERT_EQ(test, validate_game_rules(rules), 0);
+	strscpy(foreground, "com.tencent.tmgp.sgame", sizeof(foreground));
+	rule = active_game_rule();
+	KUNIT_ASSERT_PTR_EQ(test, rule, &rules->rules[0]);
+	KUNIT_EXPECT_EQ(test, rule->fps_count, 2U);
+	KUNIT_EXPECT_EQ(test, rule->fps_values[1], 165U);
+	KUNIT_EXPECT_TRUE(test, fp_apply_relations(targets, limits, rule->cpus, 2));
+	KUNIT_EXPECT_EQ(test, targets[0], 2000000U);
+	strscpy(foreground, "com.miHoYo.Yuanshen", sizeof(foreground));
+	targets[0] = 2000000;
+	targets[1] = 4000000;
+	KUNIT_EXPECT_TRUE(test, fp_apply_relations(targets, limits, active_game_rule()->cpus, 2));
+	KUNIT_EXPECT_EQ(test, targets[1], 1650000U);
+	strscpy(foreground, "game.other", sizeof(foreground));
+	targets[0] = 500000;
+	targets[1] = 2000000;
+	KUNIT_EXPECT_TRUE(test, fp_apply_relations(targets, limits, active_game_rule()->cpus, 2));
+	KUNIT_EXPECT_EQ(test, targets[0], 1850000U);
+}
+
+static void frame_test_invalid_game_relations(struct kunit *test)
+{
+	struct fp_game_rules *rules = kunit_kzalloc(test, sizeof(*rules), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, rules);
+	rules->abi = FP_GAME_RULES_ABI;
+	rules->cpu_count = 2;
+	rules->cpu_ids[1] = 1;
+	rules->count = 1;
+	strscpy(rules->rules[0].package, "game.one", 128);
+	KUNIT_ASSERT_EQ(test, validate_game_rules(rules), 0);
+	rules->rules[0].fps_count = 2;
+	rules->rules[0].fps_values[0] = 165;
+	rules->rules[0].fps_values[1] = 60;
+	KUNIT_EXPECT_EQ(test, validate_game_rules(rules), -EINVAL);
+	rules->rules[0].fps_count = 0;
+	memset(rules->rules[0].fps_values, 0, sizeof(rules->rules[0].fps_values));
+	rules->rules[0].cpus[0] = (struct fp_relation){ FP_REL_POLICY, 2, 0, 0 };
+	KUNIT_EXPECT_EQ(test, validate_game_rules(rules), -EINVAL);
+	rules->rules[0].cpus[0].reference = 1;
+	rules->rules[0].cpus[1] = (struct fp_relation){ FP_REL_POLICY, 0, 0, 0 };
+	KUNIT_EXPECT_EQ(test, validate_game_rules(rules), -EINVAL);
+	memset(rules->rules[0].cpus, 0, sizeof(rules->rules[0].cpus));
+	rules->count = 2;
+	strscpy(rules->rules[1].package, "game.one", 128);
+	KUNIT_EXPECT_EQ(test, validate_game_rules(rules), -EINVAL);
+	rules->count = 1;
+	rules->cpu_ids[1] = 0;
+	KUNIT_EXPECT_EQ(test, validate_game_rules(rules), -EINVAL);
+}
+
 static void frame_test_source_loss(struct kunit *test)
 {
 	configured = true;
@@ -772,6 +846,8 @@ static struct kunit_case frame_policy_cases[] = {
 	KUNIT_CASE(frame_test_fence_grade_and_error_isolation),
 	KUNIT_CASE(frame_test_game_runtime_events),
 	KUNIT_CASE(frame_test_game_caps_and_operating_points),
+	KUNIT_CASE(frame_test_per_game_relations),
+	KUNIT_CASE(frame_test_invalid_game_relations),
 	KUNIT_CASE(frame_test_source_loss),
 	KUNIT_CASE(frame_test_source_deduplication),
 	KUNIT_CASE(frame_test_nonblocking_source),
