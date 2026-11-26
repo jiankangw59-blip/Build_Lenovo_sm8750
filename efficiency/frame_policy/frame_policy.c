@@ -6,6 +6,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/irq_work.h>
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
 #include <linux/miscdevice.h>
@@ -71,6 +72,7 @@ struct fp_pmu {
 static DEFINE_MUTEX(config_lock);
 static DEFINE_SPINLOCK(frame_lock);
 static struct workqueue_struct *policy_wq;
+static struct irq_work scene_irq_work;
 static struct fp_config configuration;
 static struct fp_cpu_request cpu_requests[FP_MAX_CPUS];
 static struct fp_pmu *pmus;
@@ -121,6 +123,7 @@ static void stop_pmus(void)
 		tracepoint_synchronize_unregister();
 		scene_trace = false;
 	}
+	irq_work_sync(&scene_irq_work);
 	if (!pmus)
 		return;
 	for_each_possible_cpu(cpu) {
@@ -679,6 +682,13 @@ static void scene_switch(void *data, bool preempt, struct task_struct *previous,
 	now = ktime_get_mono_fast_ns();
 	due = atomic64_read(&next_scene_sample);
 	if (now >= due && atomic64_cmpxchg(&next_scene_sample, due, now + 80000000ULL) == due)
+		irq_work_queue(&scene_irq_work);
+}
+
+static void scene_irq(struct irq_work *work)
+{
+	/* sched_switch holds rq->lock: never take workqueue/pool locks there. */
+	if (READ_ONCE(scene_active) && !READ_ONCE(display_off))
 		queue_work(policy_wq, &scene_work);
 }
 
@@ -1014,6 +1024,7 @@ static int __init frame_policy_init(void)
 	consumer.handler = probe_entry;
 	consumer.ret_handler = probe_return;
 	consumer.filter = probe_filter;
+	init_irq_work(&scene_irq_work, scene_irq);
 	policy_wq = alloc_ordered_workqueue("frame_policy", WQ_FREEZABLE | WQ_POWER_EFFICIENT);
 	if (!policy_wq)
 		return -ENOMEM;
