@@ -3,6 +3,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const {frameSettingsProtocol} = require("./webroot/protocol.js");
+for (const name of ["enabled", "libgui.sha256", "seed.json", "settings.json"])
+  assert.ok(!fs.readFileSync(path.join(__dirname, "defaults", name)).includes(13), `${name} must use LF`);
 const seed = JSON.parse(fs.readFileSync(path.join(__dirname, "defaults/seed.json"), "utf8"));
 const original = JSON.parse(fs.readFileSync(path.join(__dirname, "defaults/settings.json"), "utf8"));
 const settings = () => structuredClone(original);

@@ -4,3 +4,5 @@ efficiency/patches/cpuidle-refinement-6.6.89.patch -text -whitespace
 efficiency/lz4kds_lab/vendor/** -text -whitespace
 ci/ace6-android/*.patch -text -whitespace
 ci/ace6-android/*.sh text eol=lf
+efficiency/frame_policy/ksu/** text eol=lf
+efficiency/frame_policy/ksu/defaults/*.bin -text
