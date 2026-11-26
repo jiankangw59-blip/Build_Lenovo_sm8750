@@ -353,6 +353,46 @@ static void frame_test_source_loss(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, gpu_device, NULL);
 }
 
+static int fp_test_source_thread(void *data)
+{
+	struct completion *done = data;
+
+	frame_policy_scene("frame.policy.kunit.source", false, false);
+	complete(done);
+	for (;;) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (kthread_should_stop())
+			break;
+		schedule();
+	}
+	__set_current_state(TASK_RUNNING);
+	return 0;
+}
+
+static void frame_test_nonblocking_source(struct kunit *test)
+{
+	struct completion done;
+	struct task_struct *thread;
+	unsigned long responded;
+
+	init_completion(&done);
+	mutex_lock(&config_lock);
+	configured = true;
+	thread = kthread_run(fp_test_source_thread, &done, "fp-source-test");
+	if (IS_ERR(thread)) {
+		mutex_unlock(&config_lock);
+		KUNIT_FAIL(test, "Cannot create scene event sender");
+		return;
+	}
+	/* A provider must return even while the controller mutex is unavailable. */
+	responded = wait_for_completion_timeout(&done, HZ);
+	mutex_unlock(&config_lock);
+	KUNIT_EXPECT_NE(test, responded, 0UL);
+	wait_for_completion(&done);
+	kthread_stop(thread);
+	flush_work(&control_work);
+}
+
 static struct kunit_case frame_policy_cases[] = {
 	KUNIT_CASE(frame_test_sched_switch_handoff),
 	KUNIT_CASE(frame_test_qos_ownership),
@@ -360,6 +400,7 @@ static struct kunit_case frame_policy_cases[] = {
 	KUNIT_CASE(frame_test_fence_cancel_race),
 	KUNIT_CASE(frame_test_ready_and_stale_fences),
 	KUNIT_CASE(frame_test_source_loss),
+	KUNIT_CASE(frame_test_nonblocking_source),
 	{}
 };
 

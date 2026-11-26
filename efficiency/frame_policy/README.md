@@ -18,6 +18,10 @@ queued frame/Scene work from a previous generation cannot apply its results.
 CPU and GPU can be enabled independently. Thermal and other system QoS limits
 remain in force.
 
+Foreground events only publish a bounded snapshot under a spinlock and queue
+the transition. They never wait on the controller mutex, PMU reads or probe
+teardown, so the existing affinity provider cannot be held up by this backend.
+
 Game events come from a verified ARM64 `Surface::queueBuffer` uprobe restricted
 to the foreground game's mm. CPU control uses successful queue intervals;
 GPU control uses the acquire fence's remaining wait. These are submission and

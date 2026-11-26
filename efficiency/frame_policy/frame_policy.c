@@ -87,6 +87,10 @@ static struct fp_fence_watch gpu_watches[FP_CALLS];
 static struct fp_control gpu_control;
 static struct fp_stream streams[FP_STREAMS];
 static char foreground[FP_PACKAGE];
+static struct {
+	char package[FP_PACKAGE];
+	bool valid, game, off;
+} pending_scene;
 static bool configured, source_valid, source_game, display_off, registered;
 static bool game_active, scene_active, scene_trace;
 static u64 generation, applied_generation, last_frame_ns, last_work_ns;
@@ -392,7 +396,7 @@ static int probe_entry(struct uprobe_consumer *self, struct pt_regs *regs)
 	if ((int)regs->regs[2] >= 0 && current->mm == READ_ONCE(target_mm))
 		fence = sync_file_get_fence((int)regs->regs[2]);
 	spin_lock_irqsave(&frame_lock, flags);
-	if (!game_active || current->mm != target_mm)
+	if (!game_active || applied_generation != generation || current->mm != target_mm)
 		goto out;
 	for (i = 0; i < FP_CALLS; i++) {
 		if (calls[i].tid == tid) {
@@ -429,7 +433,7 @@ static void record_gpu_wait(u64 epoch, u64 entered_ns, u64 pending)
 	unsigned long flags;
 
 	spin_lock_irqsave(&frame_lock, flags);
-	if (game_active && epoch == generation &&
+	if (game_active && epoch == generation && epoch == applied_generation &&
 	    ktime_get_ns() - entered_ns < FP_INACTIVITY_NS) {
 		fp_control_gpu(&gpu_control, min_t(u64, pending, FP_INACTIVITY_NS),
 			       configuration.target_fps);
@@ -643,8 +647,16 @@ fail:
 
 static void apply_control(struct work_struct *work)
 {
+	typeof(pending_scene) next;
+	unsigned long flags;
+	u64 epoch;
+
 	mutex_lock(&config_lock);
-	if (applied_generation == generation && target &&
+	spin_lock_irqsave(&frame_lock, flags);
+	next = pending_scene;
+	epoch = generation;
+	spin_unlock_irqrestore(&frame_lock, flags);
+	if (applied_generation == epoch && target &&
 	    !(READ_ONCE(target->flags) & PF_EXITING))
 		goto out;
 	/*
@@ -653,7 +665,11 @@ static void apply_control(struct work_struct *work)
 	 */
 	stop_game();
 	remove_requests();
-	applied_generation = generation;
+	applied_generation = epoch;
+	strscpy(foreground, next.package, sizeof(foreground));
+	source_valid = next.valid;
+	source_game = next.game;
+	display_off = next.off;
 	last_error = 0;
 	switches++;
 	if (!configured || !source_valid)
@@ -668,6 +684,10 @@ static void apply_control(struct work_struct *work)
 			remove_requests();
 		scene_active = !last_error;
 	}
+	if (epoch != READ_ONCE(generation)) {
+		stop_game();
+		remove_requests();
+	}
 out:
 	mutex_unlock(&config_lock);
 }
@@ -677,7 +697,8 @@ static void scene_switch(void *data, bool preempt, struct task_struct *previous,
 {
 	u64 now, due;
 
-	if (!READ_ONCE(scene_active) || READ_ONCE(display_off) || !READ_ONCE(pmus))
+	if (!READ_ONCE(scene_active) || READ_ONCE(display_off) || !READ_ONCE(pmus) ||
+	    READ_ONCE(applied_generation) != READ_ONCE(generation))
 		return;
 	now = ktime_get_mono_fast_ns();
 	due = atomic64_read(&next_scene_sample);
@@ -844,16 +865,16 @@ void frame_policy_scene(const char *package, bool off, bool game)
 {
 	unsigned long flags;
 
-	mutex_lock(&config_lock);
-	source_valid = package && *package;
-	strscpy(foreground, source_valid ? package : "", sizeof(foreground));
-	source_game = source_valid && game;
-	display_off = off;
+	/* The affinity/event provider must never wait for PMU or probe teardown. */
 	spin_lock_irqsave(&frame_lock, flags);
+	pending_scene.valid = package && *package;
+	strscpy(pending_scene.package, pending_scene.valid ? package : "",
+		 sizeof(pending_scene.package));
+	pending_scene.game = pending_scene.valid && game;
+	pending_scene.off = off;
 	generation++;
 	spin_unlock_irqrestore(&frame_lock, flags);
-	mutex_unlock(&config_lock);
-	if (policy_wq)
+	if (policy_wq && READ_ONCE(configured))
 		queue_work(policy_wq, &control_work);
 }
 
