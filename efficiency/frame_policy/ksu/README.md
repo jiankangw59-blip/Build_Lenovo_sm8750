@@ -99,3 +99,45 @@ configuration; failure to restore removes native requests before attempting a
 confirmed legacy restoration. Boot reads the selected generation after acquiring
 the same lock. The WebUI reads
 status on user actions and has no refresh timer.
+
+Optional `sceneAux` defaults to false and never changes existing CPU/GPU, Scene,
+FAS, fallback-FPS or package choices. Explicit activation uses an independent
+typed auxiliary selector library; frequency-profile deduplication is not reused
+for auxiliary states. `check-aux` validates the kernel capability and every
+required fixed sysfs resource before legacy/native ownership is changed.
+The loader uses a 24-byte pointer ioctl request; file descriptors and the current
+Scene-table epoch are filled only in memory, never in saved generation files.
+
+Aux-enabled saves use FPS3 with a separate typed aux body; saves without aux
+retain FPS2 compatibility. New clients read FPS1/FPS2/FPS3. Each new generation
+adds `aux.bin` and `aux-required`; an old immutable generation missing these
+explicitly selects an empty auxiliary policy. Boot and rollback never inherit
+the previous generation's auxiliary policy or rewrite the old directory.
+All loads remain under the existing transaction lock, in this order: disable,
+Scene, aux/clear, game rules, FAS tuning, main configuration. Initial `aux_error`
+is checked as well as the base error before committing the new generation.
+
+The CPU auxiliary format carries original additive offsets in kHz, separate
+from the unchanged legacy frequency table's percent fields. Selection resolves
+raw mode/category/state calls before deduplicating complete records: Camera
+NONE cannot inherit a normal app's limiter, and off retains its separate
+frequency policy while auxiliary records are empty. Global options carry the
+original source and known configuration/default provenance; panel peak is the
+physical capability, not the current application's refresh rate. A missing
+stat_source uses the independently verified original default, not an asserted
+explicit user preference. No personal package inventory enters the numeric seed.
+
+Nonempty aux preflight requires the exact kernel aux ABI and table byte size.
+Feedback/options additionally require aux_feedback_supported=1; an older
+direct-only prototype cannot silently replace the complete controller. Legacy
+FPS1/FPS2 clears remain compatible with a kernel that has no aux capability.
+
+`sceneGpuLock` is an optional independent boolean override under `sceneAux`.
+Without an override, the imported numeric seed supplies the audited setting:
+this device explicitly enables it, distinct from Sun's original missing-key
+default false. The UI can disable this GPU helper while retaining CPU auxiliary
+policy. It adjusts only KGSL minimum/default startup levels; normal loaded GPU
+scaling and thermal/maximum constraints remain active. It does not write
+devfreq/min_freq or reinterpret mod_percent as a substitute. Preflight only
+reads the fixed KGSL topology and verifies writable attributes, while the
+kernel owns the independent lease and conditional restoration.

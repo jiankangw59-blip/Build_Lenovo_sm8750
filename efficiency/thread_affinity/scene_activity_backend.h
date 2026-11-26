@@ -4,9 +4,10 @@
 
 #include <linux/kconfig.h>
 #include "scene_activity_policy.h"
+#include "scene_event_feedback.h"
 
 struct sab_status {
-	sa_u64 epoch, inputs, transitions, load_samples, load_errors, deadline_ms;
+	sa_u64 epoch, inputs, transitions, load_samples, load_errors, deadline_ms, last_input_ns;
 	sa_u32 devices, contacts, load_permille, phase;
 	bool registered, reliable, deadline_valid;
 	int error;
@@ -22,6 +23,10 @@ int scene_activity_backend_init(void (*notify)(sa_u64 epoch, bool inactive));
 int scene_activity_backend_configure(const struct sa_context *context,
 		unsigned int first_policy_cpu);
 void scene_activity_backend_status(struct sab_status *status);
+void scene_activity_backend_set_feedback(sa_u64 epoch,
+		const struct fp_scene_event_config *config, void (*notify)(sa_u64 epoch));
+void scene_activity_backend_feedback(sa_u64 epoch, sa_u64 now_ns,
+		struct fp_scene_event_snapshot *snapshot);
 void scene_activity_backend_exit(void);
 
 #if IS_ENABLED(CONFIG_FRAME_POLICY_KUNIT_TEST)

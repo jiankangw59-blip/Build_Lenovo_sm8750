@@ -25,6 +25,9 @@ def log(text):
  with (s/'calls').open('a') as f:f.write(text+'\n')
 def status():
  print('abi=4\nconfigured=1\nlast_error=0\nfeatures='+ (s/'features').read_text().strip())
+ print('aux_error='+('-5' if (s/'aux-reported-error').exists() else '0'))
+ print('gpu_aux_error='+('-5' if (s/'gpu-aux-reported-error').exists() else '0'))
+ print('gpu_aux_rollback_error='+('-5' if (s/'gpu-aux-rollback-reported-error').exists() else '0'))
 def clean():
  if (s/'cleanup-blocked').exists() or (s/'legacy-running').exists():return 1
  print('legacy_was_running='+str(int((s/'legacy-stop-pending').exists())))
@@ -32,8 +35,12 @@ def clean():
 a=sys.argv[1];log(a)
 if a=='unpack-settings':
  source=pathlib.Path(os.environ['TRANSACTION_FIXTURES'])/sys.stdin.read().strip()
- for name in ('settings.json','config.bin','games.bin','scene.bin','fas.bin','enabled','scene-required'):
+ for name in ('settings.json','config.bin','games.bin','scene.bin','fas.bin','enabled','scene-required','aux.bin','aux-required'):
   shutil.copyfile(source/name,pathlib.Path(sys.argv[2])/name)
+elif a=='check-aux':
+ value=pathlib.Path(sys.argv[2]).read_bytes()
+ if len(value)!=26584 or (s/'fail-check-aux').exists():sys.exit(1)
+ if struct.unpack_from('<I',value,12)[0] and 'scene_aux' not in (s/'features').read_text().split(','):sys.exit(1)
 elif a=='check-fas':
  value=pathlib.Path(sys.argv[2]).read_bytes()
  if 'fas_tuning' not in (s/'features').read_text().strip().split(',') or len(value)!=80:sys.exit(1)
@@ -49,15 +56,24 @@ elif a=='legacy-clean':sys.exit(clean())
 elif a=='disable':
  if (s/'disable-blocked').exists():sys.exit(1)
  (s/'runtime').write_text('none')
-elif a in ('load','load-scene','load-rules','load-fas'):
+elif a in ('load','load-scene','load-rules','load-fas','load-aux'):
  identity=json.loads((pathlib.Path(sys.argv[2]).parent/'settings.json').read_text())['identity']
  log(a+':'+identity)
+ if a=='load-aux' and (s/('fail-aux-'+identity)).exists():
+  (s/('fail-aux-'+identity)).unlink();sys.exit(1)
  if a=='load-fas' and (s/('fail-fas-'+identity)).exists():
   (s/('fail-fas-'+identity)).unlink();sys.exit(1)
  if a=='load' and (s/('fail-load-'+identity)).exists():
   (s/('fail-load-'+identity)).unlink();sys.exit(1)
  if a=='load':(s/'runtime').write_text(identity)
  if a=='load-fas':(s/'runtime-fas').write_bytes(pathlib.Path(sys.argv[2]).read_bytes())
+ if a=='load-aux':(s/'runtime-aux').write_bytes(pathlib.Path(sys.argv[2]).read_bytes())
+ if a=='load':
+  if (s/('report-aux-error-'+identity)).exists():(s/'aux-reported-error').touch()
+  elif (s/'aux-reported-error').exists():(s/'aux-reported-error').unlink()
+  for name in ('gpu-aux','gpu-aux-rollback'):
+   if (s/('report-'+name+'-error-'+identity)).exists():(s/(name+'-reported-error')).touch()
+   elif (s/(name+'-reported-error')).exists():(s/(name+'-reported-error')).unlink()
 else:sys.exit(2)
 status()
 '''
@@ -130,6 +146,11 @@ os.execv({shutil.which('flock')!r},['flock']+sys.argv[1:])
         (target / "settings.json").write_text(json.dumps({"identity": identity, "enabled": enabled}) + "\n")
         (target / "enabled").write_text("1\n" if enabled else "0\n")
         (target / "scene-required").write_text("0\n")
+        aux = bytearray(26584)
+        struct.pack_into("<I", aux, 0, 1)
+        struct.pack_into("<28i", aux, 56, *([-1] * 28))
+        (target / "aux.bin").write_bytes(aux)
+        (target / "aux-required").write_text("0\n")
         (target / "config.bin").write_bytes(struct.pack("<2I", 4, 1) + bytes(584))
         (target / "games.bin").write_bytes(b"rules")
         (target / "scene.bin").write_bytes(b"scene")
@@ -145,7 +166,95 @@ os.execv({shutil.which('flock')!r},['flock']+sys.argv[1:])
         (self.state / "current").write_text(target.name + "\n")
         (self.state / "runtime").write_text(identity)
         (self.state / "runtime-fas").write_bytes((target / "fas.bin").read_bytes())
+        if (target / "aux.bin").exists():
+            (self.state / "runtime-aux").write_bytes((target / "aux.bin").read_bytes())
         return target
+
+    def auxiliary(self, identity):
+        target = self.fixtures / identity
+        aux = bytearray((target / "aux.bin").read_bytes())
+        struct.pack_into("<2I", aux, 8, 1, 1)
+        struct.pack_into("<2I", aux, 216, 1, 1000 if identity == "A" else 2000)
+        (target / "aux.bin").write_bytes(aux)
+        (target / "aux-required").write_text("1\n")
+        (target / "scene-required").write_text("1\n")
+        (self.state / "features").write_text("cpu,gpu_file_credentials,game_relations,fps_per_game,scene_table,fas_tuning,scene_aux")
+        return bytes(aux)
+
+    def test_aux_resource_preflight_precedes_any_legacy_or_native_mutation(self):
+        self.select("A")
+        self.auxiliary("B")
+        (self.state / "fail-check-aux").touch()
+        (self.state / "legacy-running").touch()
+        self.save("B", success=False)
+        calls = (self.state / "calls").read_text().splitlines()
+        self.assertIn("check-aux", calls)
+        self.assertNotIn("disable", calls)
+        self.assertNotIn("suspend-legacy", calls)
+        self.assertEqual((self.state / "runtime").read_text(), "A")
+
+    def test_aux_ioctl_failure_restores_previous_aux_and_frequency_generation(self):
+        previous = self.auxiliary("A")
+        self.auxiliary("B")
+        original = self.select("A")
+        (self.state / "fail-aux-B").touch()
+        self.save("B", success=False)
+        self.assertEqual(self.current(), original)
+        self.assertEqual((self.state / "runtime").read_text(), "A")
+        self.assertEqual((self.state / "runtime-aux").read_bytes(), previous)
+        calls = (self.state / "calls").read_text().splitlines()
+        self.assertLess(calls.index("load-scene:B"), calls.index("load-aux:B"))
+        self.assertLess(calls.index("load-aux:B"), calls.index("load-scene:A"))
+        self.assertLess(calls.index("load-scene:A"), calls.index("load-aux:A"))
+
+    def test_aux_error_in_successful_base_status_prevents_generation_commit(self):
+        self.auxiliary("B")
+        original = self.select("A")
+        (self.state / "report-aux-error-B").touch()
+        self.save("B", success=False)
+        self.assertEqual(self.current(), original)
+        self.assertEqual((self.state / "runtime").read_text(), "A")
+        self.assertEqual((self.state / "runtime-aux").read_bytes(), (original / "aux.bin").read_bytes())
+
+    def assert_gpu_status_prevents_commit(self, component):
+        self.auxiliary("B")
+        original=self.select("A")
+        (self.state/("report-"+component+"-error-B")).touch()
+        self.save("B",success=False)
+        self.assertEqual(self.current(),original)
+        self.assertEqual((self.state/"runtime").read_text(),"A")
+        self.assertEqual((self.state/"runtime-aux").read_bytes(),(original/"aux.bin").read_bytes())
+
+    def test_gpu_aux_error_cannot_be_hidden_by_successful_main_config(self):
+        self.assert_gpu_status_prevents_commit("gpu-aux")
+
+    def test_gpu_aux_rollback_error_cannot_be_hidden_by_successful_main_config(self):
+        self.assert_gpu_status_prevents_commit("gpu-aux-rollback")
+
+    def test_old_immutable_generation_clears_aux_on_rollback_without_rewriting_history(self):
+        self.auxiliary("B")
+        original = self.select("A", parent="defaults")
+        for leaf in ("aux.bin", "aux-required"):
+            (original / leaf).unlink()
+        before = {path.name: path.read_bytes() for path in original.iterdir()}
+        self.save("B")
+        self.assertNotEqual((self.state / "runtime-aux").read_bytes(), (self.module / "defaults/aux.bin").read_bytes())
+        self.run_command("rollback")
+        self.assertEqual((self.state / "runtime-aux").read_bytes(), (self.module / "defaults/aux.bin").read_bytes())
+        self.assertEqual({path.name: path.read_bytes() for path in original.iterdir()}, before)
+        self.assertEqual((self.current() / "aux-required").read_text(), "0\n")
+
+    def test_boot_applies_aux_from_same_locked_generation_in_order(self):
+        expected = self.auxiliary("B")
+        current = self.select("B")
+        self.run_command("boot")
+        self.assertEqual(self.current(), current)
+        self.assertEqual((self.state / "runtime-aux").read_bytes(), expected)
+        calls = (self.state / "calls").read_text().splitlines()
+        self.assertLess(calls.index("check-aux"), calls.index("disable"))
+        for first, second in (("load-scene:B", "load-aux:B"), ("load-aux:B", "load-rules:B"),
+                              ("load-rules:B", "load-fas:B"), ("load-fas:B", "load:B")):
+            self.assertLess(calls.index(first), calls.index(second))
 
     def current(self):
         pointer = self.state / "current"

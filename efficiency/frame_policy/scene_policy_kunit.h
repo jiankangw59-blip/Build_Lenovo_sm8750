@@ -304,8 +304,302 @@ static void fp_test_connect_before_open(struct input_dev *dev)
 	}
 }
 
+struct fp_test_aux_value {
+	int value, error, read_error;
+	u32 writes;
+	bool check_credentials;
+	struct fp_test_aux_value *foreign;
+	u64 *advance_epoch;
+};
+
+static ssize_t fp_test_aux_read(struct kiocb *iocb, struct iov_iter *output)
+{
+	struct fp_test_aux_value *value = iocb->ki_filp->private_data;
+	char text[32];
+	int length = scnprintf(text, sizeof(text), "%d\n", value->value);
+
+	if (value->check_credentials && current_cred() != iocb->ki_filp->f_cred)
+		return -EACCES;
+	if (value->read_error)
+		return value->read_error;
+	return copy_to_iter(text, length, output) == length ? length : -EFAULT;
+}
+
+static ssize_t fp_test_aux_write(struct kiocb *iocb, struct iov_iter *input)
+{
+	struct fp_test_aux_value *value = iocb->ki_filp->private_data;
+	char text[32];
+	size_t length = iov_iter_count(input);
+	int desired;
+
+	if (value->check_credentials && current_cred() != iocb->ki_filp->f_cred)
+		return -EACCES;
+	if (value->error) {
+		if (value->foreign)
+			value->foreign->value = 7777;
+		return value->error;
+	}
+	if (length >= sizeof(text) || copy_from_iter(text, length, input) != length)
+		return -EFAULT;
+	text[length] = 0;
+	if (kstrtoint(strim(text), 10, &desired))
+		return -EINVAL;
+	value->value = desired;
+	value->writes++;
+	if (value->advance_epoch)
+		(*value->advance_epoch)++;
+	return length;
+}
+
+static const struct file_operations fp_test_aux_ops = {
+	.read_iter = fp_test_aux_read,
+	.write_iter = fp_test_aux_write,
+	.llseek = noop_llseek,
+};
+
+static int fp_test_install_aux_metadata(struct kunit *test, struct fp_test_aux_value *values,
+		u32 mask, const struct fp_scene_aux_cpu *metadata)
+{
+	struct file *files[FP_MAX_CPUS][FP_SCENE_AUX_KNOBS] = {};
+	struct fp_scene_aux_table *table;
+	struct fp_scene_aux_cpu *cpu;
+	u32 i, j;
+	int error = 0;
+
+	table = kvzalloc(sizeof(*table), GFP_KERNEL);
+	if (!table)
+		return -ENOMEM;
+	table->abi = FP_SCENE_AUX_ABI;
+	table->cpu_count = 1;
+	table->profile_count = 3;
+	table->defaults[FP_SCENE_INACTIVE] = 1;
+	table->defaults[FP_SCENE_OFF] = 2;
+	table->expected_scene_epoch = scene_table_epoch;
+	for (i = 0; i < FP_MAX_CPUS; i++)
+		for (j = 0; j < FP_SCENE_AUX_KNOBS; j++) table->fds[i][j] = -1;
+	cpu = &table->profiles[0].cpus[0];
+	cpu->valid_mask = mask;
+	if (mask & FP_AUX_UP_RATE) cpu->up_us = 1000;
+	if (mask & FP_AUX_DOWN_RATE) cpu->down_us = 1000;
+	if (mask & FP_AUX_HISPEED) cpu->hispeed_khz = 748800;
+	if (mask & FP_AUX_BOOST) cpu->walt_boost = -2;
+	if (mask & FP_AUX_CORE_CTL) { cpu->core_enable = 1; cpu->max_cpus = 2; }
+	if (metadata) {
+		size_t offset = offsetof(struct fp_scene_aux_cpu, excludes_mask);
+
+		memcpy((char *)cpu + offset, (const char *)metadata + offset, sizeof(*cpu) - offset);
+		table->options.valid_mask = FP_AUX_OPT_SOURCE | FP_AUX_OPT_STAT_SOURCE |
+			FP_AUX_OPT_GESTURE | FP_AUX_OPT_GESTURE_DURATION | FP_AUX_OPT_PANEL_PEAK;
+		table->options.source = FP_AUX_SOURCE_ONLINE;
+		table->options.stat_source = 1;
+		table->options.gesture_boost = 1;
+		table->options.panel_peak_hz = 185;
+	}
+	table->profiles[1] = table->profiles[0];
+	if (mask & FP_AUX_UP_RATE) table->profiles[1].cpus[0].up_us = 2000;
+	if (mask & FP_AUX_BOOST) table->profiles[1].cpus[0].walt_boost = -5;
+	for (j = 0; j < FP_SCENE_AUX_KNOBS; j++) {
+		if (!(fp_scene_aux_required(table, 0) & fp_scene_aux_knob_bit(j)))
+			continue;
+		files[0][j] = anon_inode_getfile("scene-aux-kunit", &fp_test_aux_ops, &values[j], O_RDWR);
+		if (IS_ERR(files[0][j])) {
+			error = PTR_ERR(files[0][j]); files[0][j] = NULL; break;
+		}
+		table->fds[0][j] = j; /* Actual private files passed to the test-only gate. */
+	}
+	if (!error) {
+		mutex_lock(&config_lock);
+		error = fp_scene_aux_test_replace(table, scene_table, scene_table_epoch, files);
+		mutex_unlock(&config_lock);
+	}
+	for (j = 0; j < FP_SCENE_AUX_KNOBS; j++)
+		if (files[0][j]) fput(files[0][j]);
+	if (error)
+		kvfree(table);
+	(void)test;
+	return error;
+}
+
+static int fp_test_install_aux(struct kunit *test, struct fp_test_aux_value *values, u32 mask)
+{
+	return fp_test_install_aux_metadata(test, values, mask, NULL);
+}
+
+static void fp_test_aux_apply(const char *package, bool game, bool off, bool inactive, bool allowed)
+{
+	fp_scene_aux_apply(package, game, off, inactive, allowed, 0, NULL);
+}
+
+static void frame_test_scene_aux_leases_and_rollback(struct kunit *test)
+{
+	struct fp_scene_aux_cpu metadata = {
+		.feedback_mask = FP_AUX_FEEDBACK_CORE_CTL,
+		.limiter_cluster_count = 1,
+	};
+	struct fp_test_aux_value *values;
+	struct fp_scene_table *scene;
+	struct fp_aux_status aux;
+	u32 writes;
+	u32 map, retained, n;
+	u64 epoch = 7;
+	int error;
+
+	KUNIT_ASSERT_EQ(test, cpufreq_register_driver(&fp_test_cpufreq_driver), 0);
+	fp_test_driver_registered = true;
+	fp_test_policy = cpufreq_cpu_get(0);
+	KUNIT_ASSERT_NOT_NULL(test, fp_test_policy);
+	scene = kvzalloc(sizeof(*scene), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, scene);
+	scene_table = scene;
+	scene->cpu_count = 1;
+	scene_table_epoch++;
+	values = kunit_kcalloc(test, FP_SCENE_AUX_KNOBS, sizeof(*values), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, values);
+	values[FP_AUX_KNOB_HISPEED].value = 1344000;
+	values[FP_AUX_KNOB_CORE_MIN].value = cpumask_weight(fp_test_policy->related_cpus);
+	values[FP_AUX_KNOB_CORE_MAX].value = values[FP_AUX_KNOB_CORE_MIN].value;
+	KUNIT_ASSERT_EQ(test, fp_test_install_aux(test, values, FP_AUX_DIRECT_MASK), 0);
+	mutex_lock(&config_lock);
+	configured = true;
+	fp_test_aux_apply("test.scene", false, false, false, true);
+	fp_scene_aux_status(&aux);
+	KUNIT_EXPECT_EQ(test, aux.error, 0);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_BOOST].value, -2);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_MIN].value, 0);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_MAX].value, 2);
+	writes = values[FP_AUX_KNOB_UP_RATE].writes;
+	fp_test_aux_apply("test.scene", false, false, false, true);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_UP_RATE].writes, writes);
+	values[FP_AUX_KNOB_UP_RATE].value = 7777; /* Foreign owner must survive. */
+	fp_test_aux_apply("test.scene", false, false, true, true);
+	fp_scene_aux_status(&aux);
+	KUNIT_EXPECT_EQ(test, aux.error, 0);
+	KUNIT_EXPECT_EQ(test, aux.conflicts, 1U);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_UP_RATE].value, 7777);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_BOOST].value, -5);
+	fp_test_aux_apply("test.game", true, false, false, true);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_UP_RATE].value, 7777);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_BOOST].value, 0);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_ENABLE].value, 0);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_MIN].value,
+		(int)cpumask_weight(fp_test_policy->related_cpus));
+	fp_test_aux_apply("test.scene", false, false, false, true);
+	values[FP_AUX_KNOB_CORE_MAX].value = 3;
+	fp_test_aux_apply("test.scene", false, false, true, true);
+	fp_scene_aux_status(&aux);
+	KUNIT_EXPECT_EQ(test, aux.error, 0);
+	KUNIT_EXPECT_EQ(test, aux.conflicts, 2U);
+	fp_test_aux_apply("test.game", true, false, false, true);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_ENABLE].value, 1);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_MIN].value, 0);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_MAX].value, 3);
+	KUNIT_EXPECT_EQ(test, fp_scene_aux_clear(), 0);
+	mutex_unlock(&config_lock);
+	values[FP_AUX_KNOB_UP_RATE].value = 0;
+	KUNIT_ASSERT_EQ(test, fp_test_install_aux(test, values, FP_AUX_DIRECT_MASK), 0);
+	values[FP_AUX_KNOB_BOOST].error = -EIO;
+	values[FP_AUX_KNOB_BOOST].foreign = &values[FP_AUX_KNOB_UP_RATE];
+	mutex_lock(&config_lock);
+	fp_test_aux_apply("test.scene", false, false, false, true);
+	fp_scene_aux_status(&aux);
+	KUNIT_EXPECT_EQ(test, aux.error, -EIO);
+	KUNIT_EXPECT_STREQ(test, aux.stage, "aux_write");
+	KUNIT_EXPECT_EQ(test, aux.profile, -1);
+	KUNIT_EXPECT_TRUE(test, configured);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_UP_RATE].value, 7777);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_DOWN_RATE].value, 0);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_HISPEED].value, 1344000);
+	values[FP_AUX_KNOB_BOOST].error = 0;
+	values[FP_AUX_KNOB_BOOST].foreign = NULL;
+	fp_test_aux_apply("test.scene.retry", false, false, false, true);
+	fp_scene_aux_status(&aux);
+	KUNIT_EXPECT_EQ(test, aux.error, 0);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_BOOST].value, -2);
+	values[FP_AUX_KNOB_UP_RATE].read_error = -EIO;
+	fp_test_aux_apply("test.scene.read-failure", false, false, false, true);
+	fp_scene_aux_status(&aux);
+	KUNIT_EXPECT_EQ(test, aux.error, -EIO);
+	KUNIT_EXPECT_STREQ(test, aux.stage, "aux_read");
+	KUNIT_EXPECT_TRUE(test, configured);
+	values[FP_AUX_KNOB_UP_RATE].read_error = 0;
+	KUNIT_EXPECT_EQ(test, fp_scene_aux_clear(), 0);
+	mutex_unlock(&config_lock);
+	values[FP_AUX_KNOB_UP_RATE].value = 0;
+	KUNIT_ASSERT_EQ(test, fp_test_install_aux(test, values, FP_AUX_DIRECT_MASK), 0);
+	values[FP_AUX_KNOB_UP_RATE].advance_epoch = &epoch;
+	writes = values[FP_AUX_KNOB_DOWN_RATE].writes;
+	mutex_lock(&config_lock);
+	fp_scene_aux_apply("test.scene.cancel", false, false, false, true, 7, &epoch);
+	fp_scene_aux_status(&aux);
+	KUNIT_EXPECT_EQ(test, aux.error, 0);
+	KUNIT_EXPECT_STREQ(test, aux.stage, "aux_stale");
+	KUNIT_EXPECT_EQ(test, aux.profile, -1);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_UP_RATE].value, 0);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_DOWN_RATE].writes, writes);
+	KUNIT_EXPECT_TRUE(test, configured);
+	values[FP_AUX_KNOB_UP_RATE].advance_epoch = NULL;
+	mutex_unlock(&config_lock);
+
+	/* Dynamic original ordered-core path uses the same real file leases.
+	 * Its force branch must never transiently enable an externally-disabled
+	 * vendor controller. A foreign core member yields the whole group only.
+	 */
+	mutex_lock(&config_lock);
+	error = fp_scene_aux_clear();
+	mutex_unlock(&config_lock);
+	KUNIT_ASSERT_EQ(test, error, 0);
+	memset(values, 0, sizeof(*values) * FP_SCENE_AUX_KNOBS);
+	n = cpumask_weight(fp_test_policy->related_cpus);
+	values[FP_AUX_KNOB_CORE_MIN].value = n > 1 ? n - 1 : 0;
+	values[FP_AUX_KNOB_CORE_MAX].value = n;
+	KUNIT_ASSERT_EQ(test, fp_test_install_aux_metadata(test, values, FP_AUX_UP_RATE, &metadata), 0);
+	mutex_lock(&config_lock);
+	fp_test_aux_apply("test.native.core", false, false, false, true);
+	KUNIT_EXPECT_EQ(test, fp_scene_aux_core_seed(&map, &retained), 0);
+	KUNIT_EXPECT_EQ(test, map, 0U);
+	KUNIT_EXPECT_EQ(test, retained, 0U);
+	fp_scene_aux_core_update(1, true, 0, NULL);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_ENABLE].value, 0);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_ENABLE].writes, 0U);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_MIN].value, (int)n);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_MAX].value, (int)n);
+	fp_scene_aux_core_update(0, false, 0, NULL);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_ENABLE].value, 1);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_MIN].value, (int)(n > 4 ? 4 : n > 3 ? 2 : n > 2 ? 1 : 0));
+	values[FP_AUX_KNOB_CORE_MAX].value = n;
+	writes = values[FP_AUX_KNOB_CORE_ENABLE].writes;
+	fp_scene_aux_core_update(1, false, 0, NULL);
+	fp_scene_aux_status(&aux);
+	KUNIT_EXPECT_EQ(test, aux.error, 0);
+	KUNIT_EXPECT_EQ(test, aux.conflicts, 1U);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_ENABLE].writes, writes);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_MAX].value, (int)n);
+	KUNIT_EXPECT_TRUE(test, configured);
+	KUNIT_EXPECT_EQ(test, fp_scene_aux_clear(), 0);
+	mutex_unlock(&config_lock);
+	memset(values, 0, sizeof(*values) * FP_SCENE_AUX_KNOBS);
+	values[FP_AUX_KNOB_CORE_MIN].value = values[FP_AUX_KNOB_CORE_MAX].value = n;
+	KUNIT_ASSERT_EQ(test, fp_test_install_aux_metadata(test, values, FP_AUX_UP_RATE, &metadata), 0);
+	mutex_lock(&config_lock);
+	fp_test_aux_apply("test.native.core", false, false, false, true);
+	values[FP_AUX_KNOB_CORE_MAX].error = -EIO;
+	fp_scene_aux_core_update(0, false, 0, NULL);
+	fp_scene_aux_status(&aux);
+	KUNIT_EXPECT_EQ(test, aux.error, -EIO);
+	KUNIT_EXPECT_STREQ(test, aux.stage, "aux_core_write");
+	KUNIT_EXPECT_EQ(test, aux.profile, -1);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_UP_RATE].value, 0);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_ENABLE].value, 0);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_MIN].value, (int)n);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_CORE_MAX].value, (int)n);
+	KUNIT_EXPECT_TRUE(test, configured);
+	values[FP_AUX_KNOB_CORE_MAX].error = 0;
+	mutex_unlock(&config_lock);
+}
+
 static void frame_test_scene_input_inactive_and_epoch(struct kunit *test)
 {
+	struct fp_test_aux_value *aux_values;
 	struct fp_scene_table *table;
 	struct fp_scene_profile *active, *inactive;
 	struct sab_status status;
@@ -442,6 +736,319 @@ static void frame_test_scene_input_inactive_and_epoch(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, status.registered);
 	KUNIT_EXPECT_FALSE(test, status.deadline_valid);
 	KUNIT_EXPECT_TRUE(test, scene_active);
+	/* Same frequency profile, different aux only: actual input IRQ/work must
+	 * still choose inactive, while no static profile invents a PMU consumer.
+	 */
+	aux_values = kunit_kcalloc(test, FP_SCENE_AUX_KNOBS, sizeof(*aux_values), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aux_values);
+	aux_values[FP_AUX_KNOB_UP_RATE].value = 41;
+	scene_table_epoch++;
+	KUNIT_ASSERT_EQ(test, fp_test_install_aux(test, aux_values, FP_AUX_UP_RATE), 0);
+	configuration.flags = FP_CPU | FP_GPU;
+	frame_policy_scene_full("frame.policy.kunit.scene", false, false, 106);
+	flush_work(&control_work);
+	scene_activity_backend_status(&status);
+	KUNIT_ASSERT_TRUE(test, status.registered);
+	KUNIT_EXPECT_EQ(test, aux_values[FP_AUX_KNOB_UP_RATE].value, 1000);
+	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
+	input_report_key(fp_test_activity_input, BTN_TOUCH, 1); input_sync(fp_test_activity_input);
+	input_report_key(fp_test_activity_input, BTN_TOUCH, 0); input_sync(fp_test_activity_input);
+	scene_activity_backend_test_flush();
+	KUNIT_ASSERT_EQ(test, scene_activity_backend_test_deadline(650), 0);
+	fp_test_flush_activity_controls();
+	KUNIT_EXPECT_EQ(test, aux_values[FP_AUX_KNOB_UP_RATE].value, 2000);
+	KUNIT_EXPECT_PTR_EQ(test, scene_profile, active);
+	KUNIT_EXPECT_EQ(test, cpu_floors[0], 750000U);
+	input_report_key(fp_test_activity_input, BTN_TOUCH, 1); input_sync(fp_test_activity_input);
+	fp_test_flush_activity_controls();
+	KUNIT_EXPECT_EQ(test, aux_values[FP_AUX_KNOB_UP_RATE].value, 1000);
+	configuration.flags = FP_GPU;
+	frame_policy_scene_full("frame.policy.kunit.scene", false, false, 107);
+	flush_work(&control_work);
+	scene_activity_backend_status(&status);
+	KUNIT_EXPECT_FALSE(test, status.registered);
+	KUNIT_EXPECT_EQ(test, aux_values[FP_AUX_KNOB_UP_RATE].value, 41);
+	KUNIT_EXPECT_NOT_NULL(test, gpu_device);
+}
+
+static u32 fp_test_scene_demand = 850000;
+
+static bool fp_test_scene_sample(unsigned int cpu, u32 *khz)
+{
+	/* CPU0 would force a 3GHz cap if the production exclusion filter failed. */
+	*khz = !cpu ? 4000000 : cpu == 1 ? fp_test_scene_demand : 0;
+	return true;
+}
+
+static void fp_test_mt_contact(bool down, int x, int y)
+{
+	input_mt_slot(fp_test_activity_input, 0);
+	input_mt_report_slot_state(fp_test_activity_input, MT_TOOL_FINGER, down);
+	if (down) {
+		input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, x);
+		input_report_abs(fp_test_activity_input, ABS_MT_POSITION_Y, y);
+	}
+	input_report_key(fp_test_activity_input, BTN_TOUCH, down);
+	input_sync(fp_test_activity_input);
+}
+
+static void frame_test_scene_native_additive_and_physical_gesture(struct kunit *test)
+{
+	struct fp_scene_aux_cpu metadata = {
+		.feedback_mask = FP_AUX_FEEDBACK_EXCLUDES | FP_AUX_FEEDBACK_PREFER |
+			FP_AUX_FEEDBACK_PERFECT | FP_AUX_FEEDBACK_SMOOTHNESS |
+			FP_AUX_FEEDBACK_MT | FP_AUX_FEEDBACK_ADDITIVE,
+		.excludes_mask = 1, .prefer = 1, .additive_count = 3,
+		.additive = {{0, 150000}, {1152000, 100000}, {1785600, 70000}},
+	};
+	struct fp_test_aux_value *values;
+	struct fp_scene_table *table;
+	struct fp_scene_event_snapshot events;
+	struct sab_status activity;
+	u64 before;
+	int error;
+
+	KUNIT_ASSERT_EQ(test, cpufreq_register_driver(&fp_test_cpufreq_driver), 0);
+	fp_test_driver_registered = true;
+	fp_test_policy = cpufreq_cpu_get(0);
+	KUNIT_ASSERT_NOT_NULL(test, fp_test_policy);
+	KUNIT_ASSERT_GE(test, cpumask_weight(fp_test_policy->related_cpus), 2);
+	table = kvzalloc(sizeof(*table), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, table);
+	scene_table = table;
+	table->abi = FP_SCENE_ABI; table->cpu_count = 1; table->profile_count = 1;
+	table->profiles[0].flags = FP_SCENE_ENABLED;
+	table->profiles[0].cpus[0].limits = (struct fp_limits){500000, 3000000};
+	/* Legacy margins are deliberately empty. Only the native typed path can
+	 * start PMUs and issue the tested dynamic QoS request.
+	 */
+	scene_table_epoch++;
+	configuration.cpu_count = 1;
+	configuration.cpus[0].cpu = 0;
+	configuration.flags = FP_CPU;
+	values = kunit_kcalloc(test, FP_SCENE_AUX_KNOBS, sizeof(*values), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, values);
+	values[FP_AUX_KNOB_UP_RATE].value = 41;
+	KUNIT_ASSERT_EQ(test, fp_test_install_aux_metadata(test, values, FP_AUX_UP_RATE, &metadata), 0);
+	fp_test_activity_input = input_allocate_device();
+	KUNIT_ASSERT_NOT_NULL(test, fp_test_activity_input);
+	fp_test_activity_input->name = "frame-native-physical-mt";
+	__set_bit(INPUT_PROP_DIRECT, fp_test_activity_input->propbit);
+	input_set_capability(fp_test_activity_input, EV_KEY, BTN_TOUCH);
+	input_set_abs_params(fp_test_activity_input, ABS_MT_POSITION_X, 0, 1000, 0, 0);
+	input_set_abs_params(fp_test_activity_input, ABS_MT_POSITION_Y, 0, 1800, 0, 0);
+	error = input_mt_init_slots(fp_test_activity_input, 2, INPUT_MT_DIRECT);
+	KUNIT_ASSERT_EQ(test, error, 0);
+	error = input_register_device(fp_test_activity_input);
+	if (error) {
+		input_free_device(fp_test_activity_input); fp_test_activity_input = NULL;
+		KUNIT_FAIL(test, "Cannot register real MT event fixture");
+		return;
+	}
+	test_scene_cpu_sample = fp_test_scene_sample;
+	fp_test_scene_demand = 850000;
+	configured = true;
+	frame_policy_scene_full("frame.policy.kunit.native", false, false, 400);
+	flush_work(&control_work);
+	KUNIT_ASSERT_EQ(test, last_error, 0);
+	KUNIT_ASSERT_NOT_NULL(test, pmus);
+	scene_activity_backend_status(&activity);
+	KUNIT_ASSERT_TRUE(test, activity.registered);
+	fp_test_mt_contact(true, 500, 500); /* real input dispatch, non-edge origin */
+	scene_activity_backend_test_flush();
+	before = scene_native_samples;
+	apply_scene(&scene_work);
+	KUNIT_EXPECT_GT(test, scene_native_samples, before);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 1000000);
+	/* Native 1,002,000+100,000 ->1.5GHz OPP. The old percent path would
+	 * produce 1,503,000 and snap to2GHz, so this is a negative control.
+	 */
+	fp_test_scene_demand = 1002000;
+	apply_scene(&scene_work);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 1500000);
+	fp_test_mt_contact(false, 0, 0);
+	fp_test_mt_contact(true, 10, 400);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, 69);
+	input_sync(fp_test_activity_input);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_EXPECT_FALSE(test, events.gesture_active);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, 70);
+	input_sync(fp_test_activity_input);
+	scene_activity_backend_test_flush();
+	apply_scene(&scene_work);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_EXPECT_TRUE(test, events.gesture_active);
+	KUNIT_EXPECT_TRUE(test, events.force_core);
+	KUNIT_EXPECT_FALSE(test, events.notify_active);
+	KUNIT_EXPECT_GT(test, events.next_deadline_ns, ktime_get_ns());
+	KUNIT_EXPECT_TRUE(test, delayed_work_pending(&scene_feedback_deadline));
+	fp_test_mt_contact(false, 0, 0);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_EXPECT_TRUE(test, events.gesture_active); /* release does not revoke the pulse */
+	frame_policy_scene_full("frame.policy.kunit.native-game", true, true, 401);
+	flush_work(&control_work);
+	KUNIT_EXPECT_TRUE(test, scene_active); /* game screen-off is Scene off, never FAS */
+	KUNIT_EXPECT_FALSE(test, game_active);
+	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
+	KUNIT_EXPECT_FALSE(test, delayed_work_pending(&scene_feedback_deadline));
+	frame_policy_scene_full("frame.policy.kunit.native-game", false, true, 402);
+	flush_work(&control_work);
+	KUNIT_EXPECT_EQ(test, last_error, 0);
+	KUNIT_EXPECT_TRUE(test, configured);
+	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
+	KUNIT_EXPECT_FALSE(test, delayed_work_pending(&scene_feedback_deadline));
+	scene_activity_backend_status(&activity);
+	KUNIT_EXPECT_FALSE(test, activity.registered);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_UP_RATE].value, 41);
+	configuration.flags = 0;
+	frame_policy_scene_full("frame.policy.kunit.native", false, false, 403);
+	flush_work(&control_work);
+	scene_activity_backend_status(&activity);
+	KUNIT_EXPECT_TRUE(test, configured);
+	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
+	KUNIT_EXPECT_FALSE(test, activity.registered);
+	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_UP_RATE].value, 41);
+}
+
+static int fp_test_gpu_aux_result;
+static bool fp_test_gpu_aux_creds_restored;
+
+static void fp_test_gpu_aux_worker(struct work_struct *work)
+{
+	const struct cred *before = current_cred();
+
+	mutex_lock(&config_lock);
+	fp_test_gpu_aux_result = fp_scene_gpu_aux_apply(gpu_aux_allowed(), generation,
+		gpu_aux_allowed() ? &generation : NULL);
+	mutex_unlock(&config_lock);
+	fp_test_gpu_aux_creds_restored = current_cred() == before;
+}
+static DECLARE_WORK(fp_test_gpu_aux_work, fp_test_gpu_aux_worker);
+
+static void fp_test_run_gpu_aux(void)
+{
+	queue_work(policy_wq, &fp_test_gpu_aux_work);
+	flush_work(&fp_test_gpu_aux_work);
+}
+
+static void frame_test_scene_gpu_aux_credentials_and_isolation(struct kunit *test)
+{
+	struct fp_test_aux_value *values;
+	struct fp_scene_gpu_aux *candidate = NULL;
+	struct fp_scene_gpu_aux_status status;
+	const struct cred *saved, *before = current_cred();
+	struct cred *credentials;
+	u32 i;
+	int error;
+
+	KUNIT_ASSERT_EQ(test, cpufreq_register_driver(&fp_test_cpufreq_driver), 0);
+	fp_test_driver_registered = true;
+	fp_test_policy = cpufreq_cpu_get(0);
+	KUNIT_ASSERT_NOT_NULL(test, fp_test_policy);
+	fp_test_gpu = platform_device_register_simple("frame-kunit-gpu", -1, NULL, 0);
+	if (IS_ERR(fp_test_gpu)) {
+		fp_test_gpu = NULL; KUNIT_FAIL(test, "Cannot register auxiliary GPU QoS fixture"); return;
+	}
+	configuration.cpu_count = 1; configuration.cpus[0].cpu = 0;
+	configuration.cpus[0].game = (struct fp_limits){500000, 3000000};
+	configuration.gpu_game = (struct fp_limits){330000, 1083000};
+	configuration.flags = FP_CPU | FP_GPU;
+	strscpy(configuration.gpu_device, "frame-kunit-gpu", sizeof(configuration.gpu_device));
+	KUNIT_ASSERT_EQ(test, add_requests(true), 0);
+	/* The outgoing frequency votes are actual QoS requests. Qualification
+	 * through Android libgui is separate, already covered by game fixtures.
+	 */
+	configured = source_valid = source_game = game_active = true;
+	display_off = false;
+	values = kunit_kcalloc(test, 3, sizeof(*values), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, values);
+	values[0].value = 12; values[1].value = 5; values[2].value = 7;
+	credentials = prepare_creds();
+	KUNIT_ASSERT_NOT_NULL(test, credentials);
+	saved = override_creds(credentials);
+	for (i = 0; i < 3; i++) {
+		values[i].check_credentials = true;
+		fp_test_gpu_aux_files[i] = anon_inode_getfile("scene-gpu-prepared-cred",
+			&fp_test_aux_ops, &values[i], O_RDWR);
+		if (IS_ERR(fp_test_gpu_aux_files[i])) {
+			fp_test_gpu_aux_files[i] = NULL;
+			break;
+		}
+	}
+	revert_creds(saved);
+	put_cred(credentials);
+	KUNIT_ASSERT_EQ(test, i, 3U);
+	KUNIT_EXPECT_PTR_NE(test, current_cred(), fp_test_gpu_aux_files[1]->f_cred);
+	error = fp_scene_gpu_aux_test_prepare(fp_test_gpu_aux_files[0], fp_test_gpu_aux_files[1],
+		fp_test_gpu_aux_files[2], &candidate);
+	KUNIT_ASSERT_EQ(test, error, 0);
+	KUNIT_EXPECT_PTR_EQ(test, current_cred(), before);
+	mutex_lock(&config_lock);
+	KUNIT_EXPECT_EQ(test, fp_scene_gpu_aux_release(), 0);
+	fp_scene_gpu_aux_commit(candidate);
+	mutex_unlock(&config_lock);
+	fp_test_run_gpu_aux();
+	KUNIT_EXPECT_EQ(test, fp_test_gpu_aux_result, 0);
+	KUNIT_EXPECT_TRUE(test, fp_test_gpu_aux_creds_restored);
+	KUNIT_EXPECT_EQ(test, values[1].value, 11);
+	KUNIT_EXPECT_EQ(test, values[2].value, 11);
+	values[1].value = 4; /* A separate owner changes only the minimum. */
+	fp_test_run_gpu_aux();
+	fp_scene_gpu_aux_status(&status);
+	KUNIT_EXPECT_EQ(test, status.conflict_mask, 1U);
+	KUNIT_EXPECT_EQ(test, values[1].value, 4);
+	KUNIT_EXPECT_EQ(test, values[2].value, 11);
+	display_off = true;
+	fp_test_run_gpu_aux();
+	KUNIT_EXPECT_EQ(test, values[1].value, 4);
+	KUNIT_EXPECT_EQ(test, values[2].value, 7);
+	KUNIT_EXPECT_TRUE(test, configured);
+	KUNIT_EXPECT_TRUE(test, game_active);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 3000000);
+	KUNIT_EXPECT_EQ(test, dev_pm_qos_read_value(&fp_test_gpu->dev, DEV_PM_QOS_MAX_FREQUENCY), 1083000);
+	mutex_lock(&config_lock);
+	KUNIT_EXPECT_EQ(test, fp_scene_gpu_aux_release(), 0);
+	fp_scene_gpu_aux_commit(NULL);
+	mutex_unlock(&config_lock);
+	values[1].value = 5; values[2].value = 7;
+	KUNIT_ASSERT_EQ(test, fp_scene_gpu_aux_test_prepare(fp_test_gpu_aux_files[0],
+		fp_test_gpu_aux_files[1], fp_test_gpu_aux_files[2], &candidate), 0);
+	mutex_lock(&config_lock);
+	fp_scene_gpu_aux_commit(candidate);
+	mutex_unlock(&config_lock);
+	values[2].error = -EIO;
+	display_off = false;
+	fp_test_run_gpu_aux();
+	fp_scene_gpu_aux_status(&status);
+	KUNIT_EXPECT_EQ(test, fp_test_gpu_aux_result, -EIO);
+	KUNIT_EXPECT_EQ(test, status.error, -EIO);
+	KUNIT_EXPECT_EQ(test, status.rollback_error, 0);
+	KUNIT_EXPECT_EQ(test, values[1].value, 5); /* Roll back only this acquired minimum. */
+	KUNIT_EXPECT_EQ(test, values[2].value, 7);
+	KUNIT_EXPECT_TRUE(test, configured);
+	KUNIT_EXPECT_TRUE(test, game_active);
+	KUNIT_EXPECT_TRUE(test, fp_test_gpu_aux_creds_restored);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 3000000);
+	values[2].error = 0;
+	fp_test_run_gpu_aux(); /* A new explicit control action can retry. */
+	KUNIT_EXPECT_EQ(test, values[1].value, 11);
+	configuration.flags |= FP_OBSERVE;
+	fp_test_run_gpu_aux();
+	KUNIT_EXPECT_EQ(test, values[1].value, 5);
+	KUNIT_EXPECT_EQ(test, values[2].value, 7);
+	KUNIT_EXPECT_TRUE(test, fp_test_gpu_aux_creds_restored);
+	configuration.flags &= ~FP_OBSERVE;
+	fp_test_run_gpu_aux();
+	KUNIT_EXPECT_EQ(test, values[1].value, 11);
+	scene_table = kvzalloc(sizeof(*scene_table), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, scene_table);
+	scene_profile = NULL;
+	source_game = false; /* Explicit ignored Scene has no frequency profile. */
+	fp_test_run_gpu_aux();
+	KUNIT_EXPECT_EQ(test, values[1].value, 5);
+	KUNIT_EXPECT_EQ(test, values[2].value, 7);
+	KUNIT_EXPECT_TRUE(test, configured);
+	KUNIT_EXPECT_TRUE(test, fp_test_gpu_aux_creds_restored);
 }
 
 static void frame_test_scene_status_preserves_error_tail(struct kunit *test)
@@ -491,16 +1098,21 @@ static void frame_test_scene_status_preserves_error_tail(struct kunit *test)
 	KUNIT_EXPECT_GT(test, length, 2048);
 	KUNIT_EXPECT_LT(test, length, FP_STATUS_SIZE - 1);
 	KUNIT_EXPECT_NOT_NULL(test, strstr(text, "scene_activity_error="));
+	KUNIT_EXPECT_NOT_NULL(test, strstr(text, "aux_abi=1\naux_table_bytes=26584\naux_feedback_supported=1\n"));
+	KUNIT_EXPECT_NOT_NULL(test, strstr(text, "gpu_aux_rollback_error="));
 	KUNIT_EXPECT_NOT_NULL(test, strstr(text,
 		"last_error=-5\nlast_error_stage=scene_activity_status_tail_fixture\n"));
 }
 
-/* Add these seven entries to the existing frame_policy suite's case array. */
+/* Add these cases to the existing frame_policy suite's case array. */
 #define FP_SCENE_KUNIT_CASES \
 	KUNIT_CASE(frame_test_scene_selection_and_game_exclusion), \
 	KUNIT_CASE(frame_test_scene_validation_boundaries), \
 	KUNIT_CASE(frame_test_scene_static_and_dynamic_feedback), \
 	KUNIT_CASE(frame_test_scene_table_topology), \
+	KUNIT_CASE(frame_test_scene_aux_leases_and_rollback), \
 	KUNIT_CASE(frame_test_scene_control_ownership), \
 	KUNIT_CASE(frame_test_scene_input_inactive_and_epoch), \
+	KUNIT_CASE(frame_test_scene_native_additive_and_physical_gesture), \
+	KUNIT_CASE(frame_test_scene_gpu_aux_credentials_and_isolation), \
 	KUNIT_CASE(frame_test_scene_status_preserves_error_tail)

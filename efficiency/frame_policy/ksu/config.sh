@@ -72,6 +72,25 @@ apply_dir() {
     # is always balance/1 FPS, supplied by the module without rewriting history.
     fas=$chosen/fas.bin
     [ -f "$fas" ] || fas=$module/defaults/fas.bin
+    aux=$chosen/aux.bin
+    aux_required=0
+    if [ -f "$chosen/aux-required" ]; then
+        aux_required=$(cat "$chosen/aux-required") || return 1
+        case "$aux_required" in 0|1) ;; *) fail '辅助参数标记无效'; return 1;; esac
+    fi
+    if [ ! -f "$aux" ]; then
+        [ "$aux_required" = 0 ] || { fail '辅助参数文件缺失'; return 1; }
+        aux=$module/defaults/aux.bin
+    fi
+    if [ "$aux_required" = 1 ] && ! printf '%s\n' "$native" | grep -q 'features=.*scene_aux'; then
+        fail '当前内核不支持 Scene 辅助调度'; return 1
+    fi
+    if [ "$aux_required" = 1 ] && ! printf '%s\n' "$native" | grep -q 'features=.*scene_table'; then
+        fail 'Scene 辅助调度需要内核场景表支持'; return 1
+    fi
+    "$controller" check-aux "$aux" >/dev/null || return 1
+    aux_count=$(od -An -tu4 -j12 -N4 "$aux") || return 1
+    [ "$((aux_count > 0 ? 1 : 0))" = "$aux_required" ] || { fail '辅助参数与标记不一致'; return 1; }
     # Validate exact bytes AND the kernel capability before stopping either
     # controller. check-fas is read-only; load-fas below performs the real ioctl.
     "$controller" check-fas "$fas" >/dev/null || return 1
@@ -84,12 +103,18 @@ apply_dir() {
     if printf '%s\n' "$native" | grep -q 'features=.*scene_table'; then
         "$controller" load-scene "$chosen/scene.bin" >/dev/null || return 1
     fi
+    "$controller" load-aux "$aux" >/dev/null || return 1
     if printf '%s\n' "$native" | grep -q 'features=.*game_relations'; then
         "$controller" load-rules "$chosen/games.bin" >/dev/null || return 1
     fi
     "$controller" load-fas "$fas" >/dev/null || return 1
     "$controller" load "$chosen/config.bin" > "$state/last-apply.txt" || return 1
     grep -qx 'last_error=0' "$state/last-apply.txt" || return 1
+    if printf '%s\n' "$native" | grep -q 'features=.*scene_aux'; then
+        grep -qx 'aux_error=0' "$state/last-apply.txt" || return 1
+        grep -qx 'gpu_aux_error=0' "$state/last-apply.txt" || return 1
+        grep -qx 'gpu_aux_rollback_error=0' "$state/last-apply.txt" || return 1
+    fi
     cat /proc/sys/kernel/random/boot_id > "$state/applied-boot" || return 1
     return 0
 }
@@ -172,6 +197,7 @@ case "${1:-status}" in
         ;;
     seed) cat "$module/defaults/seed.json";;
     scene-seed) cat "$module/defaults/scene-seed.json";;
+    aux-seed) cat "$module/defaults/scene-aux-seed.json";;
     status) status;;
     teardown)
         exec 7>"$state/config.lock"
@@ -232,6 +258,17 @@ case "${1:-status}" in
             cat "$source/fas.bin" > "$pending/fas.bin" || exit 1
         else
             cat "$module/defaults/fas.bin" > "$pending/fas.bin" || exit 1
+        fi
+        if [ -f "$source/aux.bin" ]; then
+            cat "$source/aux.bin" > "$pending/aux.bin" || exit 1
+            if [ -f "$source/aux-required" ]; then
+                cat "$source/aux-required" > "$pending/aux-required" || exit 1
+            else
+                printf '0\n' > "$pending/aux-required" || exit 1
+            fi
+        else
+            cat "$module/defaults/aux.bin" > "$pending/aux.bin" || exit 1
+            printf '0\n' > "$pending/aux-required" || exit 1
         fi
         record_parent "$pending" "$old" || exit 1
         transaction "$pending" "$old" || exit 1

@@ -27,9 +27,12 @@ class Package(unittest.TestCase):
                 self.assertEqual(json.loads(archive.read("defaults/settings.json"))["fasMode"], "balance")
                 metadata = json.loads(archive.read("build-provenance.json"))
                 self.assertEqual(metadata["fas_tuning_abi"], 1)
-                self.assertEqual(metadata["settings_envelope"], 2)
+                self.assertEqual(metadata["settings_envelope"], 3)
+                self.assertEqual(metadata["scene_aux_bytes"], 26584)
+                self.assertEqual(len(archive.read("defaults/aux.bin")), 26584)
+                self.assertEqual(archive.read("defaults/aux-required"), b"0\n")
                 self.assertFalse(metadata["resident_process_added"])
-                self.assertIn(b"version=0.3.1-test", archive.read("module.prop"))
+                self.assertIn(b"version=0.3.2-test", archive.read("module.prop"))
                 self.assertIn(b"load-fas", archive.read("config.sh"))
 
 

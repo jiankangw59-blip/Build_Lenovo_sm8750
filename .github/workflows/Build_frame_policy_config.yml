@@ -2,12 +2,15 @@ name: Build native frame policy configuration module
 
 on:
   push:
-    branches: [codex/ace6-frame-policy]
+    branches: [codex/ace6-frame-policy, codex/scene-aux-control]
     paths:
       - .github/workflows/Build_frame_policy_config.yml
       - efficiency/frame_policy/framectl.c
       - efficiency/frame_policy/frame_policy_uapi.h
       - efficiency/frame_policy/scene_policy_uapi.h
+      - efficiency/frame_policy/scene_policy.h
+      - efficiency/frame_policy/scene_aux_uapi.h
+      - efficiency/frame_policy/scene_aux_policy.h
       - efficiency/frame_policy/fas_tuning_uapi.h
       - efficiency/frame_policy/fas_control.h
       - efficiency/frame_policy/frame_control.h
@@ -33,11 +36,14 @@ jobs:
           set -euo pipefail
           node efficiency/frame_policy/ksu/test_protocol.js --defaults
           node --test efficiency/frame_policy/ksu/test_scene_protocol.js
+          node --test efficiency/frame_policy/ksu/test_aux_protocol.js
+          python3 efficiency/frame_policy/ksu/test_aux_layout.py
           node --test efficiency/frame_policy/ksu/test_app_fas.js efficiency/frame_policy/ksu/test_encode_settings.js
           cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
             efficiency/frame_policy/framectl.c -o "$RUNNER_TEMP/framectl-host"
           python3 efficiency/frame_policy/ksu/test_unpack.py --controller "$RUNNER_TEMP/framectl-host"
           python3 efficiency/frame_policy/ksu/test_framectl_fas.py
+          python3 efficiency/frame_policy/ksu/test_framectl_aux.py
           python3 efficiency/frame_policy/ksu/test_fas_protocol.py
           python3 efficiency/frame_policy/ksu/test_package.py
           python3 efficiency/frame_policy/ksu/test_transactions.py

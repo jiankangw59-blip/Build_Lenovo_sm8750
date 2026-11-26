@@ -21,20 +21,25 @@ def package(controller, output):
     mode = settings.get("fasMode", "balance")
     custom = {mode: {"margin_fps": settings["fasMarginFps"]}} if "fasMarginFps" in settings else {}
     fas, _ = compile_tuning(mode, {}, custom)
+    aux = bytearray(26584)
+    struct.pack_into("<I", aux, 0, 1)
+    struct.pack_into("<28i", aux, 56, *([-1] * 28))
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("framectl", binary)
         for name in ("module.prop", "customize.sh", "service.sh", "action.sh", "config.sh", "uninstall.sh"):
             archive.writestr(name, (HERE / name).read_bytes().replace(b"\r\n", b"\n"))
         for directory in ("webroot", "defaults"):
             for path in sorted((HERE / directory).iterdir()):
-                if path.is_file() and not (directory == "defaults" and path.name == "fas.bin"):
+                if path.is_file() and not (directory == "defaults" and path.name in ("fas.bin", "aux.bin", "aux-required")):
                     archive.writestr(directory + "/" + path.name, path.read_bytes())
         archive.writestr("defaults/fas.bin", fas)
+        archive.writestr("defaults/aux.bin", aux)
+        archive.writestr("defaults/aux-required", "0\n")
         archive.writestr("build-provenance.json", json.dumps({
             "controller_sha256": hashlib.sha256(binary).hexdigest(), "frame_abi": 4,
             "game_rules_abi": 1, "default_enabled": False, "resident_process_added": False,
             "scene_table_abi": 1,
-            "fas_tuning_abi": 1, "settings_envelope": 2,
+            "fas_tuning_abi": 1, "scene_aux_abi": 1, "scene_aux_bytes": 26584, "settings_envelope": 3,
         }, indent=2) + "\n")
     print(output)
 

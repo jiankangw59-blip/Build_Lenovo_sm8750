@@ -7,7 +7,7 @@ const {test} = require("node:test");
 
 async function app() {
   const elements = Object.create(null), calls = [], packets = [];
-  for (const id of ["editor", "message", "status", "fasMode", "fasMarginBase", "fasOverrides", "fallbackFps", "save", "refresh", "rollback"])
+  for (const id of ["editor", "message", "status", "fasMode", "fasMarginBase", "fasOverrides", "fallbackFps", "sceneAux", "sceneGpuLock", "save", "refresh", "rollback"])
     elements[id] = {value: "", textContent: "", placeholder: "", dataset: {}, listeners: {},
       addEventListener(name, callback) { this.listeners[name] = callback; }};
   const seed = JSON.parse(fs.readFileSync(path.join(__dirname, "defaults/seed.json"), "utf8"));
@@ -20,6 +20,7 @@ async function app() {
     calls.push(command);
     let output = "", error = "", code = 0;
     if (command.endsWith(" scene-seed")) output = JSON.stringify(sceneSeed);
+    else if (command.endsWith(" aux-seed")) output = fs.readFileSync(path.join(__dirname, "defaults/scene-aux-seed.json"), "utf8");
     else if (command.endsWith(" seed")) output = JSON.stringify(seed);
     else if (command.endsWith(" read")) output = "a".repeat(64) + "\n" + JSON.stringify(settings);
     else if (command.endsWith(" status")) output = "features=fas_tuning\nlast_error=0\n";
@@ -29,8 +30,9 @@ async function app() {
       else {
         const packet = Buffer.from(match[1], "base64");
         packets.push(packet);
-        assert.equal(packet.readUInt32LE(0), 0x46505332);
-        settings = JSON.parse(packet.subarray(32, 32 + packet.readUInt32LE(4)).toString("utf8"));
+        assert.ok([0x46505332, 0x46505333].includes(packet.readUInt32LE(0)));
+        const start = packet.readUInt32LE(0) === 0x46505333 ? 40 : 32;
+        settings = JSON.parse(packet.subarray(start, start + packet.readUInt32LE(4)).toString("utf8"));
       }
     } else { code = 1; error = "Unexpected host test command"; }
     queueMicrotask(() => context.window[callback](code, output, error));
@@ -40,7 +42,7 @@ async function app() {
     querySelectorAll() { return [elements.save, elements.refresh, elements.rollback]; },
   }, TextEncoder, TextDecoder, atob: value => Buffer.from(value, "base64").toString("binary"),
   btoa: value => Buffer.from(value, "binary").toString("base64")});
-  for (const name of ["scene_protocol.js", "protocol.js"])
+  for (const name of ["scene_protocol.js", "scene_aux_protocol.js", "protocol.js"])
     vm.runInContext(fs.readFileSync(path.join(__dirname, "webroot", name), "utf8"), context);
   await vm.runInContext(fs.readFileSync(path.join(__dirname, "webroot/app.js"), "utf8"), context);
   return {elements, calls, packets, settings: () => settings};
@@ -65,6 +67,46 @@ test("legacy settings and FAS selector remain independent from Scene", async () 
   const packet = state.packets.at(-1), fas = packet.subarray(-80);
   assert.equal(fas.readUInt32LE(4), 3);
   assert.equal(fas.readUInt32LE(8), 0);
+});
+
+test("aux GUI edits preserve existing advanced configuration and do not turn it on for legacy reads", async () => {
+  const state = await app(), e = state.elements;
+  assert.equal(e.sceneAux.checked, false);
+  const original = {...JSON.parse(e.editor.value), gpu: true, sceneMode: "powersave", sceneBaseMode: "balance",
+    fallbackFps: [30,45,60,90,120,130,144,165], sceneApps: {"org.example.camera": {category: "Camera"}}};
+  e.editor.value = JSON.stringify(original); e.editor.listeners.input();
+  e.sceneAux.checked = true; e.sceneAux.listeners.change();
+  await e.save.onclick();
+  assert.equal(state.packets.at(-1).readUInt32LE(0), 0x46505333);
+  assert.equal(state.settings().sceneAux, true);
+  assert.equal(state.settings().gpu, true);
+  assert.equal(state.settings().sceneMode, "powersave");
+  assert.equal(state.settings().sceneBaseMode, "balance");
+  assert.deepEqual(Array.from(state.settings().fallbackFps), original.fallbackFps);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.settings().sceneApps)), original.sceneApps);
+  e.fasMode.value = "fast"; e.fasMode.listeners.change();
+  await e.save.onclick();
+  assert.equal(state.settings().sceneAux, true);
+  assert.equal(state.settings().fasMode, "fast");
+  assert.equal(state.settings().sceneBaseMode, "balance");
+});
+
+test("GPU auxiliary toggle is independent, preserved, and never materialized by unrelated legacy edits", async () => {
+  const state=await app(),e=state.elements;
+  assert.equal(e.sceneGpuLock.checked,true);assert.equal(e.sceneGpuLock.disabled,true);
+  e.fasMode.value="fast";e.fasMode.listeners.change();await e.save.onclick();
+  assert.equal(Object.hasOwn(state.settings(),"sceneGpuLock"),false);
+  assert.equal(state.packets.at(-1).readUInt32LE(0),0x46505332);
+  e.sceneAux.checked=true;e.sceneAux.listeners.change();
+  assert.equal(e.sceneGpuLock.disabled,false);
+  e.sceneGpuLock.checked=false;e.sceneGpuLock.listeners.change();await e.save.onclick();
+  assert.equal(state.settings().sceneAux,true);assert.equal(state.settings().sceneGpuLock,false);
+  const packet=state.packets.at(-1);assert.equal(packet.readUInt32LE(packet.length-26584+212),0);
+  e.fasMode.value="balance";e.fasMode.listeners.change();await e.save.onclick();
+  assert.equal(state.settings().sceneGpuLock,false);assert.equal(e.sceneGpuLock.checked,false);
+  e.sceneAux.checked=false;e.sceneAux.listeners.change();await e.save.onclick();
+  assert.equal(state.settings().sceneGpuLock,false);assert.equal(e.sceneGpuLock.disabled,true);
+  assert.equal(state.packets.at(-1).readUInt32LE(0),0x46505332);
 });
 
 test("base and per-FPS controls reach the saved binary", async () => {

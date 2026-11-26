@@ -159,5 +159,7 @@ if (process.argv[2] === "--defaults") {
   fs.writeFileSync(path.join(__dirname, "defaults/games.bin"), packet.table);
   fs.writeFileSync(path.join(__dirname, "defaults/scene.bin"), packet.scene);
   fs.writeFileSync(path.join(__dirname, "defaults/fas.bin"), packet.fas);
+  fs.writeFileSync(path.join(__dirname, "defaults/aux.bin"), packet.aux);
+  fs.writeFileSync(path.join(__dirname, "defaults/aux-required"), "0\n");
   fs.writeFileSync(path.join(__dirname, "defaults/scene-required"), "0\n");
 }

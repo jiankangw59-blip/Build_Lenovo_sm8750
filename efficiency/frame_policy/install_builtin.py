@@ -19,6 +19,10 @@ def install(kernel, for_kunit=False):
                  "fas_control.h", "fas_tuning_uapi.h", "fas_frames.h", "fas_task_load.h",
                  "frame_policy_kunit.h", "frame_rate.h", "game_constraints.h",
                  "scene_policy.h", "scene_policy_uapi.h", "scene_policy_kunit.h",
+                 "scene_aux.c", "scene_aux.h", "scene_aux_uapi.h", "scene_aux_policy.h",
+                 "scene_aux_plan.h",
+                 "scene_limiter_feedback.h", "scene_event_feedback.h",
+                 "scene_gpu_aux.c", "scene_gpu_aux.h",
                  "scene_activity_profiles.h"):
         shutil.copyfile(HERE / name, destination / name)
     for name in ("scene_activity_policy.h", "scene_activity_backend.h",

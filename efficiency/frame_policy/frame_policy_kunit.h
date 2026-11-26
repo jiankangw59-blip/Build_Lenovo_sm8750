@@ -6,6 +6,7 @@
 #include <linux/delay.h>
 #include <linux/kthread.h>
 #include <linux/input.h>
+#include <linux/input/mt.h>
 #include <linux/uio.h>
 
 static unsigned int fp_test_frequency = 1000000;
@@ -17,6 +18,7 @@ static struct freq_qos_request fp_test_cpu_cap;
 static struct dev_pm_qos_request fp_test_gpu_cap;
 static bool fp_test_gpu_credential_check, fp_test_gpu_force_error;
 static int fp_test_gpu_read_error;
+static struct file *fp_test_gpu_aux_files[3];
 
 static struct cpufreq_frequency_table fp_test_frequency_table[] = {
 	{ .frequency = 500000 }, { .frequency = 1000000 },
@@ -54,6 +56,7 @@ static struct cpufreq_driver fp_test_cpufreq_driver = {
 static void fp_test_reset(void)
 {
 	unsigned long flags;
+	u32 i;
 
 	scene_activity_backend_test_resume_worker();
 	mutex_lock(&config_lock);
@@ -69,6 +72,17 @@ static void fp_test_reset(void)
 	irq_work_sync(&activity_control_irq);
 	stop_game();
 	remove_requests();
+	fp_scene_aux_test_reset();
+	fp_scene_gpu_aux_exit();
+	fp_scene_gpu_aux_commit(NULL);
+	gpu_aux_error = 0;
+	for (i = 0; i < ARRAY_SIZE(fp_test_gpu_aux_files); i++) {
+		if (fp_test_gpu_aux_files[i])
+			fput(fp_test_gpu_aux_files[i]);
+		fp_test_gpu_aux_files[i] = NULL;
+	}
+	memset(&scene_core, 0, sizeof(scene_core));
+	test_scene_cpu_sample = NULL;
 	kvfree(game_rules);
 	game_rules = NULL;
 	kvfree(scene_table);
@@ -99,6 +113,7 @@ static void fp_test_reset(void)
 	cancel_work_sync(&frame_work);
 	cancel_work_sync(&scene_work);
 	cancel_delayed_work_sync(&expire_work);
+	cancel_delayed_work_sync(&scene_feedback_deadline);
 	if (fp_test_activity_input) {
 		input_unregister_device(fp_test_activity_input);
 		fp_test_activity_input = NULL;

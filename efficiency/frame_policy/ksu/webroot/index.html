@@ -12,6 +12,9 @@ label{display:block;margin:10px 0}input,select{background:#192631;color:#e5edf3;
 <h1>原生帧调度配置</h1>
 <p>开机一次载入，调度由内核执行。目标帧率可按游戏设置，请同时开启游戏内对应帧率。</p>
 <pre id="status">正在读取…</pre>
+<label><input id="sceneAux" type="checkbox">启用 Scene 辅助调度</label>
+<label><input id="sceneGpuLock" type="checkbox" disabled>限制 GPU 启动提频</label>
+<p>随 Scene 辅助调度启用，仅调整 GPU 启动最低和默认档位；负载升频和温控继续工作。</p>
 <fieldset><legend>游戏 FAS 模式</legend>
 <label>模式 <select id="fasMode"><option value="powersave">省电 powersave</option><option value="balance">均衡 balance</option><option value="performance">性能 performance</option><option value="fast">快速 fast</option></select></label>
 <label>基础帧率余量（FPS，可留空使用模式默认值） <input id="fasMarginBase" type="number" min="0" max="30" step="0.001"></label>
@@ -24,5 +27,5 @@ label{display:block;margin:10px 0}input,select{background:#192631;color:#e5edf3;
 <p id="message"></p>
 <p>sceneMode：powersave / balance / performance / fast。sceneApps 可按包名设置 mode 和 category（normal / Camera / Reader / Music 等），模式 ignore 表示交回系统。游戏中使用帧调度，游戏外使用 Scene 策略。</p>
 <p>fps 为默认帧率档位，games 中的包名可覆盖默认值。gameCpuMHz 按 policy0、policy6 顺序填写最低和最高频率。relations 控制原 FAS 的跨簇频率关系。</p>
-<p>实际功能以运行状态为准。FAS 模式需要内核支持；Scene 交互闲置状态与 core_ctl 等功能仍待接入。</p>
-<script src="scene_protocol.js"></script><script src="protocol.js"></script><script src="app.js"></script></html>
+<p>实际功能以运行状态为准。Scene 辅助调度需要对应内核支持；升级配置包不会自动开启。</p>
+<script src="scene_protocol.js"></script><script src="scene_aux_protocol.js"></script><script src="protocol.js"></script><script src="app.js"></script></html>

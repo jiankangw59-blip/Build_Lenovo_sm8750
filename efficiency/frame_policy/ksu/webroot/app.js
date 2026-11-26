@@ -1,15 +1,22 @@
 "use strict";
 const backend = "sh /data/adb/modules/frame_policy_config/config.sh";
-let counter = 0, savedHash = "", seed, sceneSeed, busy = false;
+let counter = 0, savedHash = "", seed, sceneSeed, auxSeed, busy = false;
 const editor = document.getElementById("editor"), message = document.getElementById("message");
 const fasMode = document.getElementById("fasMode"), fasBase = document.getElementById("fasMarginBase");
 const fasOverrides = document.getElementById("fasOverrides");
 const fallbackFps = document.getElementById("fallbackFps");
+const sceneAux = document.getElementById("sceneAux");
+const sceneGpuLock = document.getElementById("sceneGpuLock");
 const fasDefaults = {powersave: 3, balance: 1, performance: 0.3, fast: 0};
 let fasEditError = "";
+let gpuLockEdited = false;
 function showFasSettings(settings) {
   const tuning = frameFasProtocol(settings);
   fasMode.value = tuning.mode;
+  sceneAux.checked = settings.sceneAux ?? false;
+  sceneGpuLock.checked = settings.sceneGpuLock ?? Boolean(auxSeed?.options?.gpuLock);
+  sceneGpuLock.disabled = !sceneAux.checked;
+  gpuLockEdited = false;
   fasBase.placeholder = String(fasDefaults[tuning.mode]);
   const margin = settings.fasMarginFps;
   const advanced = margin && typeof margin === "object" && !Array.isArray(margin);
@@ -25,6 +32,8 @@ function editFasSettings() {
     if (!overrides || typeof overrides !== "object" || Array.isArray(overrides) || Object.hasOwn(overrides, "base"))
       throw new Error("按帧率覆盖必须是帧率到余量的对象，不包含 base");
     settings.fasMode = fasMode.value;
+    if (sceneAux.checked || Object.hasOwn(settings, "sceneAux")) settings.sceneAux = Boolean(sceneAux.checked);
+    if (gpuLockEdited || Object.hasOwn(settings, "sceneGpuLock")) settings.sceneGpuLock = Boolean(sceneGpuLock.checked);
     if (fallbackFps.value.trim() === "") delete settings.fallbackFps;
     else settings.fallbackFps = fallbackFps.value.trim().split(/[,，\s]+/).filter(Boolean).map(Number);
     if (fasBase.value.trim() === "" && !Object.keys(overrides).length) delete settings.fasMarginFps;
@@ -32,14 +41,16 @@ function editFasSettings() {
       const base = fasBase.value.trim() === "" ? fasDefaults[settings.fasMode] : Number(fasBase.value);
       settings.fasMarginFps = Object.keys(overrides).length ? {base, ...overrides} : base;
     }
-    frameSettingsProtocol(settings, seed, sceneSeed);
+    frameSettingsProtocol(settings, seed, sceneSeed, auxSeed);
     fasEditError = "";
     editor.value = JSON.stringify(settings, null, 2) + "\n";
     fasBase.placeholder = String(fasDefaults[settings.fasMode]);
+    sceneGpuLock.disabled = !sceneAux.checked;
     message.textContent = "配置已编辑，点击保存并应用后生效。"; message.dataset.error = "false";
   } catch (error) { fasEditError = error.message; message.textContent = error.message; message.dataset.error = "true"; }
 }
-for (const control of [fasMode, fasBase, fasOverrides, fallbackFps]) control.addEventListener("change", editFasSettings);
+for (const control of [fasMode, fasBase, fasOverrides, fallbackFps, sceneAux]) control.addEventListener("change", editFasSettings);
+sceneGpuLock.addEventListener("change", () => { gpuLockEdited = true; editFasSettings(); });
 editor.addEventListener("input", () => { try { showFasSettings(JSON.parse(editor.value)); fasEditError = ""; } catch (_) {} });
 function execute(command) {
   return new Promise((resolve, reject) => {
@@ -73,7 +84,7 @@ async function run(task) {
 document.getElementById("save").onclick = () => run(async () => {
   const settings = JSON.parse(editor.value);
   if (fasEditError) throw new Error(fasEditError);
-  const {payload} = frameSettingsProtocol(settings, seed, sceneSeed);
+  const {payload} = frameSettingsProtocol(settings, seed, sceneSeed, auxSeed);
   let binary = "";
   for (let i = 0; i < payload.length; i += 8192) binary += String.fromCharCode(...payload.subarray(i, i + 8192));
   await execute(`printf %s '${btoa(binary)}' | base64 -d | ${backend} save ${savedHash}`);
@@ -86,5 +97,6 @@ document.getElementById("rollback").onclick = () => run(async () => {
 run(async () => {
   seed = JSON.parse(await execute(`${backend} seed`));
   sceneSeed = JSON.parse(await execute(`${backend} scene-seed`));
+  auxSeed = JSON.parse(await execute(`${backend} aux-seed`));
   await refresh();
 });

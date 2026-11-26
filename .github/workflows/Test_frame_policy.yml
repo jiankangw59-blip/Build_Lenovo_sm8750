@@ -38,6 +38,15 @@ jobs:
           cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
             efficiency/frame_policy/test_scene_policy.c -o "$RUNNER_TEMP/scene-policy"
           "$RUNNER_TEMP/scene-policy"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/frame_policy/test_scene_aux.c -o "$RUNNER_TEMP/scene-aux"
+          "$RUNNER_TEMP/scene-aux"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/frame_policy/test_scene_limiter_feedback.c -o "$RUNNER_TEMP/scene-native-feedback"
+          "$RUNNER_TEMP/scene-native-feedback"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/frame_policy/test_scene_event_feedback.c -o "$RUNNER_TEMP/scene-event-feedback"
+          "$RUNNER_TEMP/scene-event-feedback"
           cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined \
             efficiency/thread_affinity/test_scene_refresh_policy.c -o "$RUNNER_TEMP/refresh-policy"
           "$RUNNER_TEMP/refresh-policy"

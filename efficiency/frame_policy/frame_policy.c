@@ -41,6 +41,10 @@
 #include "frame_rate.h"
 #include "game_constraints.h"
 #include "scene_policy.h"
+#include "scene_aux.h"
+#include "scene_gpu_aux.h"
+#include "scene_limiter_feedback.h"
+#include "scene_event_feedback.h"
 #include "scene_activity_backend.h"
 #include "scene_activity_profiles.h"
 #include "frame_policy_uapi.h"
@@ -104,10 +108,26 @@ static struct irq_work activity_control_irq;
 static struct fp_config configuration;
 static struct fp_game_rules *game_rules;
 static struct fp_scene_table *scene_table;
+static u64 scene_table_epoch;
 static const struct fp_scene_profile *scene_profile;
 static u32 active_game_fps[FP_MAX_RATES], active_game_fps_count;
 static struct fp_cpu_request cpu_requests[FP_MAX_CPUS];
 static struct fp_pmu *pmus;
+/* Ordered policy work and config_lock own these arrays. No sample-sized
+ * allocation, high-order stack buffer, or lock-time allocation is needed.
+ */
+static struct fp_scene_limiter_cpu_sample scene_cpu_samples[FP_SCENE_LIMITER_MAX_CPUS];
+static struct fp_scene_limiter_history scene_history[FP_MAX_CPUS];
+static struct fp_scene_limiter_vote_state scene_votes[FP_MAX_CPUS];
+static struct fp_scene_limiter_core scene_core;
+static u64 scene_native_samples;
+static bool scene_gesture_live, scene_notify_live;
+static u64 scene_feedback_at;
+static struct fp_scene_event_state scene_sched_events;
+static u32 scene_panel_peak;
+static bool scene_core_applied, scene_core_restore;
+static u32 scene_core_mask;
+static int gpu_aux_error;
 static struct fp_game_cpu *game_cpus;
 static bool game_trace;
 static u64 game_sample_ns, game_switches;
@@ -151,6 +171,7 @@ static struct {
 	u64 provider_epoch;
 } pending_scene;
 static bool configured, source_valid, source_game, display_off, registered;
+static bool scene_inactive;
 static bool game_active, scene_active, scene_trace;
 static u64 generation, applied_generation, last_frame_ns, last_work_ns;
 static u64 last_frame_interval_ns, late_frame_ns, late_rate_generation;
@@ -170,22 +191,27 @@ static u64 scene_samples;
 static u64 scene_activity_epoch, scene_inactive_events;
 #if IS_ENABLED(CONFIG_FRAME_POLICY_KUNIT_TEST)
 static bool test_activity_present_at_game_start;
+static bool (*test_scene_cpu_sample)(unsigned int cpu, u32 *khz);
 #endif
 
 static void apply_control(struct work_struct *work);
 static void apply_frame(struct work_struct *work);
 static void expire_frame(struct work_struct *work);
+static void expire_scene_feedback(struct work_struct *work);
 static void apply_scene(struct work_struct *work);
 static void scene_switch(void *data, bool preempt, struct task_struct *previous,
 			 struct task_struct *next, unsigned int prev_state);
 static void game_switch(void *data, bool preempt, struct task_struct *previous,
 			struct task_struct *next, unsigned int prev_state);
 static const struct fp_game_rule *active_game_rule(void);
+static u32 snap_game_ceiling(struct cpufreq_policy *policy, u32 target_khz,
+			    const struct fp_limits *limits);
 static void reset_frame_history(void);
 static DECLARE_WORK(control_work, apply_control);
 static DECLARE_WORK(frame_work, apply_frame);
 static DECLARE_WORK(scene_work, apply_scene);
 static DECLARE_DELAYED_WORK(expire_work, expire_frame);
+static DECLARE_DELAYED_WORK(scene_feedback_deadline, expire_scene_feedback);
 
 static bool observe_only(void)
 {
@@ -308,6 +334,10 @@ static void stop_pmus(void)
 		scene_trace = false;
 	}
 	irq_work_sync(&scene_irq_work);
+	/* This may be called by the same ordered policy queue. A nonblocking
+	 * cancellation is sufficient: no two policy works run concurrently.
+	 */
+	cancel_delayed_work(&scene_feedback_deadline);
 	if (!pmus)
 		return;
 	for_each_possible_cpu(cpu) {
@@ -318,6 +348,28 @@ static void stop_pmus(void)
 	pmus = NULL;
 }
 
+static const struct fp_scene_aux_cpu *native_scene_cpu(unsigned int index)
+{
+	const struct fp_scene_aux_profile *profile = fp_scene_aux_for(foreground,
+		source_game, display_off, scene_inactive);
+
+	if (!profile || index >= configuration.cpu_count ||
+	    !(profile->cpus[index].feedback_mask & FP_AUX_FEEDBACK_ADDITIVE) ||
+	    !profile->cpus[index].additive_count)
+		return NULL;
+	return &profile->cpus[index];
+}
+
+static bool native_scene_feedback(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < configuration.cpu_count; i++)
+		if (native_scene_cpu(i))
+			return true;
+	return false;
+}
+
 static int start_pmus(void)
 {
 	struct perf_event_attr attr = {
@@ -326,6 +378,7 @@ static int start_pmus(void)
 		.config = PERF_COUNT_HW_CPU_CYCLES,
 	};
 	unsigned int cpu, i;
+	unsigned long flags;
 	int error;
 
 	pmus = kcalloc(nr_cpu_ids, sizeof(*pmus), GFP_KERNEL);
@@ -333,9 +386,14 @@ static int start_pmus(void)
 		return -ENOMEM;
 	for (i = 0; i < configuration.cpu_count; i++) {
 		struct cpufreq_policy *policy;
+		const struct fp_scene_aux_cpu *native = native_scene_cpu(i);
+		const struct fp_scene_aux_options *options = fp_scene_aux_options();
 
-		if (scene_profile && !scene_profile->cpus[i].margin_count)
+		if (!native && scene_profile && !scene_profile->cpus[i].margin_count)
 			continue;
+		fp_scene_limiter_history_init(&scene_history[i], native ? native->smoothness : 0,
+			options && (options->valid_mask & FP_AUX_OPT_STAT_SOURCE) &&
+			fp_scene_limiter_extended_window(options->stat_source, display_off, false));
 		policy = cpufreq_cpu_get(configuration.cpus[i].cpu);
 
 		if (!policy) {
@@ -345,8 +403,13 @@ static int start_pmus(void)
 		for_each_cpu(cpu, policy->related_cpus) {
 			struct fp_pmu *sample = &pmus[cpu];
 
-			if (sample->cycles || !cpu_online(cpu))
+			if (sample->cycles || !cpu_online(cpu) || (native && cpu < 64 &&
+			    (native->excludes_mask & (1ULL << cpu))))
 				continue;
+#if IS_ENABLED(CONFIG_FRAME_POLICY_KUNIT_TEST)
+			if (test_scene_cpu_sample)
+				continue; /* The real production PMU reader is replaced only by this fixture. */
+#endif
 			attr.config = PERF_COUNT_HW_CPU_CYCLES;
 			sample->cycles = perf_event_create_kernel_counter(&attr, cpu, NULL, NULL, NULL);
 			if (IS_ERR(sample->cycles)) {
@@ -360,6 +423,29 @@ static int start_pmus(void)
 			sample->timestamp = ktime_get_ns();
 		}
 		cpufreq_cpu_put(policy);
+	}
+	/* Original 0x6a23c0 core manager is reused across app/activity changes.
+	 * Its blend map, retained count and demand ring survive these changes.
+	 * Replacing the actual typed snapshot resets it explicitly below.
+	 */
+	scene_core_applied = false;
+	{
+		const struct fp_scene_aux_options *options = fp_scene_aux_options();
+		struct fp_scene_event_config events = {};
+
+		if (native_scene_feedback() && options) {
+			events.perf_notify_enabled = (options->valid_mask & FP_AUX_OPT_PERF_NOTIFY) &&
+				options->perf_notify;
+			events.kswapd_enabled = (options->valid_mask & FP_AUX_OPT_KSWAPD) &&
+				options->kswapd_boost;
+		}
+		spin_lock_irqsave(&frame_lock, flags);
+		if (scene_sched_events.epoch != scene_activity_epoch ||
+		    scene_sched_events.watch_kswapd != (events.perf_notify_enabled && events.kswapd_enabled))
+			fp_scene_event_reset(&scene_sched_events, scene_activity_epoch, &events);
+		scene_panel_peak = options && (options->valid_mask & FP_AUX_OPT_PANEL_PEAK) ?
+			options->panel_peak_hz : 0;
+		spin_unlock_irqrestore(&frame_lock, flags);
 	}
 	error = register_trace_sched_switch(scene_switch, NULL);
 	if (error)
@@ -378,6 +464,10 @@ static void remove_requests(void)
 
 	WRITE_ONCE(scene_active, false);
 	stop_pmus();
+	memset(scene_history, 0, sizeof(scene_history));
+	memset(scene_votes, 0, sizeof(scene_votes));
+	scene_gesture_live = scene_notify_live = false;
+	scene_feedback_at = 0;
 	if (gpu_device) {
 		if (dev_pm_qos_request_active(&gpu_min))
 			dev_pm_qos_remove_request(&gpu_min);
@@ -1043,11 +1133,28 @@ static void activity_control_irq_fn(struct irq_work *work)
 		queue_work(policy_wq, &control_work);
 }
 
+static void scene_feedback_changed(u64 epoch)
+{
+	/* Called under the input backend lock, potentially input_dev.event_lock.
+	 * Only irq_work crosses into policy workqueue pool locks.
+	 */
+	if (epoch == READ_ONCE(scene_activity_epoch) && READ_ONCE(scene_active))
+		irq_work_queue(&scene_irq_work);
+}
+
+static bool gpu_aux_allowed(void)
+{
+	return configured && source_valid && (configuration.flags & FP_GPU) &&
+		!observe_only() && !display_off && (source_game || scene_profile || !scene_table);
+}
+
 /* config_lock held. Own ordered backend queue permits synchronous cancellation. */
 static void reconcile_scene_activity(void)
 {
 	const struct fp_scene_profile *active, *inactive;
 	struct sa_context context = {};
+	struct fp_scene_event_config events = {};
+	const struct fp_scene_aux_options *options = fp_scene_aux_options();
 	unsigned long flags;
 	bool current_source;
 
@@ -1064,9 +1171,25 @@ static void reconcile_scene_activity(void)
 	active = fp_scene_select(scene_table, foreground, source_game, display_off, false);
 	inactive = fp_scene_select(scene_table, foreground, source_game, display_off, true);
 	context.enabled = configured && current_source && scene_table &&
-		fp_scene_activity_needed(active, inactive, configuration.flags, configuration.cpu_count);
+		(fp_scene_activity_needed(active, inactive, configuration.flags, configuration.cpu_count) ||
+		 fp_scene_aux_activity_needed(foreground, source_game, display_off,
+			(configuration.flags & FP_CPU) && !observe_only() && (active || inactive)) ||
+		 ((configuration.flags & FP_CPU) && !observe_only() && native_scene_feedback()));
 	scene_activity_backend_configure(&context,
 		configuration.cpu_count ? configuration.cpus[0].cpu : 0);
+	if (context.enabled && !context.game && !context.screen_off && native_scene_feedback() &&
+	    (configuration.flags & FP_CPU) && !observe_only() && options) {
+		events.gesture_enabled = (options->valid_mask & FP_AUX_OPT_GESTURE) &&
+			options->gesture_boost;
+		events.gesture_duration_ms = options->gesture_duration_ms;
+		scene_activity_backend_set_feedback(context.epoch, &events, scene_feedback_changed);
+	} else {
+		scene_activity_backend_set_feedback(0, NULL, NULL);
+		spin_lock_irqsave(&frame_lock, flags);
+		fp_scene_event_reset(&scene_sched_events, 0, NULL);
+		scene_panel_peak = 0;
+		spin_unlock_irqrestore(&frame_lock, flags);
+	}
 }
 
 static void apply_control(struct work_struct *work)
@@ -1074,6 +1197,7 @@ static void apply_control(struct work_struct *work)
 	typeof(pending_scene) next;
 	unsigned long flags;
 	u64 epoch;
+	bool aux_applied = false;
 
 	mutex_lock(&config_lock);
 	spin_lock_irqsave(&frame_lock, flags);
@@ -1094,6 +1218,7 @@ static void apply_control(struct work_struct *work)
 	source_valid = next.valid;
 	source_game = next.game;
 	display_off = next.off;
+	scene_inactive = next.inactive;
 	if (configured) {
 		last_error = 0;
 		last_error_stage = "none";
@@ -1106,6 +1231,8 @@ static void apply_control(struct work_struct *work)
 	if (source_game && !display_off) {
 		/* Transfer ownership before installing even the first game request. */
 		reconcile_scene_activity();
+		fp_scene_aux_apply(foreground, true, false, false, false, epoch, &generation);
+		aux_applied = true;
 		last_error = start_game();
 	} else {
 		scene_profile = fp_scene_select(scene_table, foreground, source_game,
@@ -1119,7 +1246,8 @@ static void apply_control(struct work_struct *work)
 		}
 		last_error = add_requests(false);
 		if (!last_error && !display_off && (configuration.flags & FP_CPU) &&
-		    (!scene_table || fp_scene_uses_feedback(scene_profile, configuration.cpu_count)))
+		    (!scene_table || fp_scene_uses_feedback(scene_profile, configuration.cpu_count) ||
+		     native_scene_feedback()))
 			last_error = start_pmus();
 		if (last_error)
 			remove_requests();
@@ -1138,6 +1266,25 @@ static void apply_control(struct work_struct *work)
 		configured = false;
 	}
 out:
+	if (!aux_applied)
+		fp_scene_aux_apply(foreground, source_game, display_off, next.inactive,
+			configured && source_valid && !observe_only() &&
+			(configuration.flags & FP_CPU) && scene_profile &&
+			epoch == READ_ONCE(generation), epoch, &generation);
+	if (scene_active && !display_off && native_scene_feedback() &&
+	    scene_core.demand.capacity != 3 && scene_profile) {
+		const struct fp_scene_aux_cpu *native = native_scene_cpu(0);
+		u32 map, retained;
+
+		if (native && native->limiter_cluster_count &&
+		    !fp_scene_aux_core_seed(&map, &retained) &&
+		    fp_scene_limiter_sun_core_init(&scene_core, retained))
+			scene_core.enabled_clusters = map;
+	}
+	/* Global anti-boost is independent of Scene/FAS frequency ownership.
+	 * It can coexist with FAS GPU QoS, and never writes a thermal/max vote.
+	 */
+	gpu_aux_error = fp_scene_gpu_aux_apply(gpu_aux_allowed(), epoch, &generation);
 	reconcile_scene_activity();
 	mutex_unlock(&config_lock);
 }
@@ -1146,13 +1293,24 @@ static void scene_switch(void *data, bool preempt, struct task_struct *previous,
 			 struct task_struct *next, unsigned int prev_state)
 {
 	u64 now, due;
+	unsigned long flags;
+	bool pulse = false;
 
 	if (!READ_ONCE(scene_active) || READ_ONCE(display_off) || !READ_ONCE(pmus) ||
 	    READ_ONCE(applied_generation) != READ_ONCE(generation))
 		return;
 	now = ktime_get_mono_fast_ns();
+	if (READ_ONCE(scene_sched_events.watch_kswapd)) {
+		spin_lock_irqsave(&frame_lock, flags);
+		pulse = fp_scene_event_sched_switch(&scene_sched_events, scene_activity_epoch, now,
+			scene_panel_peak,
+			(READ_ONCE(previous->flags) & PF_KTHREAD) && !strcmp(previous->comm, "kswapd0"),
+			(READ_ONCE(next->flags) & PF_KTHREAD) && !strcmp(next->comm, "kswapd0"));
+		spin_unlock_irqrestore(&frame_lock, flags);
+	}
 	due = atomic64_read(&next_scene_sample);
-	if (now >= due && atomic64_cmpxchg(&next_scene_sample, due, now + 80000000ULL) == due)
+	if (pulse || (now >= due &&
+	    atomic64_cmpxchg(&next_scene_sample, due, now + 80000000ULL) == due))
 		irq_work_queue(&scene_irq_work);
 }
 
@@ -1163,18 +1321,49 @@ static void scene_irq(struct irq_work *work)
 		queue_work(policy_wq, &scene_work);
 }
 
+static void expire_scene_feedback(struct work_struct *work)
+{
+	if (READ_ONCE(scene_active) && !READ_ONCE(display_off))
+		queue_work(policy_wq, &scene_work);
+}
+
 static void apply_scene(struct work_struct *work)
 {
 	u32 effective[FP_MAX_CPUS] = {};
+	struct sab_status activity;
+	struct fp_scene_event_snapshot input_events, scheduler_events;
+	const struct fp_scene_aux_profile *aux_profile;
+	const struct fp_scene_aux_options *options;
 	unsigned int i, cpu;
-	u64 now = ktime_get_ns();
+	u64 now;
+	u64 epoch, deadline;
+	unsigned long flags;
+	u32 core_demand = 0;
+	bool launcher, enabled, special_peak, have_native = false;
 
 	mutex_lock(&config_lock);
 	if (!scene_active || display_off || !pmus || applied_generation != generation)
 		goto out;
+	now = ktime_get_ns();
+	epoch = applied_generation;
+	scene_activity_backend_status(&activity);
+	scene_activity_backend_feedback(scene_activity_epoch, now, &input_events);
+	spin_lock_irqsave(&frame_lock, flags);
+	scheduler_events = fp_scene_event_snapshot(&scene_sched_events, scene_activity_epoch, now);
+	spin_unlock_irqrestore(&frame_lock, flags);
+	scene_gesture_live = input_events.gesture_active;
+	scene_notify_live = scheduler_events.notify_active;
+	enabled = fp_scene_limiter_input_recent(now, activity.last_input_ns,
+		activity.contacts, FP_SCENE_LIMITER_SMOOTH_RECENT_NS) || input_events.gesture_active;
+	special_peak = input_events.gesture_active || (enabled && scheduler_events.notify_active);
+	launcher = !strcmp(foreground, "com.android.launcher") ||
+		!strcmp(foreground, "com.oplus.launcher");
+	aux_profile = fp_scene_aux_for(foreground, source_game, display_off, scene_inactive);
+	options = fp_scene_aux_options();
 	for (i = 0; i < configuration.cpu_count; i++) {
 		struct cpufreq_policy *policy = cpufreq_cpu_get(configuration.cpus[i].cpu);
-		u32 ceiling;
+		const struct fp_scene_aux_cpu *native = native_scene_cpu(i);
+		u32 ceiling, sample_count = 0;
 		int error;
 		bool have_data = false;
 
@@ -1184,6 +1373,20 @@ static void apply_scene(struct work_struct *work)
 			struct fp_pmu *sample = &pmus[cpu];
 			u64 count, enabled, running, cycles, dt, denabled, drunning;
 
+#if IS_ENABLED(CONFIG_FRAME_POLICY_KUNIT_TEST)
+			if (test_scene_cpu_sample) {
+				u32 khz;
+
+				if (test_scene_cpu_sample(cpu, &khz)) {
+					effective[i] = max(effective[i], khz);
+					if (sample_count < FP_SCENE_LIMITER_MAX_CPUS)
+						scene_cpu_samples[sample_count++] =
+							(struct fp_scene_limiter_cpu_sample){cpu, khz, true};
+					have_data = true;
+				}
+				continue;
+			}
+#endif
 			if (!sample->cycles)
 				continue;
 			count = perf_event_read_value(sample->cycles, &enabled, &running);
@@ -1198,6 +1401,10 @@ static void apply_scene(struct work_struct *work)
 
 				effective[i] = max(effective[i],
 					(u32)min_t(u64, khz, policy->cpuinfo.max_freq));
+				if (sample_count < FP_SCENE_LIMITER_MAX_CPUS)
+					scene_cpu_samples[sample_count++] =
+						(struct fp_scene_limiter_cpu_sample){cpu,
+						min_t(u64, khz, policy->cpuinfo.max_freq), true};
 				have_data = true;
 			}
 			sample->count = count;
@@ -1205,14 +1412,72 @@ static void apply_scene(struct work_struct *work)
 			sample->running = running;
 			sample->timestamp = now;
 		}
+		if (!have_data || observe_only() || !cpu_requests[i].policy) {
+			cpufreq_cpu_put(policy);
+			continue;
+		}
+		if (!native && scene_profile && !scene_profile->cpus[i].margin_count) {
+			cpufreq_cpu_put(policy);
+			continue;
+		}
+		if (native) {
+			struct fp_scene_limiter_load load;
+			struct fp_scene_limiter_margin_step margins[FP_MAX_MARGINS];
+			const struct fp_limits *limits = &scene_profile->cpus[i].limits;
+			u32 mt, perfect, smooth, j;
+			s32 margin;
+
+			mt = fp_scene_limiter_mt(native->mt_milli_percent, i,
+				fp_scene_limiter_core_blend(&scene_core, i,
+					native->limiter_cluster_count != 0), enabled);
+			if (!fp_scene_limiter_aggregate(scene_cpu_samples, sample_count,
+				native->excludes_mask, mt, &load)) {
+				cpufreq_cpu_put(policy);
+				continue;
+			}
+			perfect = fp_scene_limiter_sun_perfect(native->perfect_khz,
+				policy->cpuinfo.max_freq, limits->max_khz);
+			smooth = fp_scene_limiter_smooth(&scene_history[i], load.mixed_khz,
+				perfect, native->prefer, enabled, launcher, special_peak);
+			for (j = 0; j < native->additive_count; j++)
+				margins[j] = (struct fp_scene_limiter_margin_step){
+					native->additive[j].threshold_khz, native->additive[j].offset_khz};
+			/* Both Sun clusters use the non-bottom generic peak margin. A
+			 * contact by itself never impersonates a PerfNotify pulse.
+			 */
+			margin = special_peak ? 650000 :
+				fp_scene_limiter_margin(smooth, margins, native->additive_count, 0);
+			/* Sun's two physical clusters have no inter-cluster peer gate.
+			 * The original consumes pre-OPP estimates, then clamps/rounds
+			 * the CPU vote independently. Exclusions never change affinity.
+			 */
+			ceiling = fp_scene_limiter_estimate(&scene_votes[i], smooth,
+				margin, perfect, 0, enabled);
+			core_demand = max(core_demand, ceiling);
+			have_native = true;
+			ceiling = snap_game_ceiling(policy,
+				clamp(ceiling, limits->min_khz, limits->max_khz), limits);
+			if (!ceiling) {
+				cpufreq_cpu_put(policy);
+				last_error = -ERANGE;
+				last_error_stage = "scene_cpu_opp";
+				remove_requests();
+				release_gpu_mode();
+				configured = false;
+				break;
+			}
+			ceiling = fp_scene_limiter_vote(&scene_votes[i], ceiling);
+			scene_native_samples++;
+		} else {
+			ceiling = scene_profile ?
+				fp_scene_profile_ceiling(effective[i], &scene_profile->cpus[i]) :
+				fp_scene_ceiling(effective[i], &configuration.cpus[i]);
+		}
 		cpufreq_cpu_put(policy);
-		if (!have_data || observe_only() || !cpu_requests[i].policy)
+		if (epoch != READ_ONCE(generation))
+			break;
+		if (ceiling == cpu_ceilings[i])
 			continue;
-		if (scene_profile && !scene_profile->cpus[i].margin_count)
-			continue;
-		ceiling = scene_profile ?
-			fp_scene_profile_ceiling(effective[i], &scene_profile->cpus[i]) :
-			fp_scene_ceiling(effective[i], &configuration.cpus[i]);
 		error = freq_qos_update_request(&cpu_requests[i].max, ceiling);
 		if (error < 0) {
 			last_error = error;
@@ -1224,10 +1489,53 @@ static void apply_scene(struct work_struct *work)
 		}
 		cpu_ceilings[i] = ceiling;
 	}
+	if (configured && scene_active && have_native && aux_profile && options && configuration.cpu_count == 2 &&
+	    (options->valid_mask & FP_AUX_OPT_SOURCE) &&
+	    aux_profile->cpus[0].limiter_cluster_count && epoch == READ_ONCE(generation)) {
+		const struct fp_scene_aux_cpu *first = &aux_profile->cpus[0];
+		bool smooth_core = fp_scene_limiter_input_recent(now, activity.last_input_ns,
+			activity.contacts, FP_SCENE_LIMITER_CORE_RECENT_NS) || input_events.gesture_active;
+		struct fp_scene_limiter_core_result result = fp_scene_limiter_sun_core_step(
+			&scene_core, options->source, core_demand, first->limiter_cluster_count,
+			first->limiter_clusters_packed, input_events.force_core, smooth_core);
+
+		if (result.applicable && (!scene_core_applied || scene_core_mask != result.active_clusters ||
+		    scene_core_restore != result.restore_all)) {
+			struct fp_aux_status aux;
+			u32 j;
+
+			fp_scene_aux_core_update(result.active_clusters, result.restore_all, epoch, &generation);
+			fp_scene_aux_status(&aux);
+			/* A yielded foreign group has no verified native blend state.
+			 * Keep its external policy, and use peak demand conservatively.
+			 */
+			for (j = 0; j < configuration.cpu_count; j++)
+				if (aux.conflict_mask & (1U << (j * FP_SCENE_AUX_KNOBS + FP_AUX_KNOB_CORE_ENABLE)))
+					scene_core.enabled_clusters &= ~(1U << j);
+			scene_core_applied = true;
+			scene_core_mask = result.active_clusters;
+			scene_core_restore = result.restore_all;
+		}
+	}
+	/* Two independent pulses share one absolute one-shot deadline. A further
+	 * interval exists only if a real input/scheduler event queued it.
+	 */
+	deadline = input_events.next_deadline_ns;
+	if (!deadline || (scheduler_events.next_deadline_ns && scheduler_events.next_deadline_ns < deadline))
+		deadline = scheduler_events.next_deadline_ns;
+	scene_feedback_at = deadline;
+	if (deadline && scene_active && epoch == READ_ONCE(generation))
+		mod_delayed_work(policy_wq, &scene_feedback_deadline,
+			deadline > now ? nsecs_to_jiffies(deadline - now) + 1 : 0);
+	else
+		cancel_delayed_work(&scene_feedback_deadline);
 	scene_samples++;
 out:
-	if (!configured)
+	if (!configured) {
+		fp_scene_aux_apply(NULL, false, false, false, false, 0, NULL);
+		gpu_aux_error = fp_scene_gpu_aux_apply(false, 0, NULL);
 		reconcile_scene_activity();
+	}
 	mutex_unlock(&config_lock);
 }
 
@@ -2058,10 +2366,28 @@ static int replace_scene_table(unsigned long arg)
 		kvfree(next);
 		return -EINVAL;
 	}
+	error = fp_scene_gpu_aux_release();
+	if (error) {
+		gpu_aux_error = error;
+		mutex_unlock(&config_lock);
+		kvfree(next);
+		return error;
+	}
+	error = fp_scene_aux_clear();
+	if (error) {
+		gpu_aux_error = fp_scene_gpu_aux_apply(gpu_aux_allowed(), generation, &generation);
+		mutex_unlock(&config_lock);
+		kvfree(next);
+		return error;
+	}
+	fp_scene_gpu_aux_commit(NULL);
+	gpu_aux_error = 0;
 	stop_game();
 	remove_requests();
 	previous = scene_table;
 	scene_table = next;
+	scene_table_epoch++;
+	memset(&scene_core, 0, sizeof(scene_core));
 	last_error = 0;
 	last_error_stage = "none";
 	spin_lock_irqsave(&frame_lock, flags);
@@ -2075,6 +2401,78 @@ static int replace_scene_table(unsigned long arg)
 	flush_work(&control_work);
 	mutex_lock(&config_lock);
 	error = last_error;
+	mutex_unlock(&config_lock);
+	return error;
+}
+
+static int replace_scene_aux(unsigned long arg)
+{
+	struct fp_scene_aux_request request;
+	struct fp_scene_aux_table *next;
+	struct fp_scene_gpu_aux *gpu_candidate = NULL;
+	struct aux_runtime *cpu_candidate = NULL;
+	struct fp_aux_status aux;
+	unsigned long flags;
+	int error;
+
+	if (copy_from_user(&request, (void __user *)arg, sizeof(request)))
+		return -EFAULT;
+	if (request.abi != FP_SCENE_AUX_ABI || request.flags || request.reserved ||
+	    request.length != sizeof(*next) || request.length > FP_SCENE_AUX_MAX_BYTES ||
+	    !request.user_ptr)
+		return -EINVAL;
+	next = kvzalloc(request.length, GFP_KERNEL);
+	if (!next)
+		return -ENOMEM;
+	if (copy_from_user(next, u64_to_user_ptr(request.user_ptr), request.length)) {
+		kvfree(next);
+		return -EFAULT;
+	}
+	if (!fp_scene_aux_table_valid(next, true)) {
+		kvfree(next);
+		return -EINVAL;
+	}
+	/* Fixed KGSL resources are opened under the real root ioctl caller,
+	 * before publication. Neither backend touches old values at prepare.
+	 */
+	error = fp_scene_gpu_aux_prepare(next->options.gpu_lock, &gpu_candidate);
+	if (error) {
+		kvfree(next);
+		return error;
+	}
+	mutex_lock(&config_lock);
+	error = fp_scene_aux_prepare(next, scene_table, scene_table_epoch, &cpu_candidate);
+	if (!error)
+		error = fp_scene_gpu_aux_release();
+	if (!error) {
+		error = fp_scene_aux_commit(next, cpu_candidate);
+		if (error)
+			gpu_aux_error = fp_scene_gpu_aux_apply(gpu_aux_allowed(), generation, &generation);
+	}
+	if (!error) {
+		fp_scene_gpu_aux_commit(gpu_candidate);
+		gpu_candidate = NULL;
+		cpu_candidate = NULL;
+		gpu_aux_error = 0;
+		memset(&scene_core, 0, sizeof(scene_core));
+		spin_lock_irqsave(&frame_lock, flags);
+		scene_activity_epoch++;
+		pending_scene.inactive = false;
+		generation++;
+		spin_unlock_irqrestore(&frame_lock, flags);
+	}
+	mutex_unlock(&config_lock);
+	if (error) {
+		fp_scene_aux_discard(cpu_candidate);
+		fp_scene_gpu_aux_discard(gpu_candidate);
+		kvfree(next);
+		return error;
+	}
+	queue_work(policy_wq, &control_work);
+	flush_work(&control_work);
+	mutex_lock(&config_lock);
+	fp_scene_aux_status(&aux);
+	error = aux.error ? aux.error : gpu_aux_error;
 	mutex_unlock(&config_lock);
 	return error;
 }
@@ -2106,6 +2504,8 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return replace_game_rules(arg);
 	if (cmd == FP_SCENE_TABLE)
 		return replace_scene_table(arg);
+	if (cmd == FP_SCENE_AUX)
+		return replace_scene_aux(arg);
 	if (cmd == FP_FAS_TUNING) {
 		struct fp_fas_tuning tuning;
 
@@ -2174,9 +2574,17 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	mutex_unlock(&config_lock);
 	queue_work(policy_wq, &control_work);
 	flush_work(&control_work);
-	if (!error && cmd == FP_CONFIG) {
+	if (!error) {
+		struct fp_aux_status aux;
+
 		mutex_lock(&config_lock);
-		error = last_error;
+		fp_scene_aux_status(&aux);
+		error = last_error ? last_error : aux.error ? aux.error : gpu_aux_error;
+		if (!error && cmd == FP_DISABLE) {
+			error = fp_scene_aux_clear();
+			if (!error)
+				fp_scene_gpu_aux_commit(NULL);
+		}
 		mutex_unlock(&config_lock);
 	}
 	return error;
@@ -2186,12 +2594,16 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 static int format_policy_status(char *status, size_t capacity, const struct sab_status *activity)
 {
+	struct fp_aux_status aux;
+	struct fp_scene_gpu_aux_status gpu_aux;
 	unsigned long flags;
 	u64 frames, used, errors, epoch, gpu_count, gpu_missing, gpu_average, overflows, inactive_events;
 	unsigned int level, gpu_level, fps;
 	int length, renderer;
 
 	mutex_lock(&config_lock);
+	fp_scene_aux_status(&aux);
+	fp_scene_gpu_aux_status(&gpu_aux);
 	spin_lock_irqsave(&frame_lock, flags);
 	frames = frames_seen;
 	used = frames_used;
@@ -2209,7 +2621,7 @@ static int format_policy_status(char *status, size_t capacity, const struct sab_
 	spin_unlock_irqrestore(&frame_lock, flags);
 	length = scnprintf(status, capacity,
 		"abi=%u\nconfigured=%u\nobserve=%u\nowner=%s\nforeground=%s\n"
-		"features=cpu,scene_pmu,game_frames,gpu,gpu_file_credentials,game_relations,fps_per_game,scene_table,scene_activity,fas_common_p,fas_tuning,fas_task_util\n"
+		"features=cpu,scene_pmu,game_frames,gpu,gpu_file_credentials,game_relations,fps_per_game,scene_table,scene_activity,scene_aux,fas_common_p,fas_tuning,fas_task_util\n"
 		"game_pid=%d\nprobe=%u\ngeneration=%llu\napplied_generation=%llu\n"
 		"frames=%llu\nselected_frames=%llu\nframe_errors=%llu\nlevel=%u\n"
 		"qualified_fps=%u\n"
@@ -2229,6 +2641,15 @@ static int format_policy_status(char *status, size_t capacity, const struct sab_
 		"scene_input_registered=%u\nscene_input_devices=%u\nscene_input_reliable=%u\nscene_contacts=%u\n"
 		"scene_input_events=%llu\nscene_activity_transitions=%llu\nscene_load_samples=%llu\nscene_load_errors=%llu\n"
 		"scene_load_permille=%u\nscene_activity_deadline=%llu\nscene_activity_error=%d\n"
+		"scene_table_epoch=%llu\naux_loaded=%u\naux_profile=%d\naux_error=%d\naux_stage=%s\n"
+		"aux_cpu=%d\naux_knob=%d\naux_owned=%u\naux_conflicts=%u\naux_writes=%llu\naux_rollbacks=%llu\n"
+		"aux_owned_mask=%08x\naux_conflict_mask=%08x\n"
+		"aux_abi=%u\naux_table_bytes=%zu\naux_feedback_supported=1\n"
+		"scene_native_samples=%llu\nscene_native_feedback=%u\nscene_core_enabled_mask=%x\n"
+		"scene_core_retained=%u\nscene_gesture_pulse=%u\nscene_notify_pulse=%u\nscene_feedback_deadline_ns=%llu\n"
+		"gpu_aux_prepared=%u\ngpu_aux_target=%u\ngpu_aux_owned_mask=%x\ngpu_aux_conflict_mask=%x\n"
+		"gpu_aux_satisfied_mask=%x\ngpu_aux_error=%d\ngpu_aux_stage=%s\ngpu_aux_knob=%d\n"
+		"gpu_aux_rollback_error=%d\ngpu_aux_writes=%llu\ngpu_aux_restores=%llu\n"
 		"switches=%llu\nscene_samples=%llu\nlast_error=%d\nlast_error_stage=%s\n",
 		FP_ABI, configured, observe_only(), game_active ? "frame" : scene_active ? "scene" : "idle",
 		foreground, target ? task_pid_nr(target) : 0, registered, epoch,
@@ -2249,6 +2670,15 @@ static int format_policy_status(char *status, size_t capacity, const struct sab_
 		activity->registered, activity->devices, activity->reliable, activity->contacts,
 		activity->inputs, activity->transitions, activity->load_samples, activity->load_errors,
 		activity->load_permille, activity->deadline_valid ? activity->deadline_ms : 0, activity->error,
+		scene_table_epoch, aux.loaded, aux.profile, aux.error, aux.stage,
+		aux.cpu, aux.knob, aux.owned, aux.conflicts, aux.writes, aux.rollbacks,
+		aux.owned_mask, aux.conflict_mask,
+		FP_SCENE_AUX_ABI, sizeof(struct fp_scene_aux_table), scene_native_samples,
+		scene_active && !!pmus && native_scene_feedback(), scene_core.enabled_clusters, scene_core.retained,
+		scene_gesture_live, scene_notify_live, scene_feedback_at,
+		gpu_aux.prepared, gpu_aux.target, gpu_aux.owned_mask, gpu_aux.conflict_mask,
+		gpu_aux.satisfied_mask, gpu_aux.error, gpu_aux.stage, gpu_aux.knob,
+		gpu_aux.rollback_error, gpu_aux.writes, gpu_aux.restores,
 		switches, scene_samples, last_error, last_error_stage);
 	mutex_unlock(&config_lock);
 	return length;
@@ -2328,6 +2758,8 @@ static void __exit frame_policy_exit(void)
 	game_rules = NULL;
 	kvfree(scene_table);
 	scene_table = NULL;
+	fp_scene_aux_exit();
+	fp_scene_gpu_aux_exit();
 	release_gpu_mode();
 	if (gpu_governor_file) {
 		fput(gpu_governor_file);

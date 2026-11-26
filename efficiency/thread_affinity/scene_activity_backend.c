@@ -25,6 +25,7 @@ struct sab_handle {
 	struct list_head node;
 	u32 contacts;
 	bool touch, reliable, ready, listed;
+	u32 max_x, max_y;
 };
 
 /* Lock order: input_dev.event_lock -> activity_lock; never the reverse. */
@@ -47,6 +48,9 @@ static u64 activity_sequence, baseline_sequence, armed_token, armed_epoch;
 static u64 retry_sequence;
 static unsigned int first_cpu;
 static u32 contact_count, touch_devices, unreliable_devices;
+static struct sab_handle *feedback_panel;
+static struct fp_scene_event_state feedback_state;
+static void (*feedback_notify)(u64 epoch);
 #if IS_ENABLED(CONFIG_FRAME_POLICY_KUNIT_TEST)
 static void (*connect_before_open_hook)(struct input_dev *dev);
 #endif
@@ -85,6 +89,8 @@ static void apply_input(enum sa_event_kind kind)
 
 	if (!accepting)
 		return;
+	if (kind == SA_INPUT)
+		activity_status.last_input_ns = ktime_get_ns();
 	activity_sequence++;
 	retry_pending = false;
 	sa_apply(&activity_state, &activity_config, &activity_state.context, &event, &out);
@@ -124,6 +130,7 @@ static void activity_events(struct input_handle *handle,
 	unsigned long flags;
 	unsigned int i;
 	u32 contacts;
+	u32 previous_contacts;
 	bool meaningful = false;
 
 	/* input_open_device may dispatch events before connect finishes. Both this
@@ -139,9 +146,46 @@ static void activity_events(struct input_handle *handle,
 		return;
 	contacts = entry->touch ? device_contacts(handle->dev) : 0;
 	spin_lock_irqsave(&activity_lock, flags);
+	previous_contacts = entry->contacts;
 	contact_count -= entry->contacts;
 	entry->contacts = contacts;
 	contact_count += contacts;
+	if (accepting && entry == feedback_panel && feedback_state.epoch) {
+		u64 now = ktime_get_ns();
+		bool changed = false;
+
+		if (previous_contacts != contacts)
+			fp_scene_event_touch_contact(&feedback_state, feedback_state.epoch, now,
+				contacts, !previous_contacts && contacts == 1);
+		if (contacts == 1 && handle->dev->mt) {
+			struct input_mt_slot *slot = NULL;
+			unsigned int j;
+
+			for (j = 0; j < handle->dev->mt->num_slots; j++)
+				if (input_mt_is_active(&handle->dev->mt->slots[j])) {
+					slot = &handle->dev->mt->slots[j];
+					break;
+				}
+			for (j = 0; slot && j < count; j++) {
+				u32 code = values[j].code, axis;
+				int coordinate;
+
+				if (values[j].type != EV_ABS ||
+				    (code != ABS_MT_POSITION_X && code != ABS_MT_POSITION_Y))
+					continue;
+				axis = code == ABS_MT_POSITION_Y;
+				coordinate = input_mt_get_value(slot, code) -
+					input_abs_get_min(handle->dev, code);
+				if (coordinate < 0)
+					continue;
+				changed |= fp_scene_event_touch_axis(&feedback_state,
+					feedback_state.epoch, now, contacts, axis, coordinate,
+					entry->max_x, entry->max_y);
+			}
+		}
+		if (changed && feedback_notify)
+			feedback_notify(feedback_state.epoch);
+	}
 	/* Movement while a finger is held needs no timer, sample, or public update. */
 	if (!accepting || (activity_state.phase == SA_ACTIVE && contact_count && activity_state.contacts &&
 	    activity_state.input_reliable)) {
@@ -177,6 +221,13 @@ static int activity_connect(struct input_handler *handler, struct input_dev *dev
 	entry->touch = test_bit(ABS_MT_POSITION_X, dev->absbit) || test_bit(BTN_TOUCH, dev->keybit);
 	/* Type A without BTN_TOUCH cannot prove that all contacts were released. */
 	entry->reliable = !entry->touch || dev->mt || test_bit(BTN_TOUCH, dev->keybit);
+	if (dev->mt && test_bit(INPUT_PROP_DIRECT, dev->propbit) &&
+	    test_bit(ABS_MT_POSITION_X, dev->absbit) && test_bit(ABS_MT_POSITION_Y, dev->absbit)) {
+		entry->max_x = max(0, input_abs_get_max(dev, ABS_MT_POSITION_X) -
+			input_abs_get_min(dev, ABS_MT_POSITION_X));
+		entry->max_y = max(0, input_abs_get_max(dev, ABS_MT_POSITION_Y) -
+			input_abs_get_min(dev, ABS_MT_POSITION_Y));
+	}
 	error = input_register_handle(&entry->handle);
 	if (error)
 		goto free;
@@ -202,6 +253,8 @@ static int activity_connect(struct input_handler *handler, struct input_dev *dev
 	list_add_tail(&entry->node, &activity_handles);
 	entry->listed = true;
 	entry->ready = true;
+	if (!feedback_panel && entry->max_x && entry->max_y)
+		feedback_panel = entry;
 	apply_input(SA_RESYNC);
 	spin_unlock(&activity_lock);
 	spin_unlock_irqrestore(&dev->event_lock, flags);
@@ -220,6 +273,13 @@ static void activity_disconnect(struct input_handle *handle)
 	input_unregister_handle(handle);
 	spin_lock_irqsave(&activity_lock, flags);
 	entry->ready = false;
+	if (entry == feedback_panel) {
+		feedback_panel = NULL;
+		/* Disconnect cannot synthesize a fresh contact in this epoch. */
+		feedback_state.gesture_contact = false;
+		feedback_state.gesture.boosting = false;
+		feedback_state.contacts = 0;
+	}
 	if (entry->listed) {
 		list_del(&entry->node);
 		entry->listed = false;
@@ -528,6 +588,30 @@ void scene_activity_backend_status(struct sab_status *status)
 
 	spin_lock_irqsave(&activity_lock, flags);
 	*status = activity_status;
+	spin_unlock_irqrestore(&activity_lock, flags);
+}
+
+void scene_activity_backend_set_feedback(u64 epoch,
+		const struct fp_scene_event_config *config, void (*notify)(u64 epoch))
+{
+	unsigned long flags;
+	u64 duration = config && config->gesture_enabled ?
+		fp_scene_limiter_gesture_duration(config->gesture_duration_ms) : 0;
+
+	spin_lock_irqsave(&activity_lock, flags);
+	if (feedback_state.epoch != epoch || feedback_state.gesture_duration_ns != duration)
+		fp_scene_event_reset(&feedback_state, config ? epoch : 0, config);
+	feedback_notify = config ? notify : NULL;
+	spin_unlock_irqrestore(&activity_lock, flags);
+}
+
+void scene_activity_backend_feedback(u64 epoch, u64 now_ns,
+		struct fp_scene_event_snapshot *snapshot)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&activity_lock, flags);
+	*snapshot = fp_scene_event_snapshot(&feedback_state, epoch, now_ns);
 	spin_unlock_irqrestore(&activity_lock, flags);
 }
 

@@ -41,8 +41,8 @@ function frameFasProtocol(settings) {
   return {blob, mode, base, overrides};
 }
 
-function frameSettingsProtocol(settings, seed, sceneSeed) {
-  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "sceneBaseMode", "sceneApps", "fasMode", "fasMarginFps", "fps", "fallbackFps", "games", "relations", "gameCpuMHz"];
+function frameSettingsProtocol(settings, seed, sceneSeed, auxSeed) {
+  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "sceneBaseMode", "sceneApps", "sceneAux", "sceneGpuLock", "fasMode", "fasMarginFps", "fps", "fallbackFps", "games", "relations", "gameCpuMHz"];
   for (const key of Object.keys(settings)) if (!fields.includes(key)) throw new Error(`未知配置项：${key}`);
   for (const key of ["enabled", "cpu", "gpu", "observe", "relations"])
     if (typeof settings[key] !== "boolean") throw new Error(`${key} 必须为布尔值`);
@@ -112,6 +112,10 @@ function frameSettingsProtocol(settings, seed, sceneSeed) {
   names.forEach((name, i) => rule(name, i + 1, Object.hasOwn(seed.relations.rules, name) ?
     seed.relations.rules[name] : seed.relations.fallback));
   const tuning = frameFasProtocol(settings), fas = tuning.blob;
+  if (settings.sceneAux !== undefined && typeof settings.sceneAux !== "boolean") throw new Error("sceneAux 必须为布尔值");
+  if (settings.sceneGpuLock !== undefined && typeof settings.sceneGpuLock !== "boolean") throw new Error("sceneGpuLock 必须为布尔值");
+  const encodeAux = typeof module !== "undefined" ? require("./scene_aux_protocol.js").frameSceneAuxProtocol : frameSceneAuxProtocol;
+  const aux = encodeAux(settings, auxSeed).table;
   const normalized = {...settings, fasMode: tuning.mode};
   const json = new TextEncoder().encode(JSON.stringify(normalized, null, 2) + "\n");
   if (json.length > 49152) throw new Error("配置文件过大");
@@ -119,15 +123,18 @@ function frameSettingsProtocol(settings, seed, sceneSeed) {
   const scene = encodeScene(settings, sceneSeed).table;
   const requiresScene = settings.sceneMode === "fast" || Object.keys(settings.sceneApps ?? {}).length > 0 ||
     selectedBase !== settings.sceneMode;
-  const payload = new Uint8Array(32 + json.length + config.length + table.length + scene.length + fas.length);
+  const withAux = settings.sceneAux === true, headerSize = withAux ? 40 : 32;
+  const payload = new Uint8Array(headerSize + json.length + config.length + table.length + scene.length + fas.length + (withAux ? aux.length : 0));
   const envelope = new DataView(payload.buffer);
-  [0x46505332, json.length, config.length, table.length, scene.length, fas.length, settings.enabled ? 1 : 0,
-    requiresScene ? 1 : 0].forEach((v, i) => envelope.setUint32(i * 4, v, true));
-  payload.set(json, 32); payload.set(config, 32 + json.length);
-  payload.set(table, 32 + json.length + config.length);
-  payload.set(scene, 32 + json.length + config.length + table.length);
-  payload.set(fas, payload.length - fas.length);
-  return {payload, config, table, scene, fas, settings: normalized};
+  const words = withAux ? [0x46505333, json.length, config.length, table.length, scene.length, fas.length, aux.length,
+    settings.enabled ? 1 : 0, requiresScene ? 1 : 0, 1] : [0x46505332, json.length, config.length, table.length, scene.length, fas.length,
+    settings.enabled ? 1 : 0, requiresScene ? 1 : 0];
+  words.forEach((v, i) => envelope.setUint32(i * 4, v, true));
+  let cursor = headerSize;
+  for (const bytes of [json, config, table, scene, fas, ...(withAux ? [aux] : [])]) {
+    payload.set(bytes, cursor); cursor += bytes.length;
+  }
+  return {payload, config, table, scene, fas, aux, settings: normalized};
 }
 
 if (typeof module !== "undefined") module.exports = {frameSettingsProtocol, frameFasProtocol};
