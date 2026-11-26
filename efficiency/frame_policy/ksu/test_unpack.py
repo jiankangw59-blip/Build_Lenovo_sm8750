@@ -13,7 +13,9 @@ def main(controller):
     settings = (HERE / "defaults/settings.json").read_bytes()
     config = (HERE / "defaults/config.bin").read_bytes()
     rules = (HERE / "defaults/games.bin").read_bytes()
-    payload = struct.pack("<4I", len(settings), len(config), len(rules), 0) + settings + config + rules
+    scene = (HERE / "defaults/scene.bin").read_bytes()
+    payload = struct.pack("<7I", 0x46505331, len(settings), len(config), len(rules), len(scene), 0, 0)
+    payload += settings + config + rules + scene
     with tempfile.TemporaryDirectory(prefix="frame-settings-") as temporary:
         parent = Path(temporary)
         good = parent / "good"
@@ -23,14 +25,18 @@ def main(controller):
         assert (good / "settings.json").read_bytes() == settings
         assert (good / "config.bin").read_bytes() == config
         assert (good / "games.bin").read_bytes() == rules
+        assert (good / "scene.bin").read_bytes() == scene
         assert (good / "enabled").read_bytes() == b"0\n"
+        assert (good / "scene-required").read_bytes() == b"0\n"
         json.loads((good / "settings.json").read_text(encoding="utf-8"))
         for file in good.iterdir():
             assert file.stat().st_mode & 0o777 == 0o600
         assert subprocess.run([str(controller), "unpack-settings", str(good)], input=payload,
                               capture_output=True).returncode != 0
-        cases = [payload[:-1], payload + b"unexpected", struct.pack("<4I", 49153, 592, 7556, 0),
-                 payload[:12] + struct.pack("<I", 2) + payload[16:]]
+        cases = [payload[:-1], payload + b"unexpected",
+                 struct.pack("<7I", 0x46505331, 49153, 592, 7556, 14384, 0, 0),
+                 payload[:20] + struct.pack("<I", 2) + payload[24:],
+                 struct.pack("<I", 0) + payload[4:]]
         for index, invalid in enumerate(cases):
             target = parent / str(index)
             target.mkdir()

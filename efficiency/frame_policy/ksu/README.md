@@ -7,16 +7,25 @@ existing manual test session. The saved configuration is applied once after the
 boot-completed property changes. WebUI saves apply immediately and verify the
 kernel's returned status.
 
-The editor supports CPU/GPU/observation switches, one explicit Scene preset,
+The editor supports CPU/GPU/observation switches, all four Scene presets,
 global and per-game FPS grades, game CPU bounds, and the imported static CPU
-relationships. Setting `games["com.tencent.tmgp.sgame"]` to `[120]`, for example,
+relationships. `sceneApps` maps exact packages to a mode string, `ignore`, or a
+`{mode, category}` object. Categories include `normal`, `Camera` and `ELP`, with
+Reader/Music/IM aliases. The numeric library contains no personal package list or
+Scene preference file. Tables are encoded on save and loaded once at boot;
+foreground events choose their profile inside the kernel.
+
+Setting `games["com.tencent.tmgp.sgame"]` to `[120]`, for example,
 qualifies only a 120 FPS submission cadence for that game's frame control; it
 does not change the game's graphics options or force the application to render
 120 FPS. Arrays such as `[30,45,60,90,120,130,144,165]` allow cadence selection.
 
 Older ABI4 kernels without the optional game table receive global FPS settings
 only; status reports this limitation. GPU activation requires the kernel's
-`gpu_file_credentials` capability. The module does not enable Scene's original
+`gpu_file_credentials` capability. Fast and per-app Scene settings require the
+`scene_table` capability; unsupported kernels reject those settings before any
+control changes. Basic presets can fall back to their global CPU/GPU bounds.
+The module does not enable Scene's original
 userspace performance scheduler, or implement FAS mode margins/core_ctl.
 
 Before activation the client uses a pidfd to request graceful exit of the

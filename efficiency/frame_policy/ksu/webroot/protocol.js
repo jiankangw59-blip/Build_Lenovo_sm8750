@@ -1,7 +1,7 @@
 "use strict";
 
-function frameSettingsProtocol(settings, seed) {
-  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "fps", "games", "relations", "gameCpuMHz"];
+function frameSettingsProtocol(settings, seed, sceneSeed) {
+  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "sceneApps", "fps", "games", "relations", "gameCpuMHz"];
   for (const key of Object.keys(settings)) if (!fields.includes(key)) throw new Error(`未知配置项：${key}`);
   for (const key of ["enabled", "cpu", "gpu", "observe", "relations"])
     if (typeof settings[key] !== "boolean") throw new Error(`${key} 必须为布尔值`);
@@ -23,8 +23,9 @@ function frameSettingsProtocol(settings, seed) {
   }
   const fromBase64 = value => Uint8Array.from(typeof atob === "function" ? atob(value) :
     Buffer.from(value, "base64").toString("binary"), c => c.charCodeAt(0));
-  if (!Object.hasOwn(seed.profiles, settings.sceneMode)) throw new Error("场景模式不存在");
-  const config = fromBase64(seed.profiles[settings.sceneMode]);
+  const baseMode = settings.sceneMode === "fast" ? "balance" : settings.sceneMode;
+  if (!Object.hasOwn(seed.profiles, baseMode)) throw new Error("场景模式不存在");
+  const config = fromBase64(seed.profiles[baseMode]);
   if (config.length !== 592) throw new Error("配置模板版本不匹配");
   const cfg = new DataView(config.buffer, config.byteOffset, config.byteLength);
   cfg.setUint32(4, (settings.cpu ? 1 : 0) | (settings.gpu ? 2 : 0) | (settings.observe ? 4 : 0), true);
@@ -67,11 +68,17 @@ function frameSettingsProtocol(settings, seed) {
     seed.relations.rules[name] : seed.relations.fallback));
   const json = new TextEncoder().encode(JSON.stringify(settings, null, 2) + "\n");
   if (json.length > 49152) throw new Error("配置文件过大");
-  const payload = new Uint8Array(16 + json.length + config.length + table.length);
+  const encodeScene = typeof module !== "undefined" ? require("./scene_protocol.js").frameSceneProtocol : frameSceneProtocol;
+  const scene = encodeScene(settings, sceneSeed).table;
+  const requiresScene = settings.sceneMode === "fast" || Object.keys(settings.sceneApps ?? {}).length > 0;
+  const payload = new Uint8Array(28 + json.length + config.length + table.length + scene.length);
   const envelope = new DataView(payload.buffer);
-  [json.length, config.length, table.length, settings.enabled ? 1 : 0].forEach((v, i) => envelope.setUint32(i * 4, v, true));
-  payload.set(json, 16); payload.set(config, 16 + json.length); payload.set(table, 16 + json.length + config.length);
-  return {payload, config, table};
+  [0x46505331, json.length, config.length, table.length, scene.length, settings.enabled ? 1 : 0,
+    requiresScene ? 1 : 0].forEach((v, i) => envelope.setUint32(i * 4, v, true));
+  payload.set(json, 28); payload.set(config, 28 + json.length);
+  payload.set(table, 28 + json.length + config.length);
+  payload.set(scene, 28 + json.length + config.length + table.length);
+  return {payload, config, table, scene};
 }
 
 if (typeof module !== "undefined") module.exports = {frameSettingsProtocol};

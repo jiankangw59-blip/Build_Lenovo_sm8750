@@ -13,6 +13,7 @@ textarea{height:48vh;font:13px monospace}pre{white-space:pre-wrap;font-size:13px
 <textarea id="editor" spellcheck="false" aria-label="调度配置"></textarea>
 <div><button id="save">保存并应用</button><button id="refresh">刷新</button><button id="rollback">恢复上次配置</button></div>
 <p id="message"></p>
-<p>sceneMode：powersave / balance / performance。fps 为默认帧率档位，games 中的包名可覆盖默认值。gameCpuMHz 按 policy0、policy6 顺序填写最低和最高频率。relations 控制原 FAS 的跨簇频率关系。</p>
-<p>GPU 与逐游戏配置以当前内核能力为准；原 FAS 模式余量、Scene 自动切换与 core_ctl 等功能仍待接入。</p>
-<script src="protocol.js"></script><script src="app.js"></script></html>
+<p>sceneMode：powersave / balance / performance / fast。sceneApps 可按包名设置 mode 和 category（normal / Camera / Reader / Music 等），模式 ignore 表示交回系统。游戏中使用帧调度，游戏外使用 Scene 策略。</p>
+<p>fps 为默认帧率档位，games 中的包名可覆盖默认值。gameCpuMHz 按 policy0、policy6 顺序填写最低和最高频率。relations 控制原 FAS 的跨簇频率关系。</p>
+<p>实际功能以运行状态为准。原 FAS 模式余量、Scene 交互闲置状态与 core_ctl 等功能仍待接入。</p>
+<script src="scene_protocol.js"></script><script src="protocol.js"></script><script src="app.js"></script></html>

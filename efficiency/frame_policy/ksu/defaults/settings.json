@@ -4,6 +4,7 @@
   "gpu": false,
   "observe": false,
   "sceneMode": "balance",
+  "sceneApps": {},
   "fps": [
     30,
     45,

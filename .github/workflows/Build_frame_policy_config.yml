@@ -24,6 +24,7 @@ jobs:
         run: |
           set -euo pipefail
           node efficiency/frame_policy/ksu/test_protocol.js --defaults
+          node --test efficiency/frame_policy/ksu/test_scene_protocol.js
           cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
             efficiency/frame_policy/framectl.c -o "$RUNNER_TEMP/framectl-host"
           python3 efficiency/frame_policy/ksu/test_unpack.py --controller "$RUNNER_TEMP/framectl-host"

@@ -1,6 +1,6 @@
 "use strict";
 const backend = "sh /data/adb/modules/frame_policy_config/config.sh";
-let counter = 0, savedHash = "", seed, busy = false;
+let counter = 0, savedHash = "", seed, sceneSeed, busy = false;
 const editor = document.getElementById("editor"), message = document.getElementById("message");
 function execute(command) {
   return new Promise((resolve, reject) => {
@@ -31,7 +31,7 @@ async function run(task) {
 }
 document.getElementById("save").onclick = () => run(async () => {
   const settings = JSON.parse(editor.value);
-  const {payload} = frameSettingsProtocol(settings, seed);
+  const {payload} = frameSettingsProtocol(settings, seed, sceneSeed);
   let binary = "";
   for (let i = 0; i < payload.length; i += 8192) binary += String.fromCharCode(...payload.subarray(i, i + 8192));
   await execute(`printf %s '${btoa(binary)}' | base64 -d | ${backend} save ${savedHash}`);
@@ -41,4 +41,8 @@ document.getElementById("refresh").onclick = () => run(refresh);
 document.getElementById("rollback").onclick = () => run(async () => {
   await execute(`${backend} rollback`); await refresh(); message.textContent = "已恢复上次配置。";
 });
-run(async () => { seed = JSON.parse(await execute(`${backend} seed`)); await refresh(); });
+run(async () => {
+  seed = JSON.parse(await execute(`${backend} seed`));
+  sceneSeed = JSON.parse(await execute(`${backend} scene-seed`));
+  await refresh();
+});

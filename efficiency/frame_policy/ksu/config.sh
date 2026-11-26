@@ -49,6 +49,10 @@ apply_dir() {
     if [ "$((flags & 2))" != 0 ] && ! printf '%s\n' "$native" | grep -q 'features=.*gpu_file_credentials'; then
         fail '当前内核未包含 GPU 权限修复，请先关闭 gpu'; return 1
     fi
+    if [ "$(cat "$chosen/scene-required")" = 1 ] &&
+       ! printf '%s\n' "$native" | grep -q 'features=.*scene_table'; then
+        fail '当前内核尚未接入 Scene 策略表，不能应用 fast 或逐应用 Scene 配置'; return 1
+    fi
     if [ -f "$legacy" ]; then
         stopped=$("$controller" suspend-legacy) || return 1
         if [ "$stopped" = legacy_was_running=1 ]; then
@@ -56,6 +60,10 @@ apply_dir() {
         fi
     fi
     apply_touched=1
+    "$controller" disable >/dev/null || return 1
+    if printf '%s\n' "$native" | grep -q 'features=.*scene_table'; then
+        "$controller" load-scene "$chosen/scene.bin" >/dev/null || return 1
+    fi
     if printf '%s\n' "$native" | grep -q 'features=.*game_relations'; then
         "$controller" load-rules "$chosen/games.bin" >/dev/null || return 1
     fi
@@ -69,6 +77,9 @@ status() {
         cat /dev/frame_policy
         if ! grep -q 'features=.*fps_per_game' /dev/frame_policy; then
             echo 'module_note=当前内核只应用全局帧率，逐游戏帧率与跨簇规则尚未应用'
+        fi
+        if ! grep -q 'features=.*scene_table' /dev/frame_policy; then
+            echo 'module_note=当前内核只支持基础全局 Scene 频率模板'
         fi
     else
         echo 'module_note=当前内核没有原生帧调度接口'
@@ -84,6 +95,7 @@ case "${1:-status}" in
         cat "$active/settings.json"
         ;;
     seed) cat "$module/defaults/seed.json";;
+    scene-seed) cat "$module/defaults/scene-seed.json";;
     status) status;;
     boot)
         current_dir || exit 1
@@ -104,9 +116,9 @@ case "${1:-status}" in
         "$controller" unpack-settings "$pending" || exit 1
         if ! apply_dir "$pending"; then
             touched=$apply_touched
-            if [ "$old" != "$module/defaults" ]; then
+            if [ "$touched" = 1 ] && [ "$old" != "$module/defaults" ]; then
                 if ! apply_dir "$old"; then "$controller" disable >/dev/null 2>&1; resume_owned_legacy; fi
-            else
+            elif [ "$touched" = 1 ]; then
                 [ "$touched" != 1 ] || "$controller" disable >/dev/null 2>&1
                 resume_owned_legacy
             fi
@@ -133,5 +145,5 @@ case "${1:-status}" in
         mv "$state/current.tmp.$$" "$state/current" || exit 1
         status
         ;;
-    *) fail 'usage: config.sh read|seed|status|boot|save HASH|rollback'; exit 2;;
+    *) fail 'usage: config.sh read|seed|scene-seed|status|boot|save HASH|rollback'; exit 2;;
 esac

@@ -6,9 +6,10 @@ const {frameSettingsProtocol} = require("./webroot/protocol.js");
 for (const name of ["enabled", "libgui.sha256", "seed.json", "settings.json"])
   assert.ok(!fs.readFileSync(path.join(__dirname, "defaults", name)).includes(13), `${name} must use LF`);
 const seed = JSON.parse(fs.readFileSync(path.join(__dirname, "defaults/seed.json"), "utf8"));
+const sceneSeed = JSON.parse(fs.readFileSync(path.join(__dirname, "defaults/scene-seed.json"), "utf8"));
 const original = JSON.parse(fs.readFileSync(path.join(__dirname, "defaults/settings.json"), "utf8"));
 const settings = () => structuredClone(original);
-const packet = frameSettingsProtocol(settings(), seed);
+const packet = frameSettingsProtocol(settings(), seed, sceneSeed);
 const view = bytes => new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 const cfg = view(packet.config), table = view(packet.table), header = view(packet.payload);
 assert.equal(packet.config.length, 592);
@@ -18,10 +19,14 @@ assert.equal(cfg.getUint32(4, true), 1);
 assert.equal(cfg.getUint32(12, true), 165);
 assert.equal(cfg.getUint32(140, true), 8);
 assert.deepEqual(Array.from({length: 8}, (_, i) => cfg.getUint32(560 + i * 4, true)), original.fps);
-assert.equal(header.getUint32(4, true), 592);
-assert.equal(header.getUint32(8, true), 7556);
-assert.equal(header.getUint32(12, true), 0);
-assert.deepEqual(JSON.parse(new TextDecoder().decode(packet.payload.subarray(16, 16 + header.getUint32(0, true)))), original);
+assert.equal(header.getUint32(8, true), 592);
+assert.equal(header.getUint32(12, true), 7556);
+assert.equal(header.getUint32(20, true), 0);
+assert.equal(header.getUint32(0, true), 0x46505331);
+assert.equal(header.getUint32(16, true), 14384);
+assert.equal(header.getUint32(24, true), 0);
+assert.deepEqual(packet.payload.subarray(-14384), packet.scene);
+assert.deepEqual(JSON.parse(new TextDecoder().decode(packet.payload.subarray(28, 28 + header.getUint32(4, true)))), original);
 assert.equal(table.getUint32(0, true), 1);
 assert.equal(table.getUint32(8, true), 2);
 assert.equal(table.getInt32(32 + 136, true), -150000);
@@ -45,18 +50,25 @@ assert.equal(wz.data.getUint32(wz.start + 192, true), 8);
 
 const explicit = settings();
 explicit.enabled = true; explicit.observe = true; explicit.games["com.tencent.tmgp.sgame"] = [45, 130];
-const changed = frameSettingsProtocol(explicit, seed), changedWz = rules(changed.table).get("com.tencent.tmgp.sgame");
+const changed = frameSettingsProtocol(explicit, seed, sceneSeed), changedWz = rules(changed.table).get("com.tencent.tmgp.sgame");
 assert.equal(view(changed.config).getUint32(4, true), 5);
-assert.equal(view(changed.payload).getUint32(12, true), 1);
+assert.equal(view(changed.payload).getUint32(20, true), 1);
 assert.equal(changedWz.data.getUint32(changedWz.start + 192, true), 2);
 assert.equal(changedWz.data.getUint32(changedWz.start + 196, true), 45);
 assert.equal(changedWz.data.getUint32(changedWz.start + 200, true), 130);
 
 const prototypeNames = settings();
 prototypeNames.games = JSON.parse('{"__proto__":[45],"constructor":[130]}');
-const prototypes = rules(frameSettingsProtocol(prototypeNames, seed).table);
+const prototypes = rules(frameSettingsProtocol(prototypeNames, seed, sceneSeed).table);
 assert.equal(prototypes.get("__proto__").data.getUint32(prototypes.get("__proto__").start + 196, true), 45);
 assert.equal(prototypes.get("constructor").data.getUint32(prototypes.get("constructor").start + 196, true), 130);
+
+const advanced = settings();
+advanced.sceneMode = "fast";
+advanced.sceneApps = {"com.oplus.camera": {mode: "performance", category: "Camera"}};
+const advancedPacket = frameSettingsProtocol(advanced, seed, sceneSeed);
+assert.equal(view(advancedPacket.payload).getUint32(24, true), 1);
+assert.equal(view(advancedPacket.scene).getUint32(4, true), 1);
 
 for (const modify of [
   x => { x.fps = [60, 60]; }, x => { x.fps = [130, 45]; },
@@ -67,11 +79,13 @@ for (const modify of [
   x => { x.enabled = true; x.cpu = false; x.gpu = false; },
 ]) {
   const input = settings(); modify(input);
-  assert.throws(() => frameSettingsProtocol(input, seed));
+  assert.throws(() => frameSettingsProtocol(input, seed, sceneSeed));
 }
 console.log("Configuration protocol: ABI, FPS overrides, CPU relations, prototype names and validation passed");
 
 if (process.argv[2] === "--defaults") {
   fs.writeFileSync(path.join(__dirname, "defaults/config.bin"), packet.config);
   fs.writeFileSync(path.join(__dirname, "defaults/games.bin"), packet.table);
+  fs.writeFileSync(path.join(__dirname, "defaults/scene.bin"), packet.scene);
+  fs.writeFileSync(path.join(__dirname, "defaults/scene-required"), "0\n");
 }

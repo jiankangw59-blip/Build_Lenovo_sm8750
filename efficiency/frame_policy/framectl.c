@@ -97,30 +97,33 @@ static int write_setting_file(int directory, const char *name, const void *bytes
 
 static int unpack_settings(const char *path)
 {
-	__u32 header[4], rules_abi;
+	__u32 header[7], rules_abi, scene_abi;
 	unsigned char *payload;
 	struct fp_config config;
 	size_t length;
 	int directory, result;
 
-	if (fread(header, sizeof(header), 1, stdin) != 1 || !header[0] || header[0] > 49152 ||
-	    header[1] != sizeof(config) || header[2] != sizeof(struct fp_game_rules) || header[3] > 1) {
+	if (fread(header, sizeof(header), 1, stdin) != 1 || header[0] != 0x46505331U ||
+	    !header[1] || header[1] > 49152 || header[2] != sizeof(config) ||
+	    header[3] != sizeof(struct fp_game_rules) || header[4] != sizeof(struct fp_scene_table) ||
+	    header[5] > 1 || header[6] > 1) {
 		fprintf(stderr, "Invalid settings envelope\n");
 		return 1;
 	}
-	length = header[0] + header[1] + header[2];
+	length = header[1] + header[2] + header[3] + header[4];
 	payload = malloc(length);
 	if (!payload)
 		return 1;
 	if (fread(payload, length, 1, stdin) != 1 || fgetc(stdin) != EOF || ferror(stdin) ||
-	    memchr(payload, 0, header[0])) {
+	    memchr(payload, 0, header[1])) {
 		free(payload);
 		return 1;
 	}
-	memcpy(&config, payload + header[0], sizeof(config));
+	memcpy(&config, payload + header[1], sizeof(config));
 	/* JSON need not end at an aligned address. */
-	memcpy(&rules_abi, payload + header[0] + header[1], sizeof(rules_abi));
-	if (config.abi != FP_ABI || rules_abi != FP_GAME_RULES_ABI) {
+	memcpy(&rules_abi, payload + header[1] + header[2], sizeof(rules_abi));
+	memcpy(&scene_abi, payload + header[1] + header[2] + header[3], sizeof(scene_abi));
+	if (config.abi != FP_ABI || rules_abi != FP_GAME_RULES_ABI || scene_abi != FP_SCENE_ABI) {
 		free(payload);
 		return 1;
 	}
@@ -129,18 +132,43 @@ static int unpack_settings(const char *path)
 		free(payload);
 		return 1;
 	}
-	result = write_setting_file(directory, "settings.json", payload, header[0]) ||
-		write_setting_file(directory, "config.bin", payload + header[0], header[1]) ||
-		write_setting_file(directory, "games.bin", payload + header[0] + header[1], header[2]) ||
-		write_setting_file(directory, "enabled", header[3] ? "1\n" : "0\n", 2);
+	result = write_setting_file(directory, "settings.json", payload, header[1]) ||
+		write_setting_file(directory, "config.bin", payload + header[1], header[2]) ||
+		write_setting_file(directory, "games.bin", payload + header[1] + header[2], header[3]) ||
+		write_setting_file(directory, "scene.bin", payload + header[1] + header[2] + header[3], header[4]) ||
+		write_setting_file(directory, "enabled", header[5] ? "1\n" : "0\n", 2) ||
+		write_setting_file(directory, "scene-required", header[6] ? "1\n" : "0\n", 2);
 	close(directory);
 	free(payload);
 	return result ? 1 : 0;
 }
 
+static int legacy_stopped(int was_running)
+{
+	const char *journals[] = {
+		"/data/adb/fas-rs-events/cleanup-unconfirmed",
+		"/data/adb/fas-rs-events/run/worker-pending",
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(journals) / sizeof(journals[0]); i++) {
+		if (!access(journals[i], F_OK) || errno != ENOENT) {
+			fprintf(stderr, "Legacy FAS worker cleanup has not been confirmed\n");
+			return 1;
+		}
+	}
+	printf("legacy_was_running=%d\n", was_running);
+	return 0;
+}
+
+static int legacy_executable(const char *executable)
+{
+	return !strcmp(executable, "/data/adb/modules/fas_rs/fas-eventd") ||
+		!strcmp(executable, "/data/adb/modules/fas_rs/fas-eventd (deleted)");
+}
+
 static int suspend_legacy(void)
 {
-	const char *expected = "/data/adb/modules/fas_rs/fas-eventd";
 	char path[64], executable[512];
 	FILE *file;
 	long pid;
@@ -156,8 +184,7 @@ static int suspend_legacy(void)
 	if (!file) {
 		if (errno != ENOENT)
 			return 1;
-		puts("legacy_was_running=0");
-		return 0;
+		return legacy_stopped(0);
 	}
 	result = fscanf(file, "%ld", &pid);
 	fclose(file);
@@ -166,32 +193,27 @@ static int suspend_legacy(void)
 	snprintf(path, sizeof(path), "/proc/%ld/exe", pid);
 	length = readlink(path, executable, sizeof(executable) - 1);
 	if (length < 0 && errno == ENOENT) {
-		puts("legacy_was_running=0");
-		return 0;
+		return legacy_stopped(0);
 	}
 	if (length <= 0)
 		return 1;
 	executable[length] = 0;
-	if (strcmp(executable, expected)) {
-		puts("legacy_was_running=0");
-		return 0;
+	if (!legacy_executable(executable)) {
+		return legacy_stopped(0);
 	}
 	fd = syscall(SYS_pidfd_open, (pid_t)pid, 0);
 	if (fd < 0)
 		return 1;
 	/* The PID could have been recycled before pidfd_open(). */
 	length = readlink(path, executable, sizeof(executable) - 1);
-	if (length <= 0 || (executable[length] = 0, strcmp(executable, expected))) {
+	if (length <= 0 || (executable[length] = 0, !legacy_executable(executable))) {
 		close(fd);
-		puts("legacy_was_running=0");
-		return 0;
+		return legacy_stopped(0);
 	}
 	if (syscall(SYS_pidfd_send_signal, fd, SIGTERM, NULL, 0)) {
 		int disappeared = errno == ESRCH;
 		close(fd);
-		if (disappeared)
-			puts("legacy_was_running=0");
-		return disappeared ? 0 : 1;
+		return disappeared ? legacy_stopped(0) : 1;
 	}
 	stopped = (struct pollfd){ .fd = fd, .events = POLLIN };
 	do { result = poll(&stopped, 1, 20000); } while (result < 0 && errno == EINTR);
@@ -200,8 +222,7 @@ static int suspend_legacy(void)
 		fprintf(stderr, "Legacy FAS cleanup did not finish; native control remains unchanged\n");
 		return 1;
 	}
-	puts("legacy_was_running=1");
-	return 0;
+	return legacy_stopped(1);
 }
 
 int main(int argc, char **argv)

@@ -25,6 +25,7 @@ def package(controller, output):
         archive.writestr("build-provenance.json", json.dumps({
             "controller_sha256": hashlib.sha256(binary).hexdigest(), "frame_abi": 4,
             "game_rules_abi": 1, "default_enabled": False, "resident_process_added": False,
+            "scene_table_abi": 1,
         }, indent=2) + "\n")
     print(output)
 

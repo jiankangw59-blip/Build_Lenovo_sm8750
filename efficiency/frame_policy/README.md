@@ -134,8 +134,9 @@ release all Scene votes. Screen-off releases the GPU governor-file lease.
 See `SCENE_PORT.md` for the table layout, import options and evidence limits.
 The current provider has no reliable inactive-interaction or per-activity mode
 event, so those states are import capabilities without a live-operation claim.
-The configuration WebUI currently selects the base Scene preset; independently
-loaded optional Scene tables take priority over those base Scene bounds.
+The configuration WebUI encodes the optional table from four Scene modes and
+explicit per-package mode/category choices. It loads tables before enabling
+requests, so it never applies a new table with old active frequency votes.
 Scene `core_ctl`, touch boost, CPU excludes/prefer, and the full proprietary
 Scene policy are not implemented. This candidate must not be presented
 as complete Scene/FAS behavior parity or as a measured power improvement.
