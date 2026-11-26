@@ -47,7 +47,9 @@ def main():
             build_text = build_text.replace("compileSdk = 37", 'compileSdk = 36\n    buildToolsVersion = "36.0.0"')
             build_text = build_text.replace("targetSdk = 37", "targetSdk = 36")
             build_file.write_text(build_text, encoding="utf-8", newline="\n")
-        (root / "gradlew").chmod(0o755)
+        wrapper = root / "gradlew"
+        wrapper.write_text(wrapper.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+        wrapper.chmod(0o755)
         # Gradle reads git revision metadata even when rebuilding a source ZIP.
         subprocess.run(["git", "init", str(root)], check=True)
         subprocess.run(["git", "-C", str(root), "add", "."], check=True)
