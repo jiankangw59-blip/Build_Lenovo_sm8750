@@ -77,6 +77,11 @@ def compile_config(profile, libgui, controls, observe):
     fps = controls["target_fps"]
     if not 15 <= fps <= 240:
         raise ValueError("Target FPS must be explicit and between 15 and 240")
+    rates = controls.get("fps_candidates", [fps])
+    if (not 1 <= len(rates) <= 8 or
+            any(type(rate) is not int or not 15 <= rate <= fps for rate in rates) or
+            rates != sorted(set(rates)) or rates[-1] != fps):
+        raise ValueError("FPS grades must be sorted, unique and end at target_fps")
     offset, symbol = probe_offset(libgui)
     device = controls["gpu_device"].encode("ascii")
     if len(device) >= 64 or b"\0" in device:
@@ -90,9 +95,9 @@ def compile_config(profile, libgui, controls, observe):
     game_percent = gpu_percent(profile, "common_gaming")
     if scene_percent is None or game_percent is None:
         raise ValueError("Scene has no explicit normal/game GPU governor policy")
-    data = struct.pack("<IIIIQ16s64s8IiI", 3, flags, len(cpus), fps, offset,
+    data = struct.pack("<IIIIQ16s64s8IiI", 4, flags, len(cpus), fps, offset,
                        libgui[offset:offset + 16], device, *gpu_scene, *gpu_game, *gpu_idle,
-                       scene_percent, game_percent, -1, 0)
+                       scene_percent, game_percent, -1, len(rates))
     policies = []
     idle = profile["features"]["limiter"]["limiters"]["idle"]["cpus"]
     if len(idle) != len(cpus):
@@ -117,13 +122,15 @@ def compile_config(profile, libgui, controls, observe):
                          "idle_khz": idle_limits, "margins": margins})
     if len({p["cpu"] for p in policies}) != len(policies):
         raise ValueError("Repeated CPU policy")
-    data += bytes((4 - len(cpus)) * 104 + 32)
+    data += bytes((4 - len(cpus)) * 104)
+    data += struct.pack("<8I", *rates, *([0] * (8 - len(rates))))
     assert len(data) == 592
     report = {
-        "abi": 3, "observe": observe, "symbol": symbol, "offset": offset,
+        "abi": 4, "observe": observe, "symbol": symbol, "offset": offset,
         "libgui_sha256": hashlib.sha256(libgui).hexdigest(), "cpus": policies,
         "gpu_scene_khz": gpu_scene, "gpu_game_khz": gpu_game,
         "scene_limiter": controls["scene_limiter"], "target_fps": fps,
+        "fps_candidates": rates, "cadence_qualification": "event-driven, 500 ms stable grade",
         "dynamic_scene_limiter_feedback_ported": True,
         "scene_feedback_backend": "event-driven native CPU cycle counters",
         "scene_gpu_mod_percent_ported": True,

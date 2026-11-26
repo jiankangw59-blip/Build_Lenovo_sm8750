@@ -36,6 +36,15 @@ GPU control uses the acquire fence's remaining wait. These are submission and
 fence measurements, not proof of displayed FPS or GPU execution time. The
 controller is independently authored GPL-2.0 code, not copied FAS-RS GPLv3 code.
 
+Frequency requests require a configured FPS grade to match observed cadence
+for at least 500 ms. Optional `fps_candidates` contains up to eight increasing
+grades ending at `target_fps`; omission means only the explicit target is allowed.
+A 60 FPS menu under a 165-only profile creates no frequency requests. A grade
+change, unknown cadence or a long pause resets controller history; stale GPU
+fences cannot feed a different grade. Observed cadence cannot distinguish an
+intentional frame cap from sustained rendering overload, so grade selection is
+a bounded submission heuristic, not a recovery of a game's rendering intent.
+
 Scene CPU feedback reads native cycle counters, scales for multiplexing, and
 applies the imported margin thresholds. `sched_switch` events gate updates to
 at most once per 80 ms; no periodic timer samples an idle system. Game inactivity
@@ -74,8 +83,8 @@ swap. An already-running unregistered build can use `--inherit-policy-from`
 with the previously verified kernel notes SHA256. Early boot applies the
 existing Scene size and compressor after reboot.
 
-The current loader explicitly selects one Scene limiter and one target FPS for
-a bounded trial. Automatic per-app/mode/FPS selection is not implemented.
+The current loader explicitly selects one Scene limiter and the allowed FPS
+grades for a bounded trial. Automatic per-app/mode configuration is not implemented.
 Scene `core_ctl`, touch boost, CPU excludes/prefer, and the full proprietary
 Scene policy are not implemented. This candidate must not be presented
 as complete Scene/FAS behavior parity or as a measured power improvement.

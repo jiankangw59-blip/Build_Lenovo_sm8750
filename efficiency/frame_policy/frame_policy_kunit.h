@@ -70,6 +70,8 @@ static void fp_test_reset(void)
 	memset(&configuration, 0, sizeof(configuration));
 	configuration.flags = FP_OBSERVE;
 	configuration.target_fps = 60;
+	configuration.fps_count = 1;
+	configuration.fps_values[0] = 60;
 	last_error = 0;
 	mutex_unlock(&config_lock);
 	cancel_work_sync(&control_work);
@@ -378,7 +380,7 @@ static void frame_test_fence_signal_and_cancel(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, fence);
 	game_active = true;
-	watch_gpu(dma_fence_get(fence), generation, ktime_get_ns(), false);
+	watch_gpu(dma_fence_get(fence), generation, rate_generation, ktime_get_ns(), false);
 	KUNIT_EXPECT_EQ(test, dma_fence_signal(fence), 0);
 	KUNIT_EXPECT_EQ(test, gpu_samples, before + 1);
 	stop_game();
@@ -390,7 +392,7 @@ static void frame_test_fence_signal_and_cancel(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, fence);
 	game_active = true;
 	before = gpu_samples;
-	watch_gpu(dma_fence_get(fence), generation, ktime_get_ns(), false);
+	watch_gpu(dma_fence_get(fence), generation, rate_generation, ktime_get_ns(), false);
 	stop_game();
 	KUNIT_EXPECT_EQ(test, dma_fence_signal(fence), 0);
 	KUNIT_EXPECT_EQ(test, gpu_samples, before);
@@ -433,7 +435,7 @@ static void frame_test_fence_cancel_race(struct kunit *test)
 		KUNIT_ASSERT_NOT_NULL(test, signaller.fence);
 		init_completion(&signaller.done);
 		game_active = true;
-		watch_gpu(dma_fence_get(signaller.fence), generation, ktime_get_ns(), false);
+		watch_gpu(dma_fence_get(signaller.fence), generation, rate_generation, ktime_get_ns(), false);
 		thread = kthread_run(fp_test_signal_thread, &signaller, "fp-fence-test");
 		if (IS_ERR(thread)) {
 			stop_game();
@@ -454,13 +456,79 @@ static void frame_test_ready_and_stale_fences(struct kunit *test)
 	u64 before = gpu_samples, missing = gpu_unknown;
 
 	game_active = true;
-	watch_gpu(NULL, generation, ktime_get_ns(), true);
+	watch_gpu(NULL, generation, rate_generation, ktime_get_ns(), true);
 	KUNIT_EXPECT_EQ(test, gpu_samples, before + 1);
 	KUNIT_EXPECT_EQ(test, gpu_unknown, missing);
-	watch_gpu(NULL, generation + 1, ktime_get_ns(), true);
+	watch_gpu(NULL, generation + 1, rate_generation, ktime_get_ns(), true);
 	KUNIT_EXPECT_EQ(test, gpu_samples, before + 1);
-	watch_gpu(NULL, generation, ktime_get_ns(), false);
+	watch_gpu(NULL, generation, rate_generation, ktime_get_ns(), false);
 	KUNIT_EXPECT_EQ(test, gpu_unknown, missing + 1);
+}
+
+static void frame_test_cadence_gate_and_qos_release(struct kunit *test)
+{
+	struct fp_rate rate = {};
+	u32 rates[] = { 60, 165 }, high_only[] = { 165 };
+	unsigned int i;
+	int error;
+
+	error = cpufreq_register_driver(&fp_test_cpufreq_driver);
+	KUNIT_ASSERT_EQ(test, error, 0);
+	fp_test_driver_registered = true;
+	fp_test_policy = cpufreq_cpu_get(0);
+	KUNIT_ASSERT_NOT_NULL(test, fp_test_policy);
+	configuration.flags = FP_CPU;
+	configuration.cpu_count = 1;
+	configuration.cpus[0].cpu = 0;
+	configuration.cpus[0].game = (struct fp_limits){ 500000, 4000000 };
+	game_active = true;
+	last_frame_ns = ktime_get_ns();
+	/* A 60 FPS menu under a 165-only profile must leave system policy alone. */
+	for (i = 0; i < 120; i++)
+		active_fps = fp_rate_sample(&rate, 16666667, high_only, 1);
+	apply_frame(&frame_work);
+	KUNIT_EXPECT_EQ(test, active_fps, 0U);
+	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, gpu_device, NULL);
+	fp_rate_reset(&rate);
+	for (i = 0; i < 60; i++)
+		active_fps = fp_rate_sample(&rate, 16666667, rates, 2);
+	last_frame_ns = ktime_get_ns();
+	apply_frame(&frame_work);
+	KUNIT_EXPECT_EQ(test, active_fps, 60U);
+	KUNIT_EXPECT_NOT_NULL(test, cpu_requests[0].policy);
+	/* Losing qualification releases our votes without reviving Scene PMUs. */
+	active_fps = fp_rate_sample(&rate, 1000000000ULL, rates, 2);
+	apply_frame(&frame_work);
+	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
+	KUNIT_EXPECT_TRUE(test, game_active);
+}
+
+static void frame_test_fence_grade_and_error_isolation(struct kunit *test)
+{
+	atomic_t released = ATOMIC_INIT(0);
+	struct dma_fence *fence;
+	u64 epoch = rate_generation;
+
+	game_active = true;
+	active_fps = 60;
+	/* A delayed old-grade fence must not feed the new budget's controller. */
+	rate_generation++;
+	record_gpu_wait(generation, epoch, ktime_get_ns(), 15000000);
+	KUNIT_EXPECT_EQ(test, gpu_control.samples, 0U);
+	record_gpu_wait(generation, rate_generation, ktime_get_ns(), 15000000);
+	KUNIT_EXPECT_EQ(test, gpu_control.samples, 1U);
+	fp_control_reset(&gpu_control);
+	fence = fp_test_new_fence(&released);
+	KUNIT_ASSERT_NOT_NULL(test, fence);
+	watch_gpu(dma_fence_get(fence), generation, rate_generation, ktime_get_ns(), false);
+	dma_fence_set_error(fence, -EIO);
+	KUNIT_EXPECT_EQ(test, dma_fence_signal(fence), 0);
+	KUNIT_EXPECT_EQ(test, gpu_control.samples, 0U);
+	stop_game();
+	dma_fence_put(fence);
+	KUNIT_EXPECT_EQ(test, atomic_read(&released), 1);
 }
 
 static void frame_test_source_loss(struct kunit *test)
@@ -527,6 +595,8 @@ static struct kunit_case frame_policy_cases[] = {
 	KUNIT_CASE(frame_test_fence_signal_and_cancel),
 	KUNIT_CASE(frame_test_fence_cancel_race),
 	KUNIT_CASE(frame_test_ready_and_stale_fences),
+	KUNIT_CASE(frame_test_cadence_gate_and_qos_release),
+	KUNIT_CASE(frame_test_fence_grade_and_error_isolation),
 	KUNIT_CASE(frame_test_source_loss),
 	KUNIT_CASE(frame_test_nonblocking_source),
 	{}

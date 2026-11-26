@@ -5,9 +5,10 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define FP_ABI 3
+#define FP_ABI 4
 #define FP_MAX_CPUS 4
 #define FP_MAX_MARGINS 8
+#define FP_MAX_RATES 8
 #define FP_CPU 1U
 #define FP_GPU 2U
 #define FP_OBSERVE 4U
@@ -46,9 +47,9 @@ struct fp_config {
 	__u32 gpu_scene_percent;
 	__u32 gpu_game_percent;
 	__s32 gpu_percent_fd;
-	__u32 gpu_reserved;
+	__u32 fps_count;
 	struct fp_cpu_config cpus[FP_MAX_CPUS];
-	__u32 reserved[8];
+	__u32 fps_values[FP_MAX_RATES];
 };
 
 #define FP_CONFIG _IOW('F', 0x80, struct fp_config)

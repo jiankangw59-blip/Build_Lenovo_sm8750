@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include "frame_control.h"
+#include "frame_rate.h"
 #include "frame_policy_uapi.h"
 
 int main(void)
@@ -11,9 +12,30 @@ int main(void)
 	struct fp_control state = {};
 	u32 previous = 0, result;
 	unsigned int i;
+	struct fp_rate rate = {};
+	u32 rates[] = { 30, 60, 90, 120, 165 }, high_only[] = { 165 };
 
 	assert(sizeof(struct fp_config) == 592);
 	assert(offsetof(struct fp_config, cpus) == 144);
+	for (i = 0; i < 600; i++)
+		assert(fp_rate_sample(&rate, 16666667, high_only, 1) == 0);
+	fp_rate_reset(&rate);
+	for (i = 0; i < 29; i++)
+		assert(fp_rate_sample(&rate, 16666667, rates, 5) == 0);
+	assert(fp_rate_sample(&rate, 16666667, rates, 5) == 60);
+	for (i = 0; i < 300; i++)
+		fp_rate_sample(&rate, 6060606, rates, 5);
+	assert(rate.target == 165);
+	for (i = 0; i < 180; i++)
+		fp_rate_sample(&rate, 33333333, rates, 5);
+	assert(rate.target == 30);
+	assert(fp_rate_sample(&rate, 1000000000, rates, 5) == 0);
+	assert(rate.samples == 0);
+	for (i = 0; i < 600; i++)
+		assert(fp_rate_sample(&rate, 100000000, rates, 5) == 0);
+	for (i = 0; i < 120; i++)
+		fp_rate_sample(&rate, 11111111 + (i % 3) * 50000, rates, 5);
+	assert(rate.target == 90);
 	for (i = 0; i < 200; i++) {
 		result = fp_control_frame(&state, 24000000, 60);
 		assert(result >= previous && result <= 1000);
@@ -53,6 +75,6 @@ int main(void)
 		assert(level <= 1000);
 		assert(fp_control_floor(level, 0, 10000000) <= 10000000);
 	}
-	puts("Frame controller bounds, warmup, recovery, inactivity and ABI checks passed");
+	puts("Cadence qualification, transitions, controller bounds, recovery and ABI checks passed");
 	return 0;
 }

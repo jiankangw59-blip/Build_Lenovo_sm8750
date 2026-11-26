@@ -51,8 +51,8 @@ def main(kernel, output, report):
                 visit(value)
 
     visit(result)
-    if len(statuses) < 9 or set(statuses) != {"PASS"}:
-        raise SystemExit("The kernel suite did not report all nine passing cases")
+    if len(statuses) < 11 or set(statuses) != {"PASS"}:
+        raise SystemExit("The kernel suite did not report all eleven passing cases")
     shutil.copyfile(output / ".config", report / "debug.config")
     print("Fixed kernel passed scheduler context and fence lifecycle tests", flush=True)
 
