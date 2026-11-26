@@ -32,6 +32,11 @@ def main(kernel, output, report):
                  "--json=" + str(report / "fixed.json"), "frame_policy"], "fixed")
     if fixed:
         raise SystemExit("Fixed kernel did not pass its KUnit tests")
+    markers = ("possible circular locking", "possible recursive locking", "BUG: spinlock",
+               "WARNING: possible", "BUG: scheduling while atomic", "BUG: KASAN:")
+    fixed_log = (report / "fixed.kernel.log").read_text(encoding="utf-8", errors="replace")
+    if any(marker in fixed_log for marker in markers):
+        raise SystemExit("The fixed kernel emitted a locking or memory-safety warning")
     result = json.loads((report / "fixed.json").read_text(encoding="utf-8"))
     statuses = []
 
@@ -63,11 +68,11 @@ def main(kernel, output, report):
                   "--json=" + str(report / "legacy.json"),
                   "frame_policy.frame_test_sched_switch_handoff"], "legacy", timeout=90)
     log = (report / "legacy.kernel.log").read_text(encoding="utf-8", errors="replace")
-    markers = ("possible circular locking", "possible recursive locking", "BUG: spinlock",
-               "WARNING: possible", "BUG: scheduling while atomic")
     lock_failure = any(marker in log for marker in markers)
     hung_after_start = "Exercising the actual sched_switch" in log and legacy != 0
-    detected = legacy != 0 and (lock_failure or hung_after_start)
+    # lockdep reports an invalid dependency even when scheduling happens not
+    # to deadlock in this run and KUnit's individual assertions still pass.
+    detected = lock_failure or hung_after_start
     comparison = {"fixed_all_cases_passed": True, "legacy_exit": legacy,
                   "legacy_lock_warning": lock_failure, "legacy_detected": detected,
                   "production_image": False, "device_testing": False}
