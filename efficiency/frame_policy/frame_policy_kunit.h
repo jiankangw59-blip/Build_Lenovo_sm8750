@@ -207,6 +207,44 @@ static void frame_test_qos_ownership(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 1800000);
 }
 
+static void frame_test_native_cycle_feedback(struct kunit *test)
+{
+	u64 before, counts = 0;
+	unsigned int attempt, cpu;
+	int error;
+
+	error = cpufreq_register_driver(&fp_test_cpufreq_driver);
+	KUNIT_ASSERT_EQ(test, error, 0);
+	fp_test_driver_registered = true;
+	configuration.cpu_count = 1;
+	configuration.cpus[0].cpu = 0;
+	configuration.cpus[0].scene = (struct fp_limits){ 1000000, 2000000 };
+	configuration.cpus[0].idle = (struct fp_limits){ 500000, 1000000 };
+	configuration.flags = FP_CPU | FP_OBSERVE;
+	configured = true;
+	before = READ_ONCE(scene_samples);
+	frame_policy_scene("frame.policy.kunit.cycles", false, false);
+	flush_work(&control_work);
+	KUNIT_ASSERT_EQ(test, last_error, 0);
+	KUNIT_ASSERT_NOT_NULL(test, pmus);
+	KUNIT_EXPECT_TRUE(test, scene_active);
+	KUNIT_EXPECT_TRUE(test, scene_trace);
+	for (attempt = 0; attempt < 80 && READ_ONCE(scene_samples) < before + 3; attempt++) {
+		udelay(100);
+		msleep(25);
+	}
+	KUNIT_EXPECT_GE(test, READ_ONCE(scene_samples), before + 3);
+	mutex_lock(&config_lock);
+	for_each_possible_cpu(cpu)
+		counts += pmus[cpu].count;
+	mutex_unlock(&config_lock);
+	KUNIT_EXPECT_GT(test, counts, 0ULL);
+	frame_policy_scene(NULL, true, false);
+	flush_work(&control_work);
+	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
+	KUNIT_EXPECT_FALSE(test, scene_trace);
+}
+
 struct fp_test_fence {
 	struct dma_fence base;
 	spinlock_t lock;
@@ -397,6 +435,7 @@ static void frame_test_nonblocking_source(struct kunit *test)
 static struct kunit_case frame_policy_cases[] = {
 	KUNIT_CASE(frame_test_sched_switch_handoff),
 	KUNIT_CASE(frame_test_qos_ownership),
+	KUNIT_CASE(frame_test_native_cycle_feedback),
 	KUNIT_CASE(frame_test_fence_signal_and_cancel),
 	KUNIT_CASE(frame_test_fence_cancel_race),
 	KUNIT_CASE(frame_test_ready_and_stale_fences),
