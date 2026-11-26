@@ -71,17 +71,19 @@ static inline u32 fp_game_ceiling(u32 previous_khz, u32 min_khz, u32 max_khz,
 	if (dt > 100000000ULL)
 		dt = 100000000ULL;
 	budget = 1000000000ULL / fps;
-	if (average_ns > budget + budget / 32) {
+	desired = (u64)ceiling * busy_permille / 600;
+	if (desired < min_khz)
+		desired = min_khz;
+	if (desired > max_khz || average_ns > budget + budget / 32)
+		desired = max_khz;
+	if (desired > ceiling) {
 		/* Slow cadence: recover at up to one full frequency range per second. */
 		step = (u64)(max_khz - min_khz) * dt / 1000000000ULL;
 		if (!step)
 			step = 1;
-		ceiling = step > max_khz - ceiling ? max_khz : ceiling + step;
-	} else if (busy_permille < 600) {
+		ceiling += desired - ceiling < step ? desired - ceiling : step;
+	} else if (desired < ceiling && average_ns <= budget + budget / 32) {
 		/* Only lower ceilings when the frame budget is met, never on a jank. */
-		desired = (u64)ceiling * busy_permille / 600;
-		if (desired < min_khz)
-			desired = min_khz;
 		step = (u64)(max_khz - min_khz) * dt / 4000000000ULL;
 		if (!step)
 			step = 1;

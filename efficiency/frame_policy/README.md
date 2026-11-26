@@ -55,10 +55,11 @@ unconditional maximum-frequency boost. This is an independent implementation of
 frame/load feedback, not exact reproduction of every FAS-RS tuning policy.
 
 Frequency requests require a configured FPS grade to match observed cadence
-for at least 500 ms. Optional `fps_candidates` contains up to eight increasing
+over two consecutive 500 ms windows. Optional `fps_candidates` contains up to eight increasing
 grades ending at `target_fps`; omission means only the explicit target is allowed.
-A 60 FPS menu under a 165-only profile creates no frequency requests. A grade
-change, unknown cadence or a long pause resets controller history; stale GPU
+A 60 FPS menu under a 165-only profile creates no frequency requests. Return-time
+bursts do not reset a valid grade, and one unmatched window is tolerated. A grade
+change, sustained unknown cadence or a long pause resets controller history; stale GPU
 fences cannot feed a different grade. Observed cadence cannot distinguish an
 intentional frame cap from sustained rendering overload, so grade selection is
 a bounded submission heuristic, not a recovery of a game's rendering intent.

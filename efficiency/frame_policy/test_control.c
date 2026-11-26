@@ -20,9 +20,12 @@ int main(void)
 	for (i = 0; i < 600; i++)
 		assert(fp_rate_sample(&rate, 16666667, high_only, 1) == 0);
 	fp_rate_reset(&rate);
-	for (i = 0; i < 29; i++)
+	for (i = 0; i < 59; i++)
 		assert(fp_rate_sample(&rate, 16666667, rates, 5) == 0);
 	assert(fp_rate_sample(&rate, 16666667, rates, 5) == 60);
+	/* Bunched successful returns still average 60; never withdraw the grade. */
+	for (i = 0; i < 1200; i++)
+		assert(fp_rate_sample(&rate, i % 2 ? 32333334 : 1000000, rates, 5) == 60);
 	for (i = 0; i < 300; i++)
 		fp_rate_sample(&rate, 6060606, rates, 5);
 	assert(rate.target == 165);
@@ -50,7 +53,7 @@ int main(void)
 		previous = result;
 	}
 	assert(previous == 4000000);
-	assert(fp_game_ceiling(1000000, 500000, 4000000, 900, 16666667, 60, 20000000) == 1000000);
+	assert(fp_game_ceiling(1000000, 500000, 4000000, 900, 16666667, 60, 20000000) > 1000000);
 	assert(fp_game_ceiling(1000000, 500000, 4000000, 0, 16666667, 60, 0) == 1000000);
 	assert(fp_game_ceiling(0, 500000, 4000000, 0, 16666667, 60, 0) == 500000);
 	previous = 0;

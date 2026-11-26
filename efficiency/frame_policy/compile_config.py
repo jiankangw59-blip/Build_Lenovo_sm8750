@@ -130,7 +130,7 @@ def compile_config(profile, libgui, controls, observe):
         "libgui_sha256": hashlib.sha256(libgui).hexdigest(), "cpus": policies,
         "gpu_scene_khz": gpu_scene, "gpu_game_khz": gpu_game,
         "scene_limiter": controls["scene_limiter"], "target_fps": fps,
-        "fps_candidates": rates, "cadence_qualification": "event-driven, 500 ms stable grade",
+        "fps_candidates": rates, "cadence_qualification": "event-driven, two 500 ms stable windows",
         "dynamic_scene_limiter_feedback_ported": True,
         "scene_feedback_backend": "event-driven native CPU cycle counters",
         "scene_gpu_mod_percent_ported": True,
