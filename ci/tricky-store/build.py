@@ -39,6 +39,14 @@ def main():
         if text.count(SEAM) != 1:
             raise ValueError("Pinned getKeyEntry source seam differs")
         source.write_text(text.replace(SEAM, FIX), encoding="utf-8", newline="\n")
+        android_utils = root / "app/src/main/java/io/github/beakthoven/TrickyStoreOSS/AndroidUtils.kt"
+        android_text = android_utils.read_text(encoding="utf-8")
+        if android_text.count("Build.VERSION_CODES.CINNAMON_BUN") != 2:
+            raise ValueError("Pinned Android 17 SDK constants differ")
+        # This final constant is 37 in the original SDK. Keep both mappings when
+        # compiling against SDK 36, which does not declare the symbolic name.
+        android_utils.write_text(android_text.replace("Build.VERSION_CODES.CINNAMON_BUN", "37"),
+                                 encoding="utf-8", newline="\n")
         for project in ("app", "stub"):
             build_file = root / project / "build.gradle.kts"
             build_text = build_file.read_text(encoding="utf-8")
