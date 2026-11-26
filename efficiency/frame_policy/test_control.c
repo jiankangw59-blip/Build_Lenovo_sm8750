@@ -36,6 +36,24 @@ int main(void)
 	for (i = 0; i < 120; i++)
 		fp_rate_sample(&rate, 11111111 + (i % 3) * 50000, rates, 5);
 	assert(rate.target == 90);
+	previous = 4000000;
+	for (i = 0; i < 600; i++) {
+		result = fp_game_ceiling(previous, 500000, 4000000, 100, 16666667, 60, 20000000);
+		assert(result <= previous && result >= 500000);
+		assert(previous - result <= 17500);
+		previous = result;
+	}
+	assert(previous == 500000);
+	for (i = 0; i < 60; i++) {
+		result = fp_game_ceiling(previous, 500000, 4000000, 100, 24000000, 60, 20000000);
+		assert(result >= previous && result <= 4000000);
+		previous = result;
+	}
+	assert(previous == 4000000);
+	assert(fp_game_ceiling(1000000, 500000, 4000000, 900, 16666667, 60, 20000000) == 1000000);
+	assert(fp_game_ceiling(1000000, 500000, 4000000, 0, 16666667, 60, 0) == 1000000);
+	assert(fp_game_ceiling(0, 500000, 4000000, 0, 16666667, 60, 0) == 500000);
+	previous = 0;
 	for (i = 0; i < 200; i++) {
 		result = fp_control_frame(&state, 24000000, 60);
 		assert(result >= previous && result <= 1000);

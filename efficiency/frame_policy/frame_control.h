@@ -58,6 +58,39 @@ static inline u32 fp_control_floor(u32 level, u32 min_khz, u32 max_khz)
 	return min_khz + (u64)(max_khz - min_khz) * level / 1000;
 }
 
+/* Independently authored bounded CPU ceiling feedback, with 40% load headroom. */
+static inline u32 fp_game_ceiling(u32 previous_khz, u32 min_khz, u32 max_khz,
+				  u32 busy_permille, u64 average_ns, u32 fps, u64 dt)
+{
+	u64 budget, desired, step;
+	u32 ceiling = previous_khz < min_khz ? min_khz :
+		previous_khz > max_khz ? max_khz : previous_khz;
+
+	if (!fps || !average_ns || !dt)
+		return ceiling;
+	if (dt > 100000000ULL)
+		dt = 100000000ULL;
+	budget = 1000000000ULL / fps;
+	if (average_ns > budget + budget / 32) {
+		/* Slow cadence: recover at up to one full frequency range per second. */
+		step = (u64)(max_khz - min_khz) * dt / 1000000000ULL;
+		if (!step)
+			step = 1;
+		ceiling = step > max_khz - ceiling ? max_khz : ceiling + step;
+	} else if (busy_permille < 600) {
+		/* Only lower ceilings when the frame budget is met, never on a jank. */
+		desired = (u64)ceiling * busy_permille / 600;
+		if (desired < min_khz)
+			desired = min_khz;
+		step = (u64)(max_khz - min_khz) * dt / 4000000000ULL;
+		if (!step)
+			step = 1;
+		if (ceiling > desired)
+			ceiling -= ceiling - desired < step ? ceiling - desired : step;
+	}
+	return ceiling < min_khz ? min_khz : ceiling > max_khz ? max_khz : ceiling;
+}
+
 static inline u32 fp_control_gpu(struct fp_control *state, u64 pending_ns, u32 target_fps)
 {
 	u64 budget = 1000000000ULL / target_fps;

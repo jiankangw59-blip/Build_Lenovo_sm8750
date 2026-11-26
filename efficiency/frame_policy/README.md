@@ -36,6 +36,17 @@ GPU control uses the acquire fence's remaining wait. These are submission and
 fence measurements, not proof of displayed FPS or GPU execution time. The
 controller is independently authored GPL-2.0 code, not copied FAS-RS GPLv3 code.
 
+The game CPU branch now adjusts maximum frequency as well as minimum requests.
+It accumulates the target mm's actual scheduled runtime on context switches,
+without periodic sampling, task-list scans or PMU counters. Matching frames can
+lower a ceiling with load headroom; slow frames raise it with bounded slew.
+The rendering policy and heavily used policies lock min/max to a supported OPP;
+other policies retain their hardware floor. Continuous targets are kept separate
+from OPP rounding so small reductions accumulate rather than getting stuck at a
+frequency step. Requests start from the current frequency after warmup, not an
+unconditional maximum-frequency boost. This is an independent implementation of
+frame/load feedback, not exact reproduction of every FAS-RS tuning policy.
+
 Frequency requests require a configured FPS grade to match observed cadence
 for at least 500 ms. Optional `fps_candidates` contains up to eight increasing
 grades ending at `target_fps`; omission means only the explicit target is allowed.
@@ -49,6 +60,8 @@ Scene CPU feedback reads native cycle counters, scales for multiplexing, and
 applies the imported margin thresholds. `sched_switch` events gate updates to
 at most once per 80 ms; no periodic timer samples an idle system. Game inactivity
 uses a single deadline to remove frequency floors after one second without frames.
+The game accounting hook is unregistered before ordinary Scene PMU sampling
+starts, and neither hook is registered when this component is disabled.
 
 ## Build and configuration
 

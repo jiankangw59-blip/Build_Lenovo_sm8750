@@ -493,6 +493,8 @@ static void frame_test_cadence_gate_and_qos_release(struct kunit *test)
 	fp_rate_reset(&rate);
 	for (i = 0; i < 60; i++)
 		active_fps = fp_rate_sample(&rate, 16666667, rates, 2);
+	streams[selected_stream].control.samples = 8;
+	streams[selected_stream].control.average_ns = 16666667;
 	last_frame_ns = ktime_get_ns();
 	apply_frame(&frame_work);
 	KUNIT_EXPECT_EQ(test, active_fps, 60U);
@@ -529,6 +531,116 @@ static void frame_test_fence_grade_and_error_isolation(struct kunit *test)
 	stop_game();
 	dma_fence_put(fence);
 	KUNIT_EXPECT_EQ(test, atomic_read(&released), 1);
+}
+
+struct fp_test_game_load {
+	struct mm_struct *mm;
+	struct completion done;
+};
+
+static int fp_test_game_load_thread(void *data)
+{
+	struct fp_test_game_load *load = data;
+	unsigned int i;
+
+	kthread_use_mm(load->mm);
+	for (i = 0; i < 80 && !kthread_should_stop(); i++) {
+		udelay(500);
+		usleep_range(1000, 2000);
+	}
+	kthread_unuse_mm(load->mm);
+	complete(&load->done);
+	for (;;) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (kthread_should_stop())
+			break;
+		schedule();
+	}
+	__set_current_state(TASK_RUNNING);
+	return 0;
+}
+
+static void frame_test_game_runtime_events(struct kunit *test)
+{
+	struct fp_test_game_load load;
+	struct task_struct *thread;
+	unsigned long flags, completed;
+	u64 runtime = 0, before;
+	unsigned int cpu;
+	int error;
+
+	error = cpufreq_register_driver(&fp_test_cpufreq_driver);
+	KUNIT_ASSERT_EQ(test, error, 0);
+	fp_test_driver_registered = true;
+	configuration.flags = FP_CPU | FP_OBSERVE;
+	configuration.cpu_count = 1;
+	configuration.cpus[0].cpu = 0;
+	target_mm = mm_alloc();
+	KUNIT_ASSERT_NOT_NULL(test, target_mm);
+	load.mm = target_mm;
+	init_completion(&load.done);
+	game_active = true;
+	before = game_switches;
+	error = start_game_accounting();
+	KUNIT_ASSERT_EQ(test, error, 0);
+	thread = kthread_run(fp_test_game_load_thread, &load, "fp-game-load");
+	if (IS_ERR(thread)) {
+		KUNIT_FAIL(test, "Cannot start runtime workload");
+		return;
+	}
+	completed = wait_for_completion_timeout(&load.done, 5 * HZ);
+	kthread_stop(thread);
+	KUNIT_EXPECT_NE(test, completed, 0UL);
+	spin_lock_irqsave(&frame_lock, flags);
+	sample_game_load(ktime_get_ns());
+	for_each_possible_cpu(cpu)
+		runtime += game_cpus[cpu].runtime_ns;
+	spin_unlock_irqrestore(&frame_lock, flags);
+	KUNIT_EXPECT_GT(test, runtime, 0ULL);
+	KUNIT_EXPECT_GT(test, game_switches, before);
+	KUNIT_EXPECT_GT(test, cpu_loads[0], 0U);
+	KUNIT_EXPECT_LE(test, cpu_loads[0], 1000U);
+	KUNIT_EXPECT_TRUE(test, game_trace);
+	KUNIT_EXPECT_FALSE(test, scene_trace);
+	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, NULL);
+	stop_game();
+	KUNIT_EXPECT_FALSE(test, game_trace);
+	KUNIT_EXPECT_PTR_EQ(test, game_cpus, NULL);
+}
+
+static void frame_test_game_caps_and_operating_points(struct kunit *test)
+{
+	struct fp_limits *limits = &configuration.cpus[0].game;
+	int error;
+
+	error = cpufreq_register_driver(&fp_test_cpufreq_driver);
+	KUNIT_ASSERT_EQ(test, error, 0);
+	fp_test_driver_registered = true;
+	fp_test_policy = cpufreq_cpu_get(0);
+	KUNIT_ASSERT_NOT_NULL(test, fp_test_policy);
+	configuration.flags = FP_CPU;
+	configuration.cpu_count = 1;
+	configuration.cpus[0].cpu = 0;
+	*limits = (struct fp_limits){ 500000, 4000000 };
+	KUNIT_EXPECT_EQ(test, snap_game_ceiling(fp_test_policy, 1400000, limits), 1500000U);
+	KUNIT_EXPECT_EQ(test, snap_game_ceiling(fp_test_policy, 999999, limits), 1000000U);
+	KUNIT_ASSERT_EQ(test, add_requests(true), 0);
+	error = freq_qos_add_request(&fp_test_policy->constraints, &fp_test_cpu_cap,
+				     FREQ_QOS_MAX, 1800000);
+	KUNIT_ASSERT_GE(test, error, 0);
+	/* Critical policies lock to a valid OPP; thermal max remains a separate vote. */
+	KUNIT_ASSERT_EQ(test, update_cpu_bounds(0, 3000000, 3000000), 0);
+	KUNIT_EXPECT_EQ(test, cpu_floors[0], cpu_ceilings[0]);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 1800000);
+	KUNIT_ASSERT_EQ(test, update_cpu_bounds(0, 1000000, 1000000), 0);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MIN), 1000000);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 1000000);
+	KUNIT_ASSERT_EQ(test, update_cpu_bounds(0, 500000, 2000000), 0);
+	KUNIT_EXPECT_EQ(test, cpu_floors[0], 500000U);
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 1800000);
+	remove_requests();
+	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 1800000);
 }
 
 static void frame_test_source_loss(struct kunit *test)
@@ -597,6 +709,8 @@ static struct kunit_case frame_policy_cases[] = {
 	KUNIT_CASE(frame_test_ready_and_stale_fences),
 	KUNIT_CASE(frame_test_cadence_gate_and_qos_release),
 	KUNIT_CASE(frame_test_fence_grade_and_error_isolation),
+	KUNIT_CASE(frame_test_game_runtime_events),
+	KUNIT_CASE(frame_test_game_caps_and_operating_points),
 	KUNIT_CASE(frame_test_source_loss),
 	KUNIT_CASE(frame_test_nonblocking_source),
 	{}
