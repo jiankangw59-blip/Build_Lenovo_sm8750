@@ -55,7 +55,7 @@ static inline void fp_scene_limiter_pulse_trigger(struct fp_scene_limiter_pulse 
 
 struct fp_scene_limiter_gesture {
 	u32 origin[2];
-	u32 current[2];
+	u32 position[2];
 	bool edge;
 	bool moved;
 	bool boosting;
@@ -74,7 +74,7 @@ static inline bool fp_scene_limiter_gesture_axis(struct fp_scene_limiter_gesture
 
 	if (axis > 1 || !threshold)
 		return false;
-	gesture->current[axis] = coordinate;
+	gesture->position[axis] = coordinate;
 	origin = gesture->origin[axis];
 	if (!origin) {
 		u32 x, y;
@@ -93,10 +93,10 @@ static inline bool fp_scene_limiter_gesture_axis(struct fp_scene_limiter_gesture
 	}
 	if (gesture->boosting)
 		return true;
-	delta_x = gesture->current[0] > gesture->origin[0] ?
-		  gesture->current[0] - gesture->origin[0] : gesture->origin[0] - gesture->current[0];
-	delta_y = gesture->current[1] > gesture->origin[1] ?
-		  gesture->current[1] - gesture->origin[1] : gesture->origin[1] - gesture->current[1];
+	delta_x = gesture->position[0] > gesture->origin[0] ?
+		  gesture->position[0] - gesture->origin[0] : gesture->origin[0] - gesture->position[0];
+	delta_y = gesture->position[1] > gesture->origin[1] ?
+		  gesture->position[1] - gesture->origin[1] : gesture->origin[1] - gesture->position[1];
 	if (delta_x < threshold && delta_y < threshold)
 		return false;
 	gesture->moved = true;

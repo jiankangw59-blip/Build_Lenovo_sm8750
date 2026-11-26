@@ -9,7 +9,6 @@ import unittest
 HERE = Path(__file__).resolve().parent
 WRAPPER = r'''
 #define _GNU_SOURCE
-#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -21,34 +20,31 @@ WRAPPER = r'''
 #include <sys/statfs.h>
 #include <unistd.h>
 #include "scene_aux_uapi.h"
-int open(const char *path,int flags,...) {
- static int (*real_open)(const char *,int,...);
+int __real_open(const char *path,int flags,...);
+int __real_openat(int directory,const char *path,int flags,...);
+int __real_fstatfs(int fd,struct statfs *out);
+int __wrap_open(const char *path,int flags,...) {
  mode_t mode=0;
  if(flags&O_CREAT){va_list a;va_start(a,flags);mode=va_arg(a,int);va_end(a);}
- if(!real_open) real_open=dlsym(RTLD_NEXT,"open");
  if(!strncmp(path,"/sys/devices/system/cpu/",24)) {
   char mapped[1024];snprintf(mapped,sizeof(mapped),"%s/%s",getenv("AUX_NODES"),strrchr(path,'/')+1);
-  return real_open(mapped,flags,mode);
+  return __real_open(mapped,flags,mode);
  }
- return real_open(path,flags,mode);
+ return __real_open(path,flags,mode);
 }
-int openat(int directory,const char *path,int flags,...) {
- static int (*real_openat)(int,const char *,int,...);
+int __wrap_openat(int directory,const char *path,int flags,...) {
  mode_t mode=0;
  if(flags&O_CREAT){va_list a;va_start(a,flags);mode=va_arg(a,int);va_end(a);}
- if(!real_openat)real_openat=dlsym(RTLD_NEXT,"openat");
  if(getenv("AUX_DENY_GPU_WRITE") && (!strcmp(path,"min_pwrlevel") || !strcmp(path,"default_pwrlevel")) &&
-    (flags&O_ACCMODE)==O_RDWR){errno=EACCES;return -1;}
- return real_openat(directory,path,flags,mode);
+    (flags&O_ACCMODE)==O_RDWR){fputs("AUX_INJECTED_GPU_EACCES\n",stderr);errno=EACCES;return -1;}
+ return __real_openat(directory,path,flags,mode);
 }
-int fstatfs(int fd,struct statfs *out) {
- static int (*real_fstatfs)(int,struct statfs *);
- if(!real_fstatfs)real_fstatfs=dlsym(RTLD_NEXT,"fstatfs");
- int result=real_fstatfs(fd,out);
+int __wrap_fstatfs(int fd,struct statfs *out) {
+ int result=__real_fstatfs(fd,out);
  if(!result)out->f_type=getenv("AUX_BAD_FS")?0:0x62656572;
  return result;
 }
-int ioctl(int fd,unsigned long op,...) {
+int __wrap_ioctl(int fd,unsigned long op,...) {
  va_list a;va_start(a,op);struct fp_scene_aux_request *request=va_arg(a,void *);va_end(a);(void)fd;
  if(op!=FP_SCENE_AUX){errno=EINVAL;return -1;}
  if(request->abi!=1 || request->flags || request->reserved || request->length!=sizeof(struct fp_scene_aux_table)){errno=EINVAL;return -1;}
@@ -66,14 +62,14 @@ class AuxClient(unittest.TestCase):
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix="frame-aux-client-")
         cls.root = Path(cls.temporary.name)
-        cls.node, cls.binary, cls.wrapper = (cls.root / x for x in ("policy", "framectl", "wrapper.so"))
+        cls.node, cls.binary = (cls.root / x for x in ("policy", "framectl"))
         source = cls.root / "wrapper.c"
         source.write_text(WRAPPER)
         subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O1", "-fsanitize=undefined",
                         f'-DFRAME_POLICY_DEVICE="{cls.node}"', f'-DFRAME_GPU_ROOT="{cls.root / "gpu"}"',
-                        str(HERE.parent / "framectl.c"), "-o", str(cls.binary)], check=True)
-        subprocess.run(["cc", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror", "-I", str(HERE.parent),
-                        str(source), "-ldl", "-o", str(cls.wrapper)], check=True)
+                        "-I", str(HERE.parent), str(HERE.parent / "framectl.c"), str(source),
+                        "-Wl,--wrap=open,--wrap=openat,--wrap=fstatfs,--wrap=ioctl",
+                        "-o", str(cls.binary)], check=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -87,7 +83,7 @@ class AuxClient(unittest.TestCase):
             (self.nodes / name).write_text("0\n")
         self.result = self.root / "result.bin"
         self.result.unlink(missing_ok=True)
-        self.environment = {**os.environ, "LD_PRELOAD": str(self.wrapper), "AUX_NODES": str(self.nodes), "AUX_RESULT": str(self.result)}
+        self.environment = {**os.environ, "AUX_NODES": str(self.nodes), "AUX_RESULT": str(self.result)}
         self.disk = bytearray(26584)
         struct.pack_into("<4I", self.disk, 0, 1, 0, 1, 1)
         struct.pack_into("<28i", self.disk, 56, *([-1] * 28))
@@ -185,7 +181,9 @@ class AuxClient(unittest.TestCase):
         self.assertEqual(self.call("check-aux",enabled).returncode,0)
         self.assertEqual(before,{p.name:p.read_bytes() for p in self.gpu.iterdir() if p.is_file()})
         self.assertFalse(self.result.exists())
-        self.assertNotEqual(self.call("check-aux",enabled,AUX_DENY_GPU_WRITE="1").returncode,0)
+        denied=self.call("check-aux",enabled,AUX_DENY_GPU_WRITE="1")
+        self.assertIn(b"AUX_INJECTED_GPU_EACCES",denied.stderr)
+        self.assertNotEqual(denied.returncode,0)
         (self.gpu/"min_pwrlevel").unlink()
         self.assertNotEqual(self.call("check-aux",enabled).returncode,0)
         self.assertEqual(self.call("check-aux").returncode,0)
