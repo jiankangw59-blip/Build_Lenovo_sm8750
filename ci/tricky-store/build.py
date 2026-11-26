@@ -40,6 +40,12 @@ def main():
             raise ValueError("Pinned getKeyEntry source seam differs")
         source.write_text(text.replace(SEAM, FIX), encoding="utf-8", newline="\n")
         (root / "gradlew").chmod(0o755)
+        # Gradle reads git revision metadata even when rebuilding a source ZIP.
+        subprocess.run(["git", "init", str(root)], check=True)
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=Source Build",
+                        "-c", "user.email=source-build@localhost", "commit", "-m",
+                        "Pinned public source with AUTO recovery fix"], check=True)
         return
     dex = root / "app/build/intermediates/dex/release/minifyReleaseWithR8/classes.dex"
     payload = dex.read_bytes()
