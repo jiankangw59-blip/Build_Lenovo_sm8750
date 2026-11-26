@@ -49,6 +49,7 @@ struct fp_call {
 	pid_t tid;
 	u64 start_time, generation, surface, entered_ns;
 	struct dma_fence *fence;
+	bool gpu_ready;
 };
 
 struct fp_fence_watch {
@@ -397,6 +398,7 @@ static int probe_entry(struct uprobe_consumer *self, struct pt_regs *regs)
 			.surface = regs->regs[0],
 			.entered_ns = ktime_get_ns(),
 			.fence = fence,
+			.gpu_ready = (int)regs->regs[2] == -1,
 		};
 		fence = NULL;
 	} else {
@@ -408,11 +410,9 @@ out:
 	return 0;
 }
 
-static void record_gpu_sample(u64 epoch, u64 entered_ns, struct dma_fence *fence)
+static void record_gpu_wait(u64 epoch, u64 entered_ns, u64 pending)
 {
 	unsigned long flags;
-	u64 finished = ktime_to_ns(dma_fence_timestamp(fence));
-	u64 pending = finished > entered_ns ? finished - entered_ns : 0;
 
 	spin_lock_irqsave(&frame_lock, flags);
 	if (game_active && epoch == generation &&
@@ -422,6 +422,13 @@ static void record_gpu_sample(u64 epoch, u64 entered_ns, struct dma_fence *fence
 		gpu_samples++;
 	}
 	spin_unlock_irqrestore(&frame_lock, flags);
+}
+
+static void record_gpu_sample(u64 epoch, u64 entered_ns, struct dma_fence *fence)
+{
+	u64 finished = ktime_to_ns(dma_fence_timestamp(fence));
+
+	record_gpu_wait(epoch, entered_ns, finished > entered_ns ? finished - entered_ns : 0);
 }
 
 static void gpu_ready(struct dma_fence *fence, struct dma_fence_cb *callback)
@@ -437,7 +444,7 @@ static void gpu_ready(struct dma_fence *fence, struct dma_fence_cb *callback)
 }
 
 /* The fence reference is consumed on every path. */
-static void watch_gpu(struct dma_fence *fence, u64 epoch, u64 entered_ns)
+static void watch_gpu(struct dma_fence *fence, u64 epoch, u64 entered_ns, bool ready)
 {
 	struct fp_fence_watch *watch = NULL;
 	unsigned long flags;
@@ -445,6 +452,11 @@ static void watch_gpu(struct dma_fence *fence, u64 epoch, u64 entered_ns)
 	int error;
 
 	if (!fence) {
+		/* Android uses fd=-1 for an already-ready buffer, not missing data. */
+		if (ready) {
+			record_gpu_wait(epoch, entered_ns, 0);
+			return;
+		}
 		spin_lock_irqsave(&frame_lock, flags);
 		gpu_unknown++;
 		spin_unlock_irqrestore(&frame_lock, flags);
@@ -488,7 +500,7 @@ static int probe_return(struct uprobe_consumer *self, unsigned long function,
 	struct dma_fence *fence = NULL;
 	unsigned long flags;
 	unsigned int i, selected = FP_STREAMS;
-	bool schedule = false, use_fence = false;
+	bool schedule = false, use_fence = false, gpu_ready_now = false;
 	pid_t tid = task_pid_nr(current);
 
 	spin_lock_irqsave(&frame_lock, flags);
@@ -499,6 +511,7 @@ static int probe_return(struct uprobe_consumer *self, unsigned long function,
 			surface = calls[i].surface;
 			epoch = calls[i].generation;
 			entered_ns = calls[i].entered_ns;
+			gpu_ready_now = calls[i].gpu_ready;
 		}
 		fence = calls[i].fence;
 		calls[i].fence = NULL;
@@ -554,7 +567,7 @@ static int probe_return(struct uprobe_consumer *self, unsigned long function,
 out:
 	spin_unlock_irqrestore(&frame_lock, flags);
 	if (use_fence)
-		watch_gpu(fence, epoch, entered_ns);
+		watch_gpu(fence, epoch, entered_ns, gpu_ready_now);
 	else
 		dma_fence_put(fence);
 	if (schedule)
