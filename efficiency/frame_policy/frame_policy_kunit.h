@@ -1,9 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Only compiled into the isolated KUnit kernel, never the device profile. */
 #include <kunit/test.h>
+#include <linux/anon_inodes.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/kthread.h>
+#include <linux/uio.h>
 
 static unsigned int fp_test_frequency = 1000000;
 static bool fp_test_driver_registered;
@@ -57,6 +59,13 @@ static void fp_test_reset(void)
 	spin_unlock_irqrestore(&frame_lock, flags);
 	stop_game();
 	remove_requests();
+	release_gpu_mode();
+	if (gpu_governor_file) {
+		fput(gpu_governor_file);
+		gpu_governor_file = NULL;
+	}
+	gpu_mode_owned = false;
+	gpu_mode_conflict = false;
 	applied_generation = generation;
 	memset(&configuration, 0, sizeof(configuration));
 	configuration.flags = FP_OBSERVE;
@@ -243,6 +252,84 @@ static void frame_test_native_cycle_feedback(struct kunit *test)
 	flush_work(&control_work);
 	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
 	KUNIT_EXPECT_FALSE(test, scene_trace);
+}
+
+static u32 fp_test_gpu_percent;
+
+static ssize_t fp_test_gpu_read(struct kiocb *iocb, struct iov_iter *output)
+{
+	char buffer[24];
+	size_t length, copied;
+
+	length = scnprintf(buffer, sizeof(buffer), "%u\n", READ_ONCE(fp_test_gpu_percent));
+	if (iocb->ki_pos >= length)
+		return 0;
+	copied = copy_to_iter(buffer + iocb->ki_pos, length - iocb->ki_pos, output);
+	iocb->ki_pos += copied;
+	return copied;
+}
+
+static ssize_t fp_test_gpu_write(struct kiocb *iocb, struct iov_iter *input)
+{
+	char buffer[24];
+	size_t length = iov_iter_count(input);
+	u32 value;
+	int error;
+
+	if (length >= sizeof(buffer))
+		return -E2BIG;
+	if (!copy_from_iter_full(buffer, length, input))
+		return -EFAULT;
+	buffer[length] = 0;
+	error = kstrtou32(strim(buffer), 10, &value);
+	if (error)
+		return error;
+	WRITE_ONCE(fp_test_gpu_percent, value);
+	iocb->ki_pos += length;
+	return length;
+}
+
+static const struct file_operations fp_test_gpu_file_ops = {
+	.owner = THIS_MODULE,
+	.read_iter = fp_test_gpu_read,
+	.write_iter = fp_test_gpu_write,
+	.llseek = noop_llseek,
+};
+
+static void frame_test_gpu_governor_lease(struct kunit *test)
+{
+	struct file *file = anon_inode_getfile("frame-gpu-mode", &fp_test_gpu_file_ops,
+					     NULL, O_RDWR);
+
+	KUNIT_ASSERT_FALSE(test, IS_ERR(file));
+	gpu_governor_file = file;
+	gpu_mode_original = 100;
+	gpu_mode_last = 100;
+	WRITE_ONCE(fp_test_gpu_percent, 100);
+	configuration.gpu_scene_percent = 105;
+	configuration.gpu_game_percent = 100;
+	display_off = false;
+	configuration.flags = FP_GPU | FP_OBSERVE;
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(false), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 100U);
+	KUNIT_EXPECT_FALSE(test, gpu_mode_owned);
+	configuration.flags = FP_GPU;
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(false), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 105U);
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(true), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 100U);
+	display_off = true;
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(false), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 100U);
+	display_off = false;
+	KUNIT_EXPECT_EQ(test, release_gpu_mode(), 0);
+	KUNIT_EXPECT_FALSE(test, gpu_mode_owned);
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(false), 0);
+	WRITE_ONCE(fp_test_gpu_percent, 110); /* A foreign owner replaces our value. */
+	KUNIT_EXPECT_EQ(test, release_gpu_mode(), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 110U);
+	KUNIT_EXPECT_TRUE(test, gpu_mode_conflict);
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(true), -EBUSY);
 }
 
 struct fp_test_fence {
@@ -436,6 +523,7 @@ static struct kunit_case frame_policy_cases[] = {
 	KUNIT_CASE(frame_test_sched_switch_handoff),
 	KUNIT_CASE(frame_test_qos_ownership),
 	KUNIT_CASE(frame_test_native_cycle_feedback),
+	KUNIT_CASE(frame_test_gpu_governor_lease),
 	KUNIT_CASE(frame_test_fence_signal_and_cancel),
 	KUNIT_CASE(frame_test_fence_cancel_race),
 	KUNIT_CASE(frame_test_ready_and_stale_fences),

@@ -18,6 +18,14 @@ queued frame/Scene work from a previous generation cannot apply its results.
 CPU and GPU can be enabled independently. Thermal and other system QoS limits
 remain in force.
 
+The GPU's existing `mod_percent` parameter is imported from Scene's
+`common_app` and `common_gaming` presets. The loader opens that sysfs attribute
+once and passes the file into the kernel; only transition work reads/writes it.
+The component snapshots the original value, retains it across screen-off, and
+restores it on disable if another owner has not replaced its value. A conflicting
+writer causes control to stop with `EBUSY`. No vendor-private structure offsets
+are used for this setting.
+
 Foreground events only publish a bounded snapshot under a spinlock and queue
 the transition. They never wait on the controller mutex, PMU reads or probe
 teardown, so the existing affinity provider cannot be held up by this backend.
@@ -68,7 +76,6 @@ existing Scene size and compressor after reboot.
 
 The current loader explicitly selects one Scene limiter and one target FPS for
 a bounded trial. Automatic per-app/mode/FPS selection is not implemented.
-Scene GPU `mod_percent`, `core_ctl`, touch boost, CPU excludes/prefer, and the
-full proprietary Scene policy are not implemented. GPU Scene behavior is only
-the explicitly supplied frequency bounds. This candidate must not be presented
+Scene `core_ctl`, touch boost, CPU excludes/prefer, and the full proprietary
+Scene policy are not implemented. This candidate must not be presented
 as complete Scene/FAS behavior parity or as a measured power improvement.

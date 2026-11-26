@@ -12,8 +12,8 @@ int main(void)
 	u32 previous = 0, result;
 	unsigned int i;
 
-	assert(sizeof(struct fp_config) == 576);
-	assert(offsetof(struct fp_config, cpus) == 128);
+	assert(sizeof(struct fp_config) == 592);
+	assert(offsetof(struct fp_config, cpus) == 144);
 	for (i = 0; i < 200; i++) {
 		result = fp_control_frame(&state, 24000000, 60);
 		assert(result >= previous && result <= 1000);

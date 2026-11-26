@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define FP_ABI 2
+#define FP_ABI 3
 #define FP_MAX_CPUS 4
 #define FP_MAX_MARGINS 8
 #define FP_CPU 1U
@@ -43,6 +43,10 @@ struct fp_config {
 	struct fp_limits gpu_scene;
 	struct fp_limits gpu_game;
 	struct fp_limits gpu_idle;
+	__u32 gpu_scene_percent;
+	__u32 gpu_game_percent;
+	__s32 gpu_percent_fd;
+	__u32 gpu_reserved;
 	struct fp_cpu_config cpus[FP_MAX_CPUS];
 	__u32 reserved[8];
 };

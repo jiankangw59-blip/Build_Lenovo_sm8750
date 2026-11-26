@@ -1,4 +1,4 @@
-"""Compile Scene CPU margins, GPU bounds and a verified libgui symbol into ABI 2."""
+"""Compile Scene CPU margins, GPU governor settings and a verified libgui symbol."""
 import argparse
 import hashlib
 import json
@@ -49,6 +49,22 @@ def bounded_limits(value):
     return minimum, maximum
 
 
+def gpu_percent(profile, preset, visiting=()):
+    if preset in visiting:
+        raise ValueError("Cycle in Scene presets")
+    value = None
+    for command in profile["presets"][preset]:
+        if command[0] == "@preset":
+            nested = gpu_percent(profile, command[1], visiting + (preset,))
+            if nested is not None:
+                value = nested
+        elif command[0] == "$mod_percent":
+            value = int(command[1])
+    if value is not None and not 1 <= value <= 200:
+        raise ValueError("Scene GPU governor percentage is outside the supported range")
+    return value
+
+
 def compile_config(profile, libgui, controls, observe):
     cpus = controls["cpus"]
     if not 1 <= len(cpus) <= 4:
@@ -68,8 +84,15 @@ def compile_config(profile, libgui, controls, observe):
     gpu_scene = bounded_limits(controls["gpu_scene_khz"])
     gpu_game = bounded_limits(controls["gpu_game_khz"])
     gpu_idle = bounded_limits(controls.get("gpu_idle_khz", gpu_scene))
-    data = struct.pack("<IIIIQ16s64sIIIIII", 2, flags, len(cpus), fps, offset,
-                       libgui[offset:offset + 16], device, *gpu_scene, *gpu_game, *gpu_idle)
+    if profile["alias"].get("mod_percent") != "/sys/class/kgsl/kgsl-3d0/devfreq/mod_percent":
+        raise ValueError("The GPU governor control path is not supported by this client")
+    scene_percent = gpu_percent(profile, "common_app")
+    game_percent = gpu_percent(profile, "common_gaming")
+    if scene_percent is None or game_percent is None:
+        raise ValueError("Scene has no explicit normal/game GPU governor policy")
+    data = struct.pack("<IIIIQ16s64s8IiI", 3, flags, len(cpus), fps, offset,
+                       libgui[offset:offset + 16], device, *gpu_scene, *gpu_game, *gpu_idle,
+                       scene_percent, game_percent, -1, 0)
     policies = []
     idle = profile["features"]["limiter"]["limiters"]["idle"]["cpus"]
     if len(idle) != len(cpus):
@@ -95,15 +118,16 @@ def compile_config(profile, libgui, controls, observe):
     if len({p["cpu"] for p in policies}) != len(policies):
         raise ValueError("Repeated CPU policy")
     data += bytes((4 - len(cpus)) * 104 + 32)
-    assert len(data) == 576
+    assert len(data) == 592
     report = {
-        "abi": 2, "observe": observe, "symbol": symbol, "offset": offset,
+        "abi": 3, "observe": observe, "symbol": symbol, "offset": offset,
         "libgui_sha256": hashlib.sha256(libgui).hexdigest(), "cpus": policies,
         "gpu_scene_khz": gpu_scene, "gpu_game_khz": gpu_game,
         "scene_limiter": controls["scene_limiter"], "target_fps": fps,
         "dynamic_scene_limiter_feedback_ported": True,
         "scene_feedback_backend": "event-driven native CPU cycle counters",
-        "scene_gpu_mod_percent_ported": False,
+        "scene_gpu_mod_percent_ported": True,
+        "gpu_scene_percent": scene_percent, "gpu_game_percent": game_percent,
         "configuration_sha256": hashlib.sha256(data).hexdigest(),
     }
     return data, report

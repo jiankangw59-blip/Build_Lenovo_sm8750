@@ -14,7 +14,7 @@ int main(int argc, char **argv)
 {
 	struct fp_config config;
 	FILE *input;
-	int device, result = 0;
+	int device, gpu = -1, result = 0;
 	char status[2048];
 	ssize_t count;
 
@@ -44,7 +44,23 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		fclose(input);
+		if (config.abi != FP_ABI) {
+			fprintf(stderr, "Frame configuration ABI does not match this client\n");
+			close(device);
+			return 1;
+		}
+		if (config.flags & FP_GPU) {
+			gpu = open("/sys/class/kgsl/kgsl-3d0/devfreq/mod_percent", O_RDWR | O_CLOEXEC);
+			if (gpu < 0) {
+				perror("open GPU governor control");
+				close(device);
+				return 1;
+			}
+		}
+		config.gpu_percent_fd = gpu;
 		result = ioctl(device, FP_CONFIG, &config);
+		if (gpu >= 0)
+			close(gpu);
 	} else if (!strcmp(argv[1], "disable")) {
 		result = ioctl(device, FP_DISABLE);
 	}

@@ -78,6 +78,9 @@ static struct fp_cpu_request cpu_requests[FP_MAX_CPUS];
 static struct fp_pmu *pmus;
 static struct dev_pm_qos_request gpu_min, gpu_max;
 static struct device *gpu_device;
+static struct file *gpu_governor_file;
+static u32 gpu_mode_original, gpu_mode_last;
+static bool gpu_mode_owned, gpu_mode_conflict;
 static struct task_struct *target;
 static struct mm_struct *target_mm;
 static struct file *probe_file;
@@ -116,6 +119,86 @@ static DECLARE_DELAYED_WORK(expire_work, expire_frame);
 static bool observe_only(void)
 {
 	return configuration.flags & FP_OBSERVE;
+}
+
+static int read_gpu_mode(u32 *value)
+{
+	char buffer[24];
+	loff_t offset = 0;
+	ssize_t length;
+
+	if (!gpu_governor_file)
+		return -EBADF;
+	length = kernel_read(gpu_governor_file, buffer, sizeof(buffer) - 1, &offset);
+	if (length <= 0)
+		return length < 0 ? (int)length : -EIO;
+	buffer[length] = 0;
+	return kstrtou32(strim(buffer), 10, value);
+}
+
+static int write_gpu_mode(u32 value)
+{
+	char buffer[24];
+	loff_t offset = 0;
+	u32 readback;
+	int length, error;
+	ssize_t written;
+
+	length = scnprintf(buffer, sizeof(buffer), "%u\n", value);
+	written = kernel_write(gpu_governor_file, buffer, length, &offset);
+	if (written != length)
+		return written < 0 ? (int)written : -EIO;
+	error = read_gpu_mode(&readback);
+	return error ? error : readback == value ? 0 : -EIO;
+}
+
+static int release_gpu_mode(void)
+{
+	u32 current_percent;
+	int error;
+
+	if (!gpu_mode_owned)
+		return 0;
+	error = read_gpu_mode(&current_percent);
+	if (!error && current_percent == gpu_mode_last) {
+		if (current_percent != gpu_mode_original)
+			error = write_gpu_mode(gpu_mode_original);
+	} else if (!error) {
+		/* A different owner changed it: preserve that owner's value. */
+		gpu_mode_conflict = true;
+	}
+	if (error)
+		last_error = error;
+	gpu_mode_owned = false;
+	return error;
+}
+
+static int apply_gpu_mode(bool game)
+{
+	u32 desired = game ? configuration.gpu_game_percent : configuration.gpu_scene_percent;
+	u32 current_percent;
+	int error;
+
+	if (observe_only() || !(configuration.flags & FP_GPU) || !desired || display_off)
+		return 0;
+	if (gpu_mode_conflict)
+		return -EBUSY;
+	error = read_gpu_mode(&current_percent);
+	if (error)
+		return error;
+	if (gpu_mode_owned && current_percent != gpu_mode_last) {
+		gpu_mode_conflict = true;
+		gpu_mode_owned = false;
+		return -EBUSY;
+	}
+	if (current_percent != desired) {
+		error = write_gpu_mode(desired);
+		if (error)
+			return error;
+	}
+	gpu_mode_last = desired;
+	gpu_mode_owned = true;
+	return 0;
 }
 
 static void stop_pmus(void)
@@ -672,8 +755,10 @@ static void apply_control(struct work_struct *work)
 	display_off = next.off;
 	last_error = 0;
 	switches++;
-	if (!configured || !source_valid)
+	if (!configured || !source_valid) {
+		release_gpu_mode();
 		goto out;
+	}
 	if (source_game && !display_off) {
 		last_error = start_game();
 	} else {
@@ -687,6 +772,13 @@ static void apply_control(struct work_struct *work)
 	if (epoch != READ_ONCE(generation)) {
 		stop_game();
 		remove_requests();
+	} else if (!last_error) {
+		last_error = apply_gpu_mode(source_game && !display_off);
+	}
+	if (last_error) {
+		stop_game();
+		remove_requests();
+		release_gpu_mode();
 	}
 out:
 	mutex_unlock(&config_lock);
@@ -825,7 +917,9 @@ arm:
 	goto out;
 failed:
 	last_error = error;
+	stop_game();
 	remove_requests();
+	release_gpu_mode();
 out:
 	mutex_unlock(&config_lock);
 }
@@ -920,6 +1014,7 @@ static int validate_configuration(const struct fp_config *config)
 	for (i = 0; i < ARRAY_SIZE(config->reserved); i++)
 		unused |= config->reserved[i];
 	if (config->abi != FP_ABI || !config->flags || (config->flags & ~FP_FLAGS) || unused ||
+	    config->gpu_reserved ||
 	    !config->cpu_count || config->cpu_count > FP_MAX_CPUS ||
 	    config->target_fps < 15 || config->target_fps > 240 ||
 	    !config->probe_offset || (config->probe_offset & 3) ||
@@ -927,6 +1022,9 @@ static int validate_configuration(const struct fp_config *config)
 	    !memchr(config->gpu_device, 0, sizeof(config->gpu_device)))
 		return -EINVAL;
 	if ((config->flags & FP_GPU) && (!config->gpu_device[0] ||
+	    !config->gpu_scene_percent || config->gpu_scene_percent > 200 ||
+	    !config->gpu_game_percent || config->gpu_game_percent > 200 ||
+	    config->gpu_percent_fd < 0 ||
 	    !valid_limits(&config->gpu_scene) || !valid_limits(&config->gpu_game) ||
 	    !valid_limits(&config->gpu_idle)))
 		return -EINVAL;
@@ -955,8 +1053,9 @@ static int validate_configuration(const struct fp_config *config)
 static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct fp_config next;
+	struct file *governor = NULL;
 	unsigned long flags;
-	int error;
+	int error = 0;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -968,25 +1067,52 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		error = validate_configuration(&next);
 		if (error)
 			return error;
+		if (next.flags & FP_GPU) {
+			governor = fget(next.gpu_percent_fd);
+			if (!governor)
+				return -EBADF;
+			if ((governor->f_mode & (FMODE_READ | FMODE_WRITE)) != (FMODE_READ | FMODE_WRITE) ||
+			    strcmp(file_inode(governor)->i_sb->s_type->name, "sysfs") ||
+			    strcmp((const char *)governor->f_path.dentry->d_name.name, "mod_percent")) {
+				fput(governor);
+				return -EINVAL;
+			}
+		}
 	}
 	mutex_lock(&config_lock);
 	stop_game();
 	remove_requests();
-	if (cmd == FP_CONFIG)
+	error = release_gpu_mode();
+	if (gpu_governor_file)
+		fput(gpu_governor_file);
+	gpu_governor_file = governor;
+	gpu_mode_owned = false;
+	gpu_mode_conflict = false;
+	gpu_mode_last = 0;
+	if (governor && !error) {
+		error = read_gpu_mode(&gpu_mode_original);
+		if (!error && (!gpu_mode_original || gpu_mode_original > 200))
+			error = -ERANGE;
+	}
+	if (error && gpu_governor_file) {
+		fput(gpu_governor_file);
+		gpu_governor_file = NULL;
+	}
+	if (cmd == FP_CONFIG && !error)
 		configuration = next;
-	configured = cmd == FP_CONFIG;
+	configured = cmd == FP_CONFIG && !error;
 	spin_lock_irqsave(&frame_lock, flags);
 	generation++;
 	spin_unlock_irqrestore(&frame_lock, flags);
 	mutex_unlock(&config_lock);
 	queue_work(policy_wq, &control_work);
 	flush_work(&control_work);
-	return 0;
+	return error;
 }
 
 static ssize_t policy_read(struct file *file, char __user *data, size_t size, loff_t *offset)
 {
-	char status[1024];
+	char status[1536];
 	unsigned long flags;
 	u64 frames, used, errors, epoch, gpu_count, gpu_missing, gpu_average;
 	unsigned int level, gpu_level;
@@ -1005,19 +1131,21 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 	gpu_missing = gpu_unknown;
 	spin_unlock_irqrestore(&frame_lock, flags);
 	length = scnprintf(status, sizeof(status),
-		"abi=2\nconfigured=%u\nobserve=%u\nowner=%s\nforeground=%s\n"
+		"abi=%u\nconfigured=%u\nobserve=%u\nowner=%s\nforeground=%s\n"
 		"game_pid=%d\nprobe=%u\ngeneration=%llu\napplied_generation=%llu\n"
 		"frames=%llu\nselected_frames=%llu\nframe_errors=%llu\nlevel=%u\n"
 		"gpu_samples=%llu\ngpu_unknown=%llu\ngpu_level=%u\ngpu_pending_ns=%llu\n"
 		"cpu0_floor_khz=%u\ncpu1_floor_khz=%u\ngpu_floor_khz=%u\n"
 		"cpu_requests=%u\ngpu_requests=%u\nscene_pmu=%u\nsource_valid=%u\n"
+		"gpu_mode_owned=%u\ngpu_mode_percent=%u\ngpu_mode_conflict=%u\n"
 		"switches=%llu\nscene_samples=%llu\nlast_error=%d\n",
-		configured, observe_only(), game_active ? "frame" : scene_active ? "scene" : "idle",
+		FP_ABI, configured, observe_only(), game_active ? "frame" : scene_active ? "scene" : "idle",
 		foreground, target ? task_pid_nr(target) : 0, registered, epoch,
 		applied_generation, frames, used, errors, level,
 		gpu_count, gpu_missing, gpu_level, gpu_average,
 		cpu_floors[0], cpu_floors[1], gpu_floor,
 		!!cpu_requests[0].policy, !!gpu_device, !!pmus, source_valid,
+		gpu_mode_owned, gpu_mode_last, gpu_mode_conflict,
 		switches, scene_samples, last_error);
 	mutex_unlock(&config_lock);
 	return simple_read_from_buffer(data, size, offset, status, length);
@@ -1071,6 +1199,11 @@ static void __exit frame_policy_exit(void)
 	spin_unlock_irqrestore(&frame_lock, flags);
 	stop_game();
 	remove_requests();
+	release_gpu_mode();
+	if (gpu_governor_file) {
+		fput(gpu_governor_file);
+		gpu_governor_file = NULL;
+	}
 	mutex_unlock(&config_lock);
 	cancel_work_sync(&control_work);
 	cancel_work_sync(&frame_work);
