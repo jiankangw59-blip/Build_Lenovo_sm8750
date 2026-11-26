@@ -19,7 +19,7 @@ jobs:
           packages: platform-tools
           log-accepted-android-sdk-licenses: false
       - name: Install Android SDK platform
-        run: sdkmanager 'platforms;android-37' 'build-tools;37.0.0'
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
       - name: Compile release DEX
         working-directory: ${{ runner.temp }}/tsoss/TrickyStoreOSS
         run: ./gradlew :app:minifyReleaseWithR8 --no-daemon --max-workers=2 -Dorg.gradle.jvmargs='-Xmx2048m -Dfile.encoding=UTF-8' -Pkotlin.compiler.execution.strategy=in-process --stacktrace

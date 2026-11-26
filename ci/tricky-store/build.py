@@ -39,6 +39,14 @@ def main():
         if text.count(SEAM) != 1:
             raise ValueError("Pinned getKeyEntry source seam differs")
         source.write_text(text.replace(SEAM, FIX), encoding="utf-8", newline="\n")
+        for project in ("app", "stub"):
+            build_file = root / project / "build.gradle.kts"
+            build_text = build_file.read_text(encoding="utf-8")
+            if build_text.count("compileSdk = 37") != 1:
+                raise ValueError("Pinned Android SDK declaration differs")
+            build_text = build_text.replace("compileSdk = 37", 'compileSdk = 36\n    buildToolsVersion = "36.0.0"')
+            build_text = build_text.replace("targetSdk = 37", "targetSdk = 36")
+            build_file.write_text(build_text, encoding="utf-8", newline="\n")
         (root / "gradlew").chmod(0o755)
         # Gradle reads git revision metadata even when rebuilding a source ZIP.
         subprocess.run(["git", "init", str(root)], check=True)
