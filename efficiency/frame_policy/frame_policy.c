@@ -2,6 +2,7 @@
 /* Frame events and Scene frequency requests. All arithmetic is integer based. */
 #include <linux/capability.h>
 #include <linux/cpufreq.h>
+#include <linux/dma-fence.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/init.h>
@@ -18,6 +19,7 @@
 #include <linux/sched/task.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/sync_file.h>
 #include <linux/threads.h>
 #include <linux/uaccess.h>
 #include <linux/uprobes.h>
@@ -41,7 +43,14 @@ struct fp_cpu_request {
 
 struct fp_call {
 	pid_t tid;
-	u64 start_time, generation, surface;
+	u64 start_time, generation, surface, entered_ns;
+	struct dma_fence *fence;
+};
+
+struct fp_fence_watch {
+	struct dma_fence_cb callback;
+	struct dma_fence *fence;
+	u64 generation, entered_ns;
 };
 
 struct fp_stream {
@@ -61,12 +70,15 @@ static struct mm_struct *target_mm;
 static struct file *probe_file;
 static struct uprobe_consumer consumer;
 static struct fp_call calls[FP_CALLS];
+static struct fp_fence_watch gpu_watches[FP_CALLS];
+static struct fp_control gpu_control;
 static struct fp_stream streams[FP_STREAMS];
 static char foreground[FP_PACKAGE];
 static bool configured, source_valid, source_game, display_off, registered;
 static bool game_active, scene_active;
 static u64 generation, applied_generation, last_frame_ns, last_work_ns;
 static u64 frames_seen, frames_used, frame_errors, switches;
+static u64 gpu_samples, gpu_unknown;
 static unsigned int selected_stream, floor_level;
 static u32 cpu_floors[FP_MAX_CPUS], gpu_floor;
 static int last_error;
@@ -178,6 +190,7 @@ fail:
 static void stop_game(void)
 {
 	unsigned long flags;
+	unsigned int i;
 
 	/* Disable event consumption before waiting for registered handlers. */
 	spin_lock_irqsave(&frame_lock, flags);
@@ -187,6 +200,32 @@ static void stop_game(void)
 	if (registered) {
 		uprobe_unregister(file_inode(probe_file), configuration.probe_offset, &consumer);
 		registered = false;
+	}
+	for (i = 0; i < FP_CALLS; i++) {
+		struct dma_fence *fence;
+
+		spin_lock_irqsave(&frame_lock, flags);
+		fence = calls[i].fence;
+		calls[i].fence = NULL;
+		calls[i].tid = 0;
+		spin_unlock_irqrestore(&frame_lock, flags);
+		dma_fence_put(fence);
+		/*
+		 * No new callbacks can be armed after uprobe_unregister().
+		 * Never acquire a fence lock while holding frame_lock.
+		 */
+		spin_lock_irqsave(&frame_lock, flags);
+		fence = dma_fence_get(gpu_watches[i].fence);
+		spin_unlock_irqrestore(&frame_lock, flags);
+		if (!fence)
+			continue;
+		if (dma_fence_remove_callback(fence, &gpu_watches[i].callback)) {
+			spin_lock_irqsave(&frame_lock, flags);
+			gpu_watches[i].fence = NULL;
+			spin_unlock_irqrestore(&frame_lock, flags);
+			dma_fence_put(fence); /* The canceled callback's reference. */
+		}
+		dma_fence_put(fence);
 	}
 	if (probe_file) {
 		fput(probe_file);
@@ -251,10 +290,13 @@ static bool probe_filter(struct uprobe_consumer *self, enum uprobe_filter_ctx co
 static int probe_entry(struct uprobe_consumer *self, struct pt_regs *regs)
 {
 	struct fp_call *slot = NULL;
+	struct dma_fence *fence = NULL;
 	unsigned long flags;
 	unsigned int i;
 	pid_t tid = task_pid_nr(current);
 
+	if ((int)regs->regs[2] >= 0 && current->mm == READ_ONCE(target_mm))
+		fence = sync_file_get_fence((int)regs->regs[2]);
 	spin_lock_irqsave(&frame_lock, flags);
 	if (!game_active || current->mm != target_mm)
 		goto out;
@@ -274,19 +316,96 @@ static int probe_entry(struct uprobe_consumer *self, struct pt_regs *regs)
 			.start_time = current->start_boottime,
 			.generation = generation,
 			.surface = regs->regs[0],
+			.entered_ns = ktime_get_ns(),
+			.fence = fence,
 		};
+		fence = NULL;
 	} else {
 		frame_errors++;
 	}
 out:
 	spin_unlock_irqrestore(&frame_lock, flags);
+	dma_fence_put(fence);
 	return 0;
+}
+
+static void record_gpu_sample(u64 epoch, u64 entered_ns, struct dma_fence *fence)
+{
+	unsigned long flags;
+	u64 finished = ktime_to_ns(dma_fence_timestamp(fence));
+	u64 pending = finished > entered_ns ? finished - entered_ns : 0;
+
+	spin_lock_irqsave(&frame_lock, flags);
+	if (game_active && epoch == generation) {
+		fp_control_gpu(&gpu_control, min_t(u64, pending, FP_INACTIVITY_NS),
+			       configuration.target_fps);
+		gpu_samples++;
+	}
+	spin_unlock_irqrestore(&frame_lock, flags);
+}
+
+static void gpu_ready(struct dma_fence *fence, struct dma_fence_cb *callback)
+{
+	struct fp_fence_watch *watch = container_of(callback, struct fp_fence_watch, callback);
+	unsigned long flags;
+
+	record_gpu_sample(watch->generation, watch->entered_ns, fence);
+	spin_lock_irqsave(&frame_lock, flags);
+	watch->fence = NULL;
+	spin_unlock_irqrestore(&frame_lock, flags);
+	dma_fence_put(fence);
+}
+
+/* The fence reference is consumed on every path. */
+static void watch_gpu(struct dma_fence *fence, u64 epoch, u64 entered_ns)
+{
+	struct fp_fence_watch *watch = NULL;
+	unsigned long flags;
+	unsigned int i;
+	int error;
+
+	if (!fence) {
+		spin_lock_irqsave(&frame_lock, flags);
+		gpu_unknown++;
+		spin_unlock_irqrestore(&frame_lock, flags);
+		return;
+	}
+	spin_lock_irqsave(&frame_lock, flags);
+	if (game_active && epoch == generation) {
+		for (i = 0; i < FP_CALLS; i++) {
+			if (!gpu_watches[i].fence) {
+				watch = &gpu_watches[i];
+				watch->generation = epoch;
+				watch->entered_ns = entered_ns;
+				watch->fence = fence;
+				break;
+			}
+		}
+	}
+	if (!watch)
+		gpu_unknown++;
+	spin_unlock_irqrestore(&frame_lock, flags);
+	if (!watch) {
+		dma_fence_put(fence);
+		return;
+	}
+	error = dma_fence_add_callback(fence, &watch->callback, gpu_ready);
+	if (!error)
+		return;
+	if (error == -ENOENT && dma_fence_get_status(fence) > 0)
+		record_gpu_sample(epoch, entered_ns, fence);
+	spin_lock_irqsave(&frame_lock, flags);
+	watch->fence = NULL;
+	spin_unlock_irqrestore(&frame_lock, flags);
+	dma_fence_put(fence);
 }
 
 static int probe_return(struct uprobe_consumer *self, unsigned long function,
 			struct pt_regs *regs)
 {
 	u64 now = ktime_get_ns(), surface = 0, epoch = 0;
+	u64 entered_ns = 0;
+	struct dma_fence *fence = NULL;
 	unsigned long flags;
 	unsigned int i, selected = FP_STREAMS;
 	bool schedule = false;
@@ -299,7 +418,10 @@ static int probe_return(struct uprobe_consumer *self, unsigned long function,
 		if (calls[i].start_time == current->start_boottime) {
 			surface = calls[i].surface;
 			epoch = calls[i].generation;
+			entered_ns = calls[i].entered_ns;
 		}
+		fence = calls[i].fence;
+		calls[i].fence = NULL;
 		calls[i].tid = 0;
 		break;
 	}
@@ -310,6 +432,7 @@ static int probe_return(struct uprobe_consumer *self, unsigned long function,
 		goto out;
 	}
 	frames_seen++;
+	/* Fence tracking is independent of CPU frametime error. */
 	for (i = 0; i < FP_STREAMS; i++) {
 		if (streams[i].surface == surface || !streams[i].surface) {
 			selected = i;
@@ -339,6 +462,10 @@ static int probe_return(struct uprobe_consumer *self, unsigned long function,
 	}
 out:
 	spin_unlock_irqrestore(&frame_lock, flags);
+	if (surface && epoch && !(long)regs_return_value(regs))
+		watch_gpu(fence, epoch, entered_ns);
+	else
+		dma_fence_put(fence);
 	if (schedule)
 		queue_work(policy_wq, &frame_work);
 	return 0;
@@ -379,6 +506,7 @@ static int start_game(void)
 	spin_lock_irqsave(&frame_lock, flags);
 	memset(calls, 0, sizeof(calls));
 	memset(streams, 0, sizeof(streams));
+	fp_control_reset(&gpu_control);
 	selected_stream = 0;
 	last_frame_ns = 0;
 	last_work_ns = 0;
@@ -425,7 +553,7 @@ out:
 static void apply_frame(struct work_struct *work)
 {
 	unsigned long flags;
-	unsigned int i, level;
+	unsigned int i, level, gpu_level;
 	u64 now = ktime_get_ns(), last;
 	int error = 0;
 
@@ -433,6 +561,7 @@ static void apply_frame(struct work_struct *work)
 	spin_lock_irqsave(&frame_lock, flags);
 	last = last_frame_ns;
 	level = floor_level;
+	gpu_level = gpu_control.level;
 	if (!game_active || applied_generation != generation || !last ||
 	    now - last >= FP_INACTIVITY_NS) {
 		spin_unlock_irqrestore(&frame_lock, flags);
@@ -460,7 +589,7 @@ static void apply_frame(struct work_struct *work)
 	}
 	if (gpu_device) {
 		const struct fp_limits *limits = &configuration.gpu_game;
-		u32 floor = fp_control_floor(level, limits->min_khz, limits->max_khz);
+		u32 floor = fp_control_floor(gpu_level, limits->min_khz, limits->max_khz);
 
 		if (floor != gpu_floor) {
 			error = dev_pm_qos_update_request(&gpu_min, floor);
@@ -524,12 +653,19 @@ void frame_policy_task_event(struct task_struct *task)
 	unsigned int i;
 
 	if (READ_ONCE(task->flags) & PF_EXITING) {
+		struct dma_fence *pending_fence = NULL;
+
 		spin_lock_irqsave(&frame_lock, flags);
 		for (i = 0; i < FP_CALLS; i++)
 			if (calls[i].tid == task_pid_nr(task) &&
-			    calls[i].start_time == task->start_boottime)
+			    calls[i].start_time == task->start_boottime) {
+				pending_fence = calls[i].fence;
+				calls[i].fence = NULL;
 				calls[i].tid = 0;
+				break;
+			}
 		spin_unlock_irqrestore(&frame_lock, flags);
+		dma_fence_put(pending_fence);
 	}
 	if (!policy_wq || task != task->group_leader || !READ_ONCE(source_game))
 		return;
@@ -609,8 +745,8 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 {
 	char status[1024];
 	unsigned long flags;
-	u64 frames, used, errors, epoch;
-	unsigned int level;
+	u64 frames, used, errors, epoch, gpu_count, gpu_missing, gpu_average;
+	unsigned int level, gpu_level;
 	int length;
 
 	mutex_lock(&config_lock);
@@ -620,16 +756,22 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 	errors = frame_errors;
 	epoch = generation;
 	level = floor_level;
+	gpu_level = gpu_control.level;
+	gpu_average = gpu_control.average_ns;
+	gpu_count = gpu_samples;
+	gpu_missing = gpu_unknown;
 	spin_unlock_irqrestore(&frame_lock, flags);
 	length = scnprintf(status, sizeof(status),
 		"abi=1\nconfigured=%u\nobserve=%u\nowner=%s\nforeground=%s\n"
 		"game_pid=%d\nprobe=%u\ngeneration=%llu\napplied_generation=%llu\n"
 		"frames=%llu\nselected_frames=%llu\nframe_errors=%llu\nlevel=%u\n"
+		"gpu_samples=%llu\ngpu_unknown=%llu\ngpu_level=%u\ngpu_pending_ns=%llu\n"
 		"cpu0_floor_khz=%u\ncpu1_floor_khz=%u\ngpu_floor_khz=%u\n"
 		"cpu_requests=%u\ngpu_requests=%u\nswitches=%llu\nlast_error=%d\n",
 		configured, observe_only(), game_active ? "frame" : scene_active ? "scene" : "idle",
 		foreground, target ? task_pid_nr(target) : 0, registered, epoch,
 		applied_generation, frames, used, errors, level,
+		gpu_count, gpu_missing, gpu_level, gpu_average,
 		cpu_floors[0], cpu_floors[1], gpu_floor,
 		!!cpu_requests[0].policy, !!gpu_device, switches, last_error);
 	mutex_unlock(&config_lock);

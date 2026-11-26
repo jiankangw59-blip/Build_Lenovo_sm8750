@@ -29,6 +29,12 @@ int main(void)
 	assert(fp_control_floor(1000, 384000, 3532800) == 3532800);
 	assert(fp_control_frame(&state, 5000000000ULL, 165) == 0);
 	assert(state.samples == 0 && state.average_ns == 0);
+	for (i = 0; i < 100; i++)
+		fp_control_gpu(&state, 16000000, 60);
+	assert(state.level == 1000);
+	for (i = 0; i < 600; i++)
+		fp_control_gpu(&state, 0, 60);
+	assert(state.level == 0);
 	for (i = 0; i < 200000; i++) {
 		u64 duration = (u64)i * 7919 % 300000000ULL;
 		u32 level = fp_control_frame(&state, duration, 15 + i % 226);

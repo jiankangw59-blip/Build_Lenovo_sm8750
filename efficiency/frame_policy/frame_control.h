@@ -56,4 +56,21 @@ static inline u32 fp_control_floor(u32 level, u32 min_khz, u32 max_khz)
 	return min_khz + (u64)(max_khz - min_khz) * level / 1000;
 }
 
+static inline u32 fp_control_gpu(struct fp_control *state, u64 pending_ns, u32 target_fps)
+{
+	u64 budget = 1000000000ULL / target_fps;
+
+	state->samples++;
+	state->average_ns = state->samples == 1 ? pending_ns :
+		(state->average_ns * 7 + pending_ns) / 8;
+	if (state->average_ns > budget * 3 / 4) {
+		state->level = state->level > 950 ? 1000 : state->level + 50;
+		state->good_frames = 0;
+	} else if (state->average_ns < budget / 4 && ++state->good_frames >= 8) {
+		state->level = state->level < 25 ? 0 : state->level - 25;
+		state->good_frames = 0;
+	}
+	return state->level;
+}
+
 #endif
