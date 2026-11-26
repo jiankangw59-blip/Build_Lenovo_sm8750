@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Frame events and Scene frequency requests. All arithmetic is integer based. */
 #include <linux/capability.h>
+#include <linux/cred.h>
 #include <linux/cpufreq.h>
 #include <linux/dma-fence.h>
 #include <linux/file.h>
@@ -120,6 +121,7 @@ static u32 active_fps;
 static unsigned int selected_stream, floor_level;
 static u32 cpu_floors[FP_MAX_CPUS], gpu_floor;
 static int last_error;
+static const char *last_error_stage = "none";
 static atomic64_t next_scene_sample = ATOMIC64_INIT(0);
 static u64 scene_samples;
 
@@ -143,21 +145,28 @@ static bool observe_only(void)
 
 static int read_gpu_mode(u32 *value)
 {
+	const struct cred *saved;
 	char buffer[24];
 	loff_t offset = 0;
 	ssize_t length;
 
 	if (!gpu_governor_file)
 		return -EBADF;
+	/* A kernel worker must retain the authority of the root-opened file. */
+	saved = override_creds(gpu_governor_file->f_cred);
 	length = kernel_read(gpu_governor_file, buffer, sizeof(buffer) - 1, &offset);
-	if (length <= 0)
+	revert_creds(saved);
+	if (length <= 0) {
+		last_error_stage = "gpu_mode_read";
 		return length < 0 ? (int)length : -EIO;
+	}
 	buffer[length] = 0;
 	return kstrtou32(strim(buffer), 10, value);
 }
 
 static int write_gpu_mode(u32 value)
 {
+	const struct cred *saved;
 	char buffer[24];
 	loff_t offset = 0;
 	u32 readback;
@@ -165,9 +174,13 @@ static int write_gpu_mode(u32 value)
 	ssize_t written;
 
 	length = scnprintf(buffer, sizeof(buffer), "%u\n", value);
+	saved = override_creds(gpu_governor_file->f_cred);
 	written = kernel_write(gpu_governor_file, buffer, length, &offset);
-	if (written != length)
+	revert_creds(saved);
+	if (written != length) {
+		last_error_stage = "gpu_mode_write";
 		return written < 0 ? (int)written : -EIO;
+	}
 	error = read_gpu_mode(&readback);
 	return error ? error : readback == value ? 0 : -EIO;
 }
@@ -856,7 +869,10 @@ static void apply_control(struct work_struct *work)
 	source_valid = next.valid;
 	source_game = next.game;
 	display_off = next.off;
-	last_error = 0;
+	if (configured) {
+		last_error = 0;
+		last_error_stage = "none";
+	}
 	switches++;
 	if (!configured || !source_valid) {
 		release_gpu_mode();
@@ -882,6 +898,7 @@ static void apply_control(struct work_struct *work)
 		stop_game();
 		remove_requests();
 		release_gpu_mode();
+		configured = false;
 	}
 out:
 	mutex_unlock(&config_lock);
@@ -957,9 +974,13 @@ static void apply_scene(struct work_struct *work)
 		error = freq_qos_update_request(&cpu_requests[i].max, ceiling);
 		if (error < 0) {
 			last_error = error;
+			last_error_stage = "scene_cpu_qos";
 			remove_requests();
+			release_gpu_mode();
+			configured = false;
 			break;
 		}
+		cpu_ceilings[i] = ceiling;
 	}
 	scene_samples++;
 out:
@@ -1160,9 +1181,11 @@ arm:
 	goto out;
 failed:
 	last_error = error;
+	last_error_stage = "frame_frequency";
 	stop_game();
 	remove_requests();
 	release_gpu_mode();
+	configured = false;
 out:
 	mutex_unlock(&config_lock);
 }
@@ -1227,6 +1250,8 @@ void frame_policy_scene(const char *package, bool off, bool game)
 
 void frame_policy_task_event(struct task_struct *task)
 {
+	if (!READ_ONCE(configured))
+		return;
 	unsigned long flags;
 	unsigned int i;
 
@@ -1364,12 +1389,20 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (cmd == FP_CONFIG && !error)
 		configuration = next;
 	configured = cmd == FP_CONFIG && !error;
+	last_error = error;
+	if (!error)
+		last_error_stage = "none";
 	spin_lock_irqsave(&frame_lock, flags);
 	generation++;
 	spin_unlock_irqrestore(&frame_lock, flags);
 	mutex_unlock(&config_lock);
 	queue_work(policy_wq, &control_work);
 	flush_work(&control_work);
+	if (!error && cmd == FP_CONFIG) {
+		mutex_lock(&config_lock);
+		error = last_error;
+		mutex_unlock(&config_lock);
+	}
 	return error;
 }
 
@@ -1405,7 +1438,7 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 		"cpu0_busy_permille=%u\ncpu1_busy_permille=%u\ngame_sched_hook=%u\n"
 		"cpu_requests=%u\ngpu_requests=%u\nscene_pmu=%u\nsource_valid=%u\n"
 		"gpu_mode_owned=%u\ngpu_mode_percent=%u\ngpu_mode_conflict=%u\n"
-		"switches=%llu\nscene_samples=%llu\nlast_error=%d\n",
+		"switches=%llu\nscene_samples=%llu\nlast_error=%d\nlast_error_stage=%s\n",
 		FP_ABI, configured, observe_only(), game_active ? "frame" : scene_active ? "scene" : "idle",
 		foreground, target ? task_pid_nr(target) : 0, registered, epoch,
 		applied_generation, frames, used, errors, level, fps,
@@ -1414,7 +1447,7 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 		cpu_ceilings[0], cpu_ceilings[1], cpu_loads[0], cpu_loads[1], game_trace,
 		!!cpu_requests[0].policy, !!gpu_device, !!pmus, source_valid,
 		gpu_mode_owned, gpu_mode_last, gpu_mode_conflict,
-		switches, scene_samples, last_error);
+		switches, scene_samples, last_error, last_error_stage);
 	mutex_unlock(&config_lock);
 	return simple_read_from_buffer(data, size, offset, status, length);
 }

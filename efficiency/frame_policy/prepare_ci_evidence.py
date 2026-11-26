@@ -41,8 +41,8 @@ def verify(candidate, baseline, kunit, output, source):
         raise ValueError("Exported Image differs from the packaged kernel provenance")
     results = read(kunit / "fixed.json")
     cases = [case for group in results["sub_groups"] for case in group["test_cases"]]
-    if len(cases) != 14 or any(case["status"] != "PASS" for case in cases):
-        raise ValueError("Expected exactly fourteen passing real kernel tests")
+    if len(cases) < 14 or any(case["status"] != "PASS" for case in cases):
+        raise ValueError("Expected the successful real-kernel suite with at least fourteen cases")
     comparison = read(kunit / "comparison.json")
     if not comparison["fixed_all_cases_passed"] or not comparison["legacy_detected"]:
         raise ValueError("The locking regression comparison did not pass")
@@ -57,7 +57,7 @@ def verify(candidate, baseline, kunit, output, source):
     shutil.copyfile(kunit / "fixed.json", output / "kunit-fixed.json")
     shutil.copyfile(kunit / "comparison.json", output / "kunit-comparison.json")
     (output / "compiled-kernel-notes.bin").write_bytes(notes)
-    report = {"source": source, "passed": True, "kmi_imports": 32921, "kernel_cases": 14,
+    report = {"source": source, "passed": True, "kmi_imports": 32921, "kernel_cases": len(cases),
               "image_sha256": image_hash, "image_bytes": image.stat().st_size,
               "kernel_notes": notes_proof, "config_added": added, "config_removed": removed,
               "baseline_source": (baseline / "workflow-commit.txt").read_text().strip(),

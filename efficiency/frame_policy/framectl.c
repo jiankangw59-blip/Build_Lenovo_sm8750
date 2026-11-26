@@ -1,14 +1,69 @@
 // SPDX-License-Identifier: GPL-2.0
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/vfs.h>
 #include <unistd.h>
+#include <linux/magic.h>
 
 #include "frame_policy_uapi.h"
+
+/* kernfs requires a write mode bit even for a privileged open. Scene can lock it. */
+static int open_gpu_control(void)
+{
+	const char *path = "/sys/class/kgsl/kgsl-3d0/devfreq/mod_percent";
+	struct stat before, after;
+	struct statfs filesystem;
+	char pinned[64];
+	mode_t original, temporary;
+	int pin, device, saved;
+
+	device = open(path, O_RDWR | O_CLOEXEC);
+	if (device >= 0 || errno != EACCES)
+		return device;
+	pin = open(path, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+	if (pin < 0)
+		return -1;
+	if (fstat(pin, &before) || fstatfs(pin, &filesystem) ||
+	    !S_ISREG(before.st_mode) || filesystem.f_type != SYSFS_MAGIC) {
+		close(pin);
+		errno = EACCES;
+		return -1;
+	}
+	original = before.st_mode & 07777;
+	temporary = original | S_IRUSR | S_IWUSR;
+	if (temporary == original) {
+		close(pin); /* A different denial must not relax permissions. */
+		errno = EACCES;
+		return -1;
+	}
+	snprintf(pinned, sizeof(pinned), "/proc/self/fd/%d", pin);
+	if (chmod(pinned, temporary)) {
+		saved = errno;
+		close(pin);
+		errno = saved;
+		return -1;
+	}
+	device = open(pinned, O_RDWR | O_CLOEXEC);
+	saved = errno;
+	/* Restore only our own mode; leave a concurrent owner's different mode intact. */
+	if (fstat(pin, &after) ||
+	    ((after.st_mode & 07777) == temporary && chmod(pinned, original))) {
+		saved = errno;
+		if (device >= 0)
+			close(device);
+		device = -1;
+		fprintf(stderr, "Could not restore GPU control permissions\n");
+	}
+	close(pin);
+	errno = saved;
+	return device;
+}
 
 int main(int argc, char **argv)
 {
@@ -50,7 +105,7 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		if (config.flags & FP_GPU) {
-			gpu = open("/sys/class/kgsl/kgsl-3d0/devfreq/mod_percent", O_RDWR | O_CLOEXEC);
+			gpu = open_gpu_control();
 			if (gpu < 0) {
 				perror("open GPU governor control");
 				close(device);

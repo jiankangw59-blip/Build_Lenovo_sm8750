@@ -13,6 +13,7 @@ static struct platform_device *fp_test_gpu;
 static struct cpufreq_policy *fp_test_policy;
 static struct freq_qos_request fp_test_cpu_cap;
 static struct dev_pm_qos_request fp_test_gpu_cap;
+static bool fp_test_gpu_credential_check, fp_test_gpu_force_error;
 
 static struct cpufreq_frequency_table fp_test_frequency_table[] = {
 	{ .frequency = 500000 }, { .frequency = 1000000 },
@@ -74,6 +75,9 @@ static void fp_test_reset(void)
 	configuration.fps_count = 1;
 	configuration.fps_values[0] = 60;
 	last_error = 0;
+	last_error_stage = "none";
+	fp_test_gpu_credential_check = false;
+	fp_test_gpu_force_error = false;
 	mutex_unlock(&config_lock);
 	cancel_work_sync(&control_work);
 	cancel_work_sync(&frame_work);
@@ -264,6 +268,8 @@ static ssize_t fp_test_gpu_read(struct kiocb *iocb, struct iov_iter *output)
 	char buffer[24];
 	size_t length, copied;
 
+	if (fp_test_gpu_credential_check && current_cred() != iocb->ki_filp->f_cred)
+		return -EACCES;
 	length = scnprintf(buffer, sizeof(buffer), "%u\n", READ_ONCE(fp_test_gpu_percent));
 	if (iocb->ki_pos >= length)
 		return 0;
@@ -279,6 +285,10 @@ static ssize_t fp_test_gpu_write(struct kiocb *iocb, struct iov_iter *input)
 	u32 value;
 	int error;
 
+	if (fp_test_gpu_credential_check && current_cred() != iocb->ki_filp->f_cred)
+		return -EACCES;
+	if (fp_test_gpu_force_error)
+		return -EIO;
 	if (length >= sizeof(buffer))
 		return -E2BIG;
 	if (!copy_from_iter_full(buffer, length, input))
@@ -333,6 +343,35 @@ static void frame_test_gpu_governor_lease(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 110U);
 	KUNIT_EXPECT_TRUE(test, gpu_mode_conflict);
 	KUNIT_EXPECT_EQ(test, apply_gpu_mode(true), -EBUSY);
+}
+
+static void frame_test_gpu_file_credentials(struct kunit *test)
+{
+	const struct cred *caller = current_cred(), *saved;
+	struct cred *provider = prepare_creds();
+	struct file *file;
+	u32 value = 0;
+
+	KUNIT_ASSERT_NOT_NULL(test, provider);
+	provider->fsuid = make_kuid(&init_user_ns, 1000);
+	saved = override_creds(provider);
+	file = anon_inode_getfile("frame-credential-test", &fp_test_gpu_file_ops, NULL, O_RDWR);
+	revert_creds(saved);
+	put_cred(provider);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(file));
+	gpu_governor_file = file;
+	fp_test_gpu_credential_check = true;
+	WRITE_ONCE(fp_test_gpu_percent, 100);
+	KUNIT_EXPECT_EQ(test, read_gpu_mode(&value), 0);
+	KUNIT_EXPECT_EQ(test, value, 100U);
+	KUNIT_EXPECT_PTR_EQ(test, current_cred(), caller);
+	KUNIT_EXPECT_EQ(test, write_gpu_mode(105), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 105U);
+	KUNIT_EXPECT_PTR_EQ(test, current_cred(), caller);
+	fp_test_gpu_force_error = true;
+	KUNIT_EXPECT_EQ(test, write_gpu_mode(100), -EIO);
+	KUNIT_EXPECT_PTR_EQ(test, current_cred(), caller);
+	fp_test_gpu_force_error = false;
 }
 
 struct fp_test_fence {
@@ -725,6 +764,7 @@ static struct kunit_case frame_policy_cases[] = {
 	KUNIT_CASE(frame_test_qos_ownership),
 	KUNIT_CASE(frame_test_native_cycle_feedback),
 	KUNIT_CASE(frame_test_gpu_governor_lease),
+	KUNIT_CASE(frame_test_gpu_file_credentials),
 	KUNIT_CASE(frame_test_fence_signal_and_cancel),
 	KUNIT_CASE(frame_test_fence_cancel_race),
 	KUNIT_CASE(frame_test_ready_and_stale_fences),

@@ -26,6 +26,13 @@ restores it on disable if another owner has not replaced its value. A conflictin
 writer causes control to stop with `EBUSY`. No vendor-private structure offsets
 are used for this setting.
 
+The client pins this sysfs inode and temporarily supplies the owner's write bit
+if Scene has made it read-only, then restores the old mode immediately after
+opening it. Kernel-worker I/O uses the root-opened file's saved credentials and
+restores the worker's credentials on every return path. Fatal transition errors
+disable this component, unwind its requests and remain visible in status; a
+configuration ioctl returns the worker's error instead of reporting success.
+
 Foreground events only publish a bounded snapshot under a spinlock and queue
 the transition. They never wait on the controller mutex, PMU reads or probe
 teardown, so the existing affinity provider cannot be held up by this backend.
