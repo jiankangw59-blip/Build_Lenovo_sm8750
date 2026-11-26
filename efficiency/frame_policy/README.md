@@ -52,6 +52,16 @@ and retain a reversible backup. Internal branch arbitration does not disable
 external controllers. No legacy controller is modified automatically by this
 prototype.
 
+Before flashing a new Crystal build, enroll its compiled notes in Scene module
+2's existing allowlists. Each Image has a different identity even when only
+this scheduler changes. Run `efficiency/enroll_scene_crystal.py` with the
+downloaded preflash evidence, target serial, and a new backup directory. It
+checks the Image against its linked ELF, the 32,921 KMI results and codec, then
+preserves the previous kernel's writeback selection. It does not reset live
+swap. An already-running unregistered build can use `--inherit-policy-from`
+with the previously verified kernel notes SHA256. Early boot applies the
+existing Scene size and compressor after reboot.
+
 The current loader explicitly selects one Scene limiter and one target FPS for
 a bounded trial. Automatic per-app/mode/FPS selection is not implemented.
 Scene GPU `mod_percent`, `core_ctl`, touch boost, CPU excludes/prefer, and the
