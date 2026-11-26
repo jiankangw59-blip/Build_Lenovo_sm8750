@@ -15,6 +15,7 @@
 #include <linux/magic.h>
 
 #include "frame_policy_uapi.h"
+#include "scene_policy_uapi.h"
 
 /* kernfs requires a write mode bit even for a privileged open. Scene can lock it. */
 static int open_gpu_control(void)
@@ -217,8 +218,9 @@ int main(int argc, char **argv)
 		return suspend_legacy();
 	if (argc < 2 || argc > 3 ||
 	    (strcmp(argv[1], "status") && strcmp(argv[1], "disable") &&
-	     !(argc == 3 && (!strcmp(argv[1], "load") || !strcmp(argv[1], "load-rules"))))) {
-		fprintf(stderr, "Usage: %s status | disable | load CONFIG.bin | load-rules RULES.bin\n", argv[0]);
+	     !(argc == 3 && (!strcmp(argv[1], "load") || !strcmp(argv[1], "load-rules") ||
+			    !strcmp(argv[1], "load-scene"))))) {
+		fprintf(stderr, "Usage: %s status | disable | load CONFIG.bin | load-rules RULES.bin | load-scene TABLE.bin\n", argv[0]);
 		return 2;
 	}
 	device = open("/dev/frame_policy", O_RDWR | O_CLOEXEC);
@@ -226,17 +228,21 @@ int main(int argc, char **argv)
 		perror("open frame policy");
 		return 1;
 	}
-	if (!strcmp(argv[1], "load-rules")) {
-		struct fp_game_rules *rules = malloc(sizeof(*rules));
+	if (!strcmp(argv[1], "load-rules") || !strcmp(argv[1], "load-scene")) {
+		int scene = !strcmp(argv[1], "load-scene");
+		size_t length = scene ? sizeof(struct fp_scene_table) : sizeof(struct fp_game_rules);
+		__u32 abi, expected = scene ? FP_SCENE_ABI : FP_GAME_RULES_ABI;
+		void *rules = malloc(length);
 
 		if (!rules) {
 			close(device);
 			return 1;
 		}
 		input = fopen(argv[2], "rb");
-		if (!input || fread(rules, sizeof(*rules), 1, input) != 1 ||
-		    fgetc(input) != EOF || ferror(input) || rules->abi != FP_GAME_RULES_ABI) {
-			fprintf(stderr, "Game frequency rules have an invalid size or version\n");
+		if (!input || fread(rules, length, 1, input) != 1 ||
+		    fgetc(input) != EOF || ferror(input) ||
+		    (memcpy(&abi, rules, sizeof(abi)), abi != expected)) {
+			fprintf(stderr, "Frequency rules have an invalid size or version\n");
 			if (input)
 				fclose(input);
 			free(rules);
@@ -244,7 +250,7 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		fclose(input);
-		result = ioctl(device, FP_GAME_RULES, rules);
+		result = ioctl(device, scene ? FP_SCENE_TABLE : FP_GAME_RULES, rules);
 		free(rules);
 	} else if (!strcmp(argv[1], "load")) {
 		input = fopen(argv[2], "rb");

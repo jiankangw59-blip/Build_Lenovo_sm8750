@@ -37,6 +37,7 @@
 #include "frame_control.h"
 #include "frame_rate.h"
 #include "game_constraints.h"
+#include "scene_policy.h"
 #include "frame_policy_uapi.h"
 
 #define FP_PACKAGE 128
@@ -87,6 +88,8 @@ static struct workqueue_struct *policy_wq;
 static struct irq_work scene_irq_work;
 static struct fp_config configuration;
 static struct fp_game_rules *game_rules;
+static struct fp_scene_table *scene_table;
+static const struct fp_scene_profile *scene_profile;
 static u32 active_game_fps[FP_MAX_RATES], active_game_fps_count;
 static struct fp_cpu_request cpu_requests[FP_MAX_CPUS];
 static struct fp_pmu *pmus;
@@ -217,18 +220,26 @@ static int apply_gpu_mode(bool game)
 	u32 current_percent;
 	int error;
 
-	if (observe_only() || !(configuration.flags & FP_GPU) || !desired || display_off)
+	if (!game && scene_table)
+		desired = scene_profile ? scene_profile->gpu_percent : 0;
+	if (observe_only() || !(configuration.flags & FP_GPU))
 		return 0;
+	if (!desired || display_off)
+		return release_gpu_mode();
 	if (gpu_mode_conflict)
 		return -EBUSY;
 	error = read_gpu_mode(&current_percent);
 	if (error)
 		return error;
+	if (!current_percent || current_percent > 200)
+		return -ERANGE;
 	if (gpu_mode_owned && current_percent != gpu_mode_last) {
 		gpu_mode_conflict = true;
 		gpu_mode_owned = false;
 		return -EBUSY;
 	}
+	if (!gpu_mode_owned)
+		gpu_mode_original = current_percent;
 	if (current_percent != desired) {
 		error = write_gpu_mode(desired);
 		if (error)
@@ -273,7 +284,11 @@ static int start_pmus(void)
 	if (!pmus)
 		return -ENOMEM;
 	for (i = 0; i < configuration.cpu_count; i++) {
-		struct cpufreq_policy *policy = cpufreq_cpu_get(configuration.cpus[i].cpu);
+		struct cpufreq_policy *policy;
+
+		if (scene_profile && !scene_profile->cpus[i].margin_count)
+			continue;
+		policy = cpufreq_cpu_get(configuration.cpus[i].cpu);
 
 		if (!policy) {
 			error = -ENODEV;
@@ -340,6 +355,7 @@ static void remove_requests(void)
 	}
 	gpu_floor = 0;
 	scene_active = false;
+	scene_profile = NULL;
 }
 
 static int add_requests(bool game)
@@ -356,6 +372,8 @@ static int add_requests(bool game)
 				display_off ? &cpu->idle : &cpu->scene;
 			struct fp_cpu_request *request = &cpu_requests[i];
 
+			if (!game && scene_profile)
+				limits = &scene_profile->cpus[i].limits;
 			request->policy = cpufreq_cpu_get(cpu->cpu);
 			if (!request->policy) {
 				error = -ENODEV;
@@ -387,6 +405,8 @@ static int add_requests(bool game)
 		const struct fp_limits *limits = game ? &configuration.gpu_game :
 			display_off ? &configuration.gpu_idle : &configuration.gpu_scene;
 
+		if (!game && scene_profile)
+			limits = &scene_profile->gpu;
 		gpu_device = bus_find_device_by_name(&platform_bus_type, NULL,
 						    configuration.gpu_device);
 		if (!gpu_device) {
@@ -889,8 +909,18 @@ static void apply_control(struct work_struct *work)
 	if (source_game && !display_off) {
 		last_error = start_game();
 	} else {
+		scene_profile = fp_scene_select(scene_table, foreground, source_game,
+					       display_off, false);
+		/* An explicit ignored profile owns no CPU, GPU or PMU resources. */
+		if (scene_table && !scene_profile) {
+			last_error = release_gpu_mode();
+			if (last_error)
+				configured = false;
+			goto out;
+		}
 		last_error = add_requests(false);
-		if (!last_error && !display_off && (configuration.flags & FP_CPU))
+		if (!last_error && !display_off && (configuration.flags & FP_CPU) &&
+		    (!scene_table || fp_scene_uses_feedback(scene_profile, configuration.cpu_count)))
 			last_error = start_pmus();
 		if (last_error)
 			remove_requests();
@@ -978,7 +1008,11 @@ static void apply_scene(struct work_struct *work)
 		cpufreq_cpu_put(policy);
 		if (!have_data || observe_only() || !cpu_requests[i].policy)
 			continue;
-		ceiling = fp_scene_ceiling(effective[i], &configuration.cpus[i]);
+		if (scene_profile && !scene_profile->cpus[i].margin_count)
+			continue;
+		ceiling = scene_profile ?
+			fp_scene_profile_ceiling(effective[i], &scene_profile->cpus[i]) :
+			fp_scene_ceiling(effective[i], &configuration.cpus[i]);
 		error = freq_qos_update_request(&cpu_requests[i].max, ceiling);
 		if (error < 0) {
 			last_error = error;
@@ -1483,6 +1517,55 @@ static int replace_game_rules(unsigned long arg)
 	return error;
 }
 
+static int replace_scene_table(unsigned long arg)
+{
+	struct fp_scene_table *next, *previous;
+	unsigned long flags;
+	unsigned int i;
+	int error;
+
+	next = kvmalloc(sizeof(*next), GFP_KERNEL);
+	if (!next)
+		return -ENOMEM;
+	if (copy_from_user(next, (void __user *)arg, sizeof(*next))) {
+		kvfree(next);
+		return -EFAULT;
+	}
+	if (!fp_scene_table_valid(next)) {
+		kvfree(next);
+		return -EINVAL;
+	}
+	for (i = 0; i < next->cpu_count; i++) {
+		if (next->cpu_ids[i] >= nr_cpu_ids || !cpu_possible(next->cpu_ids[i])) {
+			kvfree(next);
+			return -EINVAL;
+		}
+	}
+	mutex_lock(&config_lock);
+	if (configuration.cpu_count && !fp_scene_topology_matches(next, &configuration)) {
+		mutex_unlock(&config_lock);
+		kvfree(next);
+		return -EINVAL;
+	}
+	stop_game();
+	remove_requests();
+	previous = scene_table;
+	scene_table = next;
+	last_error = 0;
+	last_error_stage = "none";
+	spin_lock_irqsave(&frame_lock, flags);
+	generation++;
+	spin_unlock_irqrestore(&frame_lock, flags);
+	mutex_unlock(&config_lock);
+	kvfree(previous);
+	queue_work(policy_wq, &control_work);
+	flush_work(&control_work);
+	mutex_lock(&config_lock);
+	error = last_error;
+	mutex_unlock(&config_lock);
+	return error;
+}
+
 static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct fp_config next;
@@ -1494,6 +1577,8 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return -EPERM;
 	if (cmd == FP_GAME_RULES)
 		return replace_game_rules(arg);
+	if (cmd == FP_SCENE_TABLE)
+		return replace_scene_table(arg);
 	if (cmd != FP_CONFIG && cmd != FP_DISABLE)
 		return -ENOTTY;
 	if (cmd == FP_CONFIG) {
@@ -1515,7 +1600,9 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		}
 	}
 	mutex_lock(&config_lock);
-	if (cmd == FP_CONFIG && game_rules && !rules_match_cpus(game_rules, &next)) {
+	if (cmd == FP_CONFIG &&
+	    ((game_rules && !rules_match_cpus(game_rules, &next)) ||
+	     (scene_table && !fp_scene_topology_matches(scene_table, &next)))) {
 		mutex_unlock(&config_lock);
 		if (governor)
 			fput(governor);
@@ -1586,7 +1673,7 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 	spin_unlock_irqrestore(&frame_lock, flags);
 	length = scnprintf(status, 2048,
 		"abi=%u\nconfigured=%u\nobserve=%u\nowner=%s\nforeground=%s\n"
-		"features=cpu,scene_pmu,game_frames,gpu,gpu_file_credentials,game_relations,fps_per_game\n"
+		"features=cpu,scene_pmu,game_frames,gpu,gpu_file_credentials,game_relations,fps_per_game,scene_table\n"
 		"game_pid=%d\nprobe=%u\ngeneration=%llu\napplied_generation=%llu\n"
 		"frames=%llu\nselected_frames=%llu\nframe_errors=%llu\nlevel=%u\n"
 		"qualified_fps=%u\n"
@@ -1597,6 +1684,7 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 		"cpu_requests=%u\ngpu_requests=%u\nscene_pmu=%u\nsource_valid=%u\n"
 		"gpu_mode_owned=%u\ngpu_mode_percent=%u\ngpu_mode_conflict=%u\n"
 		"game_constraint_rules=%u\n"
+		"scene_policy_rules=%u\nscene_profile=%d\nscene_inactive_events=0\n"
 		"switches=%llu\nscene_samples=%llu\nlast_error=%d\nlast_error_stage=%s\n",
 		FP_ABI, configured, observe_only(), game_active ? "frame" : scene_active ? "scene" : "idle",
 		foreground, target ? task_pid_nr(target) : 0, registered, epoch,
@@ -1607,6 +1695,8 @@ static ssize_t policy_read(struct file *file, char __user *data, size_t size, lo
 		!!cpu_requests[0].policy, !!gpu_device, !!pmus, source_valid,
 		gpu_mode_owned, gpu_mode_last, gpu_mode_conflict,
 		game_rules ? game_rules->count : 0,
+		scene_table ? scene_table->count : 0,
+		scene_profile ? (int)(scene_profile - scene_table->profiles) : -1,
 		switches, scene_samples, last_error, last_error_stage);
 	mutex_unlock(&config_lock);
 	copied = simple_read_from_buffer(data, size, offset, status, length);
@@ -1664,6 +1754,8 @@ static void __exit frame_policy_exit(void)
 	remove_requests();
 	kvfree(game_rules);
 	game_rules = NULL;
+	kvfree(scene_table);
+	scene_table = NULL;
 	release_gpu_mode();
 	if (gpu_governor_file) {
 		fput(gpu_governor_file);

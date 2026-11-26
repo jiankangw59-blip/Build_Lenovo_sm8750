@@ -63,6 +63,8 @@ static void fp_test_reset(void)
 	remove_requests();
 	kvfree(game_rules);
 	game_rules = NULL;
+	kvfree(scene_table);
+	scene_table = NULL;
 	release_gpu_mode();
 	if (gpu_governor_file) {
 		fput(gpu_governor_file);
@@ -339,6 +341,14 @@ static void frame_test_gpu_governor_lease(struct kunit *test)
 	display_off = false;
 	KUNIT_EXPECT_EQ(test, release_gpu_mode(), 0);
 	KUNIT_EXPECT_FALSE(test, gpu_mode_owned);
+	WRITE_ONCE(fp_test_gpu_percent, 110); /* A new owner writes while we hold no lease. */
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(false), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 105U);
+	display_off = true;
+	KUNIT_EXPECT_EQ(test, apply_gpu_mode(false), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(fp_test_gpu_percent), 110U);
+	KUNIT_EXPECT_FALSE(test, gpu_mode_owned);
+	display_off = false;
 	KUNIT_EXPECT_EQ(test, apply_gpu_mode(false), 0);
 	WRITE_ONCE(fp_test_gpu_percent, 110); /* A foreign owner replaces our value. */
 	KUNIT_EXPECT_EQ(test, release_gpu_mode(), 0);
@@ -833,7 +843,10 @@ static void frame_test_nonblocking_source(struct kunit *test)
 	flush_work(&control_work);
 }
 
+#include "scene_policy_kunit.h"
+
 static struct kunit_case frame_policy_cases[] = {
+	FP_SCENE_KUNIT_CASES,
 	KUNIT_CASE(frame_test_sched_switch_handoff),
 	KUNIT_CASE(frame_test_qos_ownership),
 	KUNIT_CASE(frame_test_native_cycle_feedback),

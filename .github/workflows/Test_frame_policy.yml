@@ -24,11 +24,15 @@ jobs:
           cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
             efficiency/frame_policy/test_control.c -o "$RUNNER_TEMP/frame-control"
           "$RUNNER_TEMP/frame-control"
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
+            efficiency/frame_policy/test_scene_policy.c -o "$RUNNER_TEMP/scene-policy"
+          "$RUNNER_TEMP/scene-policy"
           cc -std=c11 -O2 -Wall -Wextra -Werror \
             efficiency/frame_policy/framectl.c -o "$RUNNER_TEMP/framectl-host"
           python3 -m py_compile efficiency/frame_policy/compile_config.py \
             efficiency/frame_policy/install_builtin.py efficiency/frame_policy/compile_game_rules.py
           python3 efficiency/frame_policy/test_game_rules.py
+          python3 efficiency/frame_policy/test_scene_policy.py
           python3 efficiency/thread_affinity/test_snapshot_growth.py
       - name: Compile against the pinned ARM64 6.6.118 kernel
         run: |

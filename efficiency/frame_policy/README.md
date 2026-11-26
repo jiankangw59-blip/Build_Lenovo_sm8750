@@ -125,9 +125,17 @@ swap. An already-running unregistered build can use `--inherit-policy-from`
 with the previously verified kernel notes SHA256. Early boot applies the
 existing Scene size and compressor after reboot.
 
-The base loader explicitly selects one Scene limiter. Per-game CPU relationships
-and FPS overrides use the optional table above. Automatic per-app/mode Scene
-configuration is not implemented.
+The base loader explicitly selects one Scene limiter. `compile_scene_policy.py`
+can additionally import the installed profile/sidecars and explicit per-package
+mode/category settings into a bounded optional table. `framectl load-scene`
+installs it, and existing foreground/screen events select its numeric CPU/GPU
+profile. Static camera/fast profiles do not start PMU sampling; ignored packages
+release all Scene votes. Screen-off releases the GPU governor-file lease.
+See `SCENE_PORT.md` for the table layout, import options and evidence limits.
+The current provider has no reliable inactive-interaction or per-activity mode
+event, so those states are import capabilities without a live-operation claim.
+The configuration WebUI currently selects the base Scene preset; independently
+loaded optional Scene tables take priority over those base Scene bounds.
 Scene `core_ctl`, touch boost, CPU excludes/prefer, and the full proprietary
 Scene policy are not implemented. This candidate must not be presented
 as complete Scene/FAS behavior parity or as a measured power improvement.
