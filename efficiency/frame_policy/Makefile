@@ -1,0 +1,4 @@
+obj-$(CONFIG_FRAME_POLICY) += frame_policy.o
+obj-$(CONFIG_FRAME_POLICY) += scene_activity_backend.o
+obj-$(CONFIG_FRAME_POLICY) += scene_aux.o
+obj-$(CONFIG_FRAME_POLICY) += scene_gpu_aux.o

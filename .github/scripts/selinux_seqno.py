@@ -42,6 +42,20 @@ def require(condition, message):
 
 
 def object_code(objdump, path):
+    path = Path(path)
+    if path.read_bytes()[:4] != b"\x7fELF":
+        helper = Path(__file__).resolve().parents[2] / "efficiency/audit_bitcode.py"
+        spec = importlib.util.spec_from_file_location("audit_bitcode", helper)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        # Sibling tool from the exact compiler distribution used by the build.
+        clang = Path(objdump).with_name("clang")
+        root = path
+        while root.name != "out" and root.parent != root:
+            root = root.parent
+        require(root.name == "out", "Cannot locate kernel output for the bitcode audit")
+        report = root.parent.parent / "preflash/efficiency/lto-audit"
+        path = module.materialize(path, clang, report)
     table = subprocess.check_output([objdump, "-t", str(path)], text=True)
     symbols = {}
     for line in table.splitlines():

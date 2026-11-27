@@ -1,4 +1,4 @@
-"""Attach the reviewed XiaoCaiYe sources to the OPD2413 6.6.89 source tree."""
+"""Attach the reviewed XiaoCaiYe sources to the selected OEM kernel."""
 import argparse
 import hashlib
 import json
@@ -20,11 +20,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel", required=True, type=Path)
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--device", choices=("ace6", "opd2413"), default="ace6")
     args = parser.parse_args()
     kernel = args.kernel.resolve()
     version = subprocess.check_output(["make", "-s", "-C", str(kernel), "kernelversion"], text=True).strip()
-    if version != "6.6.89":
-        raise SystemExit(f"Expected the pinned OPD2413 6.6.89 kernel, got {version}")
+    expected_version = {"ace6": "6.6.118", "opd2413": "6.6.89"}[args.device]
+    if version != expected_version:
+        raise SystemExit(f"Expected the pinned {args.device} {expected_version} kernel, got {version}")
     mm = kernel / "mm"
     target = mm / "xcy-reclaim"
     target.mkdir(exist_ok=True)

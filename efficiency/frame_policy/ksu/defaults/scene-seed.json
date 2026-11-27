@@ -1,0 +1,467 @@
+{
+  "abi": 1,
+  "tableSize": 14384,
+  "profileSize": 336,
+  "cpuIds": [
+    0,
+    6
+  ],
+  "cpuBounds": [
+    [
+      384000,
+      3532800
+    ],
+    [
+      1017600,
+      4320000
+    ]
+  ],
+  "profiles": [
+    {
+      "enabled": true,
+      "gpuPercent": 105,
+      "gpuKHz": [
+        330000,
+        1083000
+      ],
+      "cpus": [
+        {
+          "kHz": [
+            748800,
+            1996800
+          ],
+          "margins": [
+            [
+              0,
+              150
+            ],
+            [
+              1152000,
+              100
+            ],
+            [
+              1785600,
+              70
+            ]
+          ]
+        },
+        {
+          "kHz": [
+            1017600,
+            1958400
+          ],
+          "margins": [
+            [
+              0,
+              150
+            ],
+            [
+              1209600,
+              100
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "enabled": true,
+      "gpuPercent": 105,
+      "gpuKHz": [
+        330000,
+        1083000
+      ],
+      "cpus": [
+        {
+          "kHz": [
+            556800,
+            1555200
+          ],
+          "margins": [
+            [
+              0,
+              100
+            ],
+            [
+              960000,
+              80
+            ]
+          ]
+        },
+        {
+          "kHz": [
+            1017600,
+            1689600
+          ],
+          "margins": [
+            [
+              0,
+              100
+            ],
+            [
+              1689600,
+              80
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "enabled": true,
+      "gpuPercent": 0,
+      "gpuKHz": [
+        330000,
+        1083000
+      ],
+      "cpus": [
+        {
+          "kHz": [
+            556800,
+            1555200
+          ],
+          "margins": [
+            [
+              0,
+              100
+            ],
+            [
+              960000,
+              80
+            ]
+          ]
+        },
+        {
+          "kHz": [
+            1017600,
+            1689600
+          ],
+          "margins": [
+            [
+              0,
+              100
+            ],
+            [
+              1689600,
+              80
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "enabled": true,
+      "gpuPercent": 105,
+      "gpuKHz": [
+        330000,
+        1083000
+      ],
+      "cpus": [
+        {
+          "kHz": [
+            2400000,
+            3532800
+          ],
+          "margins": []
+        },
+        {
+          "kHz": [
+            3283200,
+            4320000
+          ],
+          "margins": []
+        }
+      ]
+    },
+    {
+      "enabled": true,
+      "gpuPercent": 105,
+      "gpuKHz": [
+        330000,
+        1083000
+      ],
+      "cpus": [
+        {
+          "kHz": [
+            1996800,
+            3532800
+          ],
+          "margins": []
+        },
+        {
+          "kHz": [
+            2841600,
+            4320000
+          ],
+          "margins": []
+        }
+      ]
+    },
+    {
+      "enabled": true,
+      "gpuPercent": 105,
+      "gpuKHz": [
+        330000,
+        1083000
+      ],
+      "cpus": [
+        {
+          "kHz": [
+            960000,
+            2400000
+          ],
+          "margins": [
+            [
+              0,
+              200
+            ],
+            [
+              1555200,
+              130
+            ],
+            [
+              1996800,
+              90
+            ]
+          ]
+        },
+        {
+          "kHz": [
+            1017600,
+            2438400
+          ],
+          "margins": [
+            [
+              0,
+              200
+            ],
+            [
+              1689600,
+              130
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "enabled": true,
+      "gpuPercent": 105,
+      "gpuKHz": [
+        330000,
+        1083000
+      ],
+      "cpus": [
+        {
+          "kHz": [
+            556800,
+            1785600
+          ],
+          "margins": [
+            [
+              0,
+              120
+            ],
+            [
+              960000,
+              90
+            ]
+          ]
+        },
+        {
+          "kHz": [
+            1017600,
+            1958400
+          ],
+          "margins": [
+            [
+              0,
+              120
+            ],
+            [
+              1689600,
+              90
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "enabled": true,
+      "gpuPercent": 105,
+      "gpuKHz": [
+        330000,
+        1083000
+      ],
+      "cpus": [
+        {
+          "kHz": [
+            1152000,
+            2745600
+          ],
+          "margins": [
+            [
+              0,
+              200
+            ],
+            [
+              1785600,
+              130
+            ],
+            [
+              2400000,
+              70
+            ]
+          ]
+        },
+        {
+          "kHz": [
+            1209600,
+            2841600
+          ],
+          "margins": [
+            [
+              0,
+              200
+            ],
+            [
+              1958400,
+              130
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "enabled": true,
+      "gpuPercent": 105,
+      "gpuKHz": [
+        330000,
+        1083000
+      ],
+      "cpus": [
+        {
+          "kHz": [
+            960000,
+            2745600
+          ],
+          "margins": []
+        },
+        {
+          "kHz": [
+            1017600,
+            3283200
+          ],
+          "margins": []
+        }
+      ]
+    },
+    {
+      "enabled": false
+    }
+  ],
+  "selectors": {
+    "powersave": {
+      "normal": [
+        0,
+        1,
+        2
+      ],
+      "Camera": [
+        3,
+        4,
+        2
+      ],
+      "ELP": [
+        0,
+        1,
+        2
+      ]
+    },
+    "balance": {
+      "normal": [
+        5,
+        6,
+        2
+      ],
+      "Camera": [
+        3,
+        4,
+        2
+      ],
+      "ELP": [
+        5,
+        6,
+        2
+      ]
+    },
+    "performance": {
+      "normal": [
+        7,
+        6,
+        2
+      ],
+      "Camera": [
+        3,
+        4,
+        2
+      ],
+      "ELP": [
+        7,
+        6,
+        2
+      ]
+    },
+    "fast": {
+      "normal": [
+        8,
+        8,
+        2
+      ],
+      "Camera": [
+        3,
+        4,
+        2
+      ],
+      "ELP": [
+        8,
+        8,
+        2
+      ]
+    }
+  },
+  "ignored": [
+    9,
+    9,
+    9
+  ],
+  "categoryAliases": {
+    "IM": "ELP",
+    "Music": "ELP",
+    "Reader": "ELP",
+    "ShortVideo": "ELP",
+    "Nav": "ELP",
+    "ScrollOpt": "ELP"
+  },
+  "libraryProfileCount": 10,
+  "selectionPacking": "deduplicate only profiles selected by default/package rules",
+  "inactiveEventAvailable": false,
+  "unportedActionNames": [
+    "$core_ctl_0",
+    "$core_ctl_6",
+    "$max_cpus_cpu0",
+    "$max_cpus_cpu6",
+    "$min_cpus_cpu0",
+    "$min_cpus_cpu6",
+    "$perfmgr_enable",
+    "$sched_boost",
+    "@cpuset",
+    "@fps",
+    "@hispeed_freq",
+    "@target_loads",
+    "@values"
+  ],
+  "unportedLimiterFields": [
+    "core_ctl",
+    "excludes",
+    "prefer"
+  ],
+  "numericProfilesSha256": "546e4c223f73cf047a408220cb60c6a749da48cc17a32e7b6665d9f185a60812"
+}

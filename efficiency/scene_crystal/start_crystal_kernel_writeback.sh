@@ -103,7 +103,11 @@ if ! kernel_policy_active; then
 fi
 
 # ColorOS boot services can reset the global value while apps keep Scene's setting.
-swappiness=$(ace6_crystal_config_value swappiness '')
+if [ "$ACE6_CRYSTAL_MODEL" = OPD2413 ]; then
+    swappiness=$(ace6_crystal_config_value swappiness '')
+else
+    swappiness=$(awk -F= '$1=="swappiness" && $2 ~ /^[0-9]+$/ {print $2}' "$ACE6_CRYSTAL_CONFIG")
+fi
 if [ -n "$swappiness" ] && [ "$swappiness" -le 200 ] 2>/dev/null &&
    [ "$(cat /dev/memcg/apps/memory.swappiness 2>/dev/null)" = "$swappiness" ] &&
    [ "$(cat /proc/sys/vm/swappiness)" != "$swappiness" ]; then

@@ -1,0 +1,750 @@
+{
+  "abi": 1,
+  "tableSize": 26584,
+  "cpuSize": 136,
+  "profileSize": 544,
+  "cpuIds": [
+    0,
+    6
+  ],
+  "profiles": [
+    {
+      "cpus": [
+        {
+          "validMask": 15,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 748800,
+          "waltBoost": -2,
+          "coreEnable": 0,
+          "minCpus": 0,
+          "maxCpus": 0,
+          "excludesMask": "0x1",
+          "prefer": 1,
+          "limiterClusterCount": 2,
+          "limiterClustersPacked": 256,
+          "feedbackMask": 127,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": [
+            [
+              0,
+              150000
+            ],
+            [
+              1152000,
+              100000
+            ],
+            [
+              1785600,
+              70000
+            ]
+          ]
+        },
+        {
+          "validMask": 15,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 0,
+          "waltBoost": -2,
+          "coreEnable": 0,
+          "minCpus": 0,
+          "maxCpus": 0,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 2,
+          "limiterClustersPacked": 256,
+          "feedbackMask": 127,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": [
+            [
+              0,
+              150000
+            ],
+            [
+              1209600,
+              100000
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "cpus": [
+        {
+          "validMask": 15,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 0,
+          "waltBoost": -5,
+          "coreEnable": 0,
+          "minCpus": 0,
+          "maxCpus": 0,
+          "excludesMask": "0x1",
+          "prefer": 0,
+          "limiterClusterCount": 2,
+          "limiterClustersPacked": 256,
+          "feedbackMask": 127,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": [
+            [
+              0,
+              100000
+            ],
+            [
+              960000,
+              80000
+            ]
+          ]
+        },
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 0,
+          "waltBoost": -5,
+          "coreEnable": 1,
+          "minCpus": 0,
+          "maxCpus": 2,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 2,
+          "limiterClustersPacked": 256,
+          "feedbackMask": 127,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": [
+            [
+              0,
+              100000
+            ],
+            [
+              1689600,
+              80000
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "cpus": [
+        {
+          "validMask": 0,
+          "upUs": 0,
+          "downUs": 0,
+          "hispeedKHz": 0,
+          "waltBoost": 0,
+          "coreEnable": 0,
+          "minCpus": 0,
+          "maxCpus": 0,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 0,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": []
+        },
+        {
+          "validMask": 0,
+          "upUs": 0,
+          "downUs": 0,
+          "hispeedKHz": 0,
+          "waltBoost": 0,
+          "coreEnable": 0,
+          "minCpus": 0,
+          "maxCpus": 0,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 0,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": []
+        }
+      ]
+    },
+    {
+      "cpus": [
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 748800,
+          "waltBoost": -2,
+          "coreEnable": 0,
+          "minCpus": 6,
+          "maxCpus": 6,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 0,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": []
+        },
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 0,
+          "waltBoost": -2,
+          "coreEnable": 0,
+          "minCpus": 2,
+          "maxCpus": 2,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 0,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": []
+        }
+      ]
+    },
+    {
+      "cpus": [
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 748800,
+          "waltBoost": 0,
+          "coreEnable": 0,
+          "minCpus": 6,
+          "maxCpus": 6,
+          "excludesMask": "0x1",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 127,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": [
+            [
+              0,
+              200000
+            ],
+            [
+              1555200,
+              130000
+            ],
+            [
+              1996800,
+              90000
+            ]
+          ]
+        },
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 0,
+          "waltBoost": 0,
+          "coreEnable": 0,
+          "minCpus": 2,
+          "maxCpus": 2,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 127,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": [
+            [
+              0,
+              200000
+            ],
+            [
+              1689600,
+              130000
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "cpus": [
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 0,
+          "waltBoost": -5,
+          "coreEnable": 0,
+          "minCpus": 6,
+          "maxCpus": 6,
+          "excludesMask": "0x1",
+          "prefer": 0,
+          "limiterClusterCount": 2,
+          "limiterClustersPacked": 256,
+          "feedbackMask": 127,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": [
+            [
+              0,
+              120000
+            ],
+            [
+              960000,
+              90000
+            ]
+          ]
+        },
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 0,
+          "waltBoost": -5,
+          "coreEnable": 1,
+          "minCpus": 0,
+          "maxCpus": 2,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 2,
+          "limiterClustersPacked": 256,
+          "feedbackMask": 127,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": [
+            [
+              0,
+              120000
+            ],
+            [
+              1689600,
+              90000
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "cpus": [
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 748800,
+          "waltBoost": 0,
+          "coreEnable": 0,
+          "minCpus": 6,
+          "maxCpus": 6,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 0,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": []
+        },
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 0,
+          "waltBoost": 0,
+          "coreEnable": 0,
+          "minCpus": 2,
+          "maxCpus": 2,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 0,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": []
+        }
+      ]
+    },
+    {
+      "cpus": [
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 1152000,
+          "waltBoost": 0,
+          "coreEnable": 0,
+          "minCpus": 6,
+          "maxCpus": 6,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 127,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": [
+            [
+              0,
+              200000
+            ],
+            [
+              1785600,
+              130000
+            ],
+            [
+              2400000,
+              70000
+            ]
+          ]
+        },
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 0,
+          "waltBoost": 0,
+          "coreEnable": 0,
+          "minCpus": 2,
+          "maxCpus": 2,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 127,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": [
+            [
+              0,
+              200000
+            ],
+            [
+              1958400,
+              130000
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "cpus": [
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 960000,
+          "waltBoost": -3,
+          "coreEnable": 0,
+          "minCpus": 6,
+          "maxCpus": 6,
+          "excludesMask": "0x1",
+          "prefer": 0,
+          "limiterClusterCount": 2,
+          "limiterClustersPacked": 256,
+          "feedbackMask": 127,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": [
+            [
+              0,
+              120000
+            ],
+            [
+              960000,
+              90000
+            ]
+          ]
+        },
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 1017600,
+          "waltBoost": -3,
+          "coreEnable": 0,
+          "minCpus": 2,
+          "maxCpus": 2,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 2,
+          "limiterClustersPacked": 256,
+          "feedbackMask": 127,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": [
+            [
+              0,
+              120000
+            ],
+            [
+              1689600,
+              90000
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "cpus": [
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 1152000,
+          "waltBoost": 0,
+          "coreEnable": 0,
+          "minCpus": 6,
+          "maxCpus": 6,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 0,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": []
+        },
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 0,
+          "waltBoost": 0,
+          "coreEnable": 0,
+          "minCpus": 2,
+          "maxCpus": 2,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 0,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": []
+        }
+      ]
+    },
+    {
+      "cpus": [
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 1152000,
+          "waltBoost": 2,
+          "coreEnable": 0,
+          "minCpus": 6,
+          "maxCpus": 6,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 0,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": []
+        },
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 1017600,
+          "waltBoost": 2,
+          "coreEnable": 0,
+          "minCpus": 2,
+          "maxCpus": 2,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 0,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": []
+        }
+      ]
+    },
+    {
+      "cpus": [
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 1152000,
+          "waltBoost": 0,
+          "coreEnable": 0,
+          "minCpus": 6,
+          "maxCpus": 6,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 0,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": []
+        },
+        {
+          "validMask": 31,
+          "upUs": 1000,
+          "downUs": 1000,
+          "hispeedKHz": 1017600,
+          "waltBoost": 0,
+          "coreEnable": 0,
+          "minCpus": 2,
+          "maxCpus": 2,
+          "excludesMask": "0x0",
+          "prefer": 0,
+          "limiterClusterCount": 0,
+          "limiterClustersPacked": 0,
+          "feedbackMask": 0,
+          "perfectKHz": 0,
+          "smoothness": 0,
+          "mtMilliPercent": 0,
+          "additive": []
+        }
+      ]
+    }
+  ],
+  "selectors": {
+    "powersave": {
+      "normal": [
+        0,
+        1,
+        2
+      ],
+      "ELP": [
+        0,
+        1,
+        2
+      ],
+      "Camera": [
+        3,
+        3,
+        2
+      ]
+    },
+    "balance": {
+      "normal": [
+        4,
+        5,
+        2
+      ],
+      "ELP": [
+        4,
+        5,
+        2
+      ],
+      "Camera": [
+        6,
+        6,
+        2
+      ]
+    },
+    "performance": {
+      "normal": [
+        7,
+        8,
+        2
+      ],
+      "ELP": [
+        7,
+        8,
+        2
+      ],
+      "Camera": [
+        9,
+        9,
+        2
+      ]
+    },
+    "fast": {
+      "normal": [
+        10,
+        11,
+        2
+      ],
+      "ELP": [
+        10,
+        11,
+        2
+      ],
+      "Camera": [
+        10,
+        10,
+        2
+      ]
+    }
+  },
+  "ignored": [
+    2,
+    2,
+    2
+  ],
+  "options": {
+    "validMask": 2047,
+    "source": 1,
+    "statSource": 1,
+    "gestureBoost": 1,
+    "gestureDurationMs": 0,
+    "launcherBoost": 0,
+    "perfNotify": 1,
+    "perfNotifyInApps": 0,
+    "perfUsePresets": 0,
+    "kswapdBoost": 1,
+    "panelPeakHz": 185,
+    "gpuLock": 1
+  },
+  "optionOrigins": {
+    "source": "saved-original-source",
+    "statSource": "native-default-key-missing",
+    "gestureBoost": "original-profile",
+    "gestureDurationMs": "original-profile-omitted-native-min500",
+    "launcherBoost": "explicit-native-pref",
+    "perfNotify": "explicit-native-pref",
+    "perfNotifyInApps": "explicit-native-pref",
+    "perfUsePresets": "explicit-native-pref",
+    "kswapdBoost": "explicit-native-pref",
+    "panelPeakHz": "physical-panel-capability",
+    "gpuLock": "explicit-native-pref"
+  },
+  "categoryAliases": {
+    "IM": "ELP",
+    "Music": "ELP",
+    "Reader": "ELP",
+    "ShortVideo": "ELP",
+    "Nav": "ELP",
+    "ScrollOpt": "ELP"
+  },
+  "sourceSemantics": "36 original selectors; deduplicate complete typed records after raw selection",
+  "marginUnits": "threshold_kHz; max(rawOffsetMHz,0)*1000 additive offset_kHz",
+  "feedbackCoreMetadataOnly": false,
+  "rawProfileSha256": "701f71f5c1ce12519d24fe4c45cab2b33159859656671d451dc24eabd42e030a"
+}

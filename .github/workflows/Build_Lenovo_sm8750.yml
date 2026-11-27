@@ -897,11 +897,11 @@ jobs:
           set -euo pipefail
           kernel=kernel_workspace/common
           report=kernel_workspace/preflash/efficiency
-          python3 efficiency/apply_profile.py apply --kernel "$kernel" --report "$report" --profile "$EFFICIENCY_PROFILE"
-          python3 efficiency/apply_profile.py configure --kernel "$kernel" --profile "$EFFICIENCY_PROFILE"
+          python3 efficiency/apply_profile.py apply --kernel "$kernel" --report "$report" --profile "$EFFICIENCY_PROFILE" --device opd2413
+          python3 efficiency/apply_profile.py configure --kernel "$kernel" --profile "$EFFICIENCY_PROFILE" --device opd2413
           python3 efficiency/thread_affinity/test_snapshot_growth.py
-          python3 efficiency/thread_affinity/install_builtin.py --kernel "$kernel"
-          python3 efficiency/xcy-reclaim/install_builtin.py --kernel "$kernel" --report "$report/xcy-reclaim-source.json"
+          python3 efficiency/thread_affinity/install_builtin.py --kernel "$kernel" --device opd2413
+          python3 efficiency/xcy-reclaim/install_builtin.py --kernel "$kernel" --report "$report/xcy-reclaim-source.json" --device opd2413
           ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
           compiler="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
           test -x "$compiler"
@@ -999,7 +999,7 @@ jobs:
             mkdir -p ../preflash/efficiency
             cp out/.config ../preflash/efficiency/resolved.config
             python3 "$WORKDIR/efficiency/apply_profile.py" verify --kernel . \
-              --report ../preflash/efficiency/config-verification.json --profile "$EFFICIENCY_PROFILE"
+              --report ../preflash/efficiency/config-verification.json --profile "$EFFICIENCY_PROFILE" --device opd2413
             grep -qx 'CONFIG_XCY_RECLAIM=y' out/.config
           elif [ "$ZRAM_PATCH" = 'LZ4KD' ]; then
             for symbol in ZRAM ZSMALLOC CRYPTO_LZ4K CRYPTO_LZ4KD CRYPTO_LZ4K_OPLUS CRYPTO_DEFLATE ZRAM_DEF_COMP_LZ4KD; do

@@ -1,0 +1,80 @@
+name: Test Lenovo and OnePlus thread affinity
+
+on:
+  push:
+    branches: [codex/oneplus-main-sync]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  opd2413:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Exercise shared exit handling and device overlays
+        run: |
+          python3 efficiency/thread_affinity/test_affinity_exit.py
+          python3 efficiency/thread_affinity/test_device_install.py
+      - name: Compile driver, scheduler helper, and cpuset notifier on OPD2413
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq --no-install-recommends bc bison clang flex libelf-dev lld llvm
+          src="$RUNNER_TEMP/common.tar.gz"
+          curl --fail --location --retry 3 --silent --show-error \
+            https://github.com/qdykernel/Build_Lenovo_sm8750/releases/download/common/2025-06.tar.gz \
+            --output "$src"
+          printf '%s  %s\n' ac27c6a2a4aaf368e2f2a754d121256548ed4f17ca8ae44a0a0f5c60e19c776f "$src" \
+            | sha256sum --check
+          kernel="$RUNNER_TEMP/common"
+          out="$RUNNER_TEMP/opd2413-affinity-out"
+          mkdir -p "$kernel"
+          tar xzf "$src" -C "$kernel"
+          test "$(make -s -C "$kernel" kernelversion)" = 6.6.89
+          python3 efficiency/thread_affinity/install_builtin.py --kernel "$kernel" --device opd2413
+          make -s -C "$kernel" O="$out" ARCH=arm64 LLVM=1 gki_defconfig
+          grep -qx CONFIG_CPUSETS=y "$out/.config"
+          if grep -qx CONFIG_FRAME_POLICY=y "$out/.config"; then
+            echo "Expected the OPD2413 affinity build without frame policy"
+            exit 1
+          fi
+          make -s -C "$kernel" O="$out" ARCH=arm64 LLVM=1 -j2 \
+            kernel/sched/ace6_thread_affinity.o kernel/sched/core.o kernel/cgroup/cpuset.o
+          llvm-nm --defined-only "$out/kernel/sched/core.o" | grep -E ' T ace6_set_task_affinity$'
+          llvm-nm --undefined-only "$out/kernel/sched/ace6_thread_affinity.o" | grep -E ' U ace6_set_task_affinity$'
+          llvm-nm --defined-only "$out/kernel/sched/ace6_thread_affinity.o" | grep -E ' [BDR] __tracepoint_ace6_cpuset_attach_task$'
+          llvm-nm --undefined-only "$out/kernel/cgroup/cpuset.o" | grep -E ' U __tracepoint_ace6_cpuset_attach_task$'
+  ace6:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compile driver and scheduler helper on Ace 6
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq --no-install-recommends bc bison clang flex libelf-dev lld llvm
+          kernel="$RUNNER_TEMP/kernel"
+          out="$RUNNER_TEMP/ace6-affinity-out"
+          mkdir -p "$kernel"
+          curl --fail --location --retry 3 --silent --show-error \
+            https://codeload.github.com/OnePlusOSS/android_kernel_common_oneplus_sm8750/tar.gz/65b954a773b183a9999b06bb1b2f921f12eaaf11 \
+            | tar xz -C "$kernel" --strip-components=1
+          test "$(make -s -C "$kernel" kernelversion)" = 6.6.118
+          python3 efficiency/thread_affinity/install_builtin.py --kernel "$kernel" --device ace6
+          python3 efficiency/frame_policy/install_builtin.py --kernel "$kernel"
+          make -s -C "$kernel" O="$out" ARCH=arm64 LLVM=1 gki_defconfig
+          grep -qx CONFIG_FRAME_POLICY=y "$out/.config"
+          make -s -C "$kernel" O="$out" ARCH=arm64 LLVM=1 -j2 \
+            kernel/sched/ace6_thread_affinity.o kernel/sched/core.o
+          llvm-nm --defined-only "$out/kernel/sched/core.o" | grep -E ' T ace6_set_task_affinity$'
+          llvm-nm --undefined-only "$out/kernel/sched/ace6_thread_affinity.o" | grep -E ' U ace6_set_task_affinity$'
+          driver="$out/kernel/sched/ace6_thread_affinity.o"
+          if llvm-dis "$driver" -o "$out/affinity.ll" 2>/dev/null; then
+            grep -F android_vh_cpuset_attach_task "$out/affinity.ll"
+          else
+            strings "$driver" | grep -Fx android_vh_cpuset_attach_task
+          fi

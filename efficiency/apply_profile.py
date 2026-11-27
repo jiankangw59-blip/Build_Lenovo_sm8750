@@ -33,9 +33,11 @@ def kernel_version(kernel):
     return ".".join(numbers)
 
 
-def apply(kernel, report, profile="baseline"):
+def apply(kernel, report, profile="baseline", device="ace6"):
     manifest = json.loads((HERE / "patch-series.json").read_text(encoding="utf-8"))
     version = kernel_version(kernel)
+    if device == "opd2413" and version != "6.6.89":
+        raise RuntimeError("OPD2413 requires the reviewed 6.6.89 source")
     source_commit = manifest["base_commit"]
     replacements = {}
     additional_patches = []
@@ -46,7 +48,7 @@ def apply(kernel, report, profile="baseline"):
         additional_patches = port.get("additional_patches", [])
     elif version != manifest["base_kernel_version"]:
         raise RuntimeError("Unreviewed efficiency profile and kernel version: " + profile + " " + version)
-    elif profile == IDLE_PROFILE:
+    elif device == "opd2413" and profile == IDLE_PROFILE:
         source_commit = "showdo/Build_Lenovo_sm8750/common/2025-06.tar.gz"
         additional_patches = load_118_port().get("additional_patches", [])
     report.mkdir(parents=True, exist_ok=True)
@@ -106,8 +108,13 @@ def apply(kernel, report, profile="baseline"):
     (report / "efficiency-patches.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
 
-def configure(kernel, profile="baseline"):
-    fragment = (HERE / "ace6-baseline.config").read_text(encoding="utf-8")
+def baseline_config(device):
+    lines = (HERE / "ace6-baseline.config").read_text(encoding="utf-8").splitlines()
+    # OPD2413's OEM archive does not provide the Ace 6 sched-ext option.
+    return [line for line in lines if device != "opd2413" or line != "CONFIG_SCHED_CLASS_EXT=y"]
+
+
+def configure(kernel, profile="baseline", device="ace6"):
     # The compressor patch adds a choice; select it only after all other config edits.
     defconfig = kernel / "arch/arm64/configs/gki_defconfig"
     # A runtime mask update skips ordered WQs in 6.6. Set the native boot
@@ -129,7 +136,7 @@ def configure(kernel, profile="baseline"):
                    "ZRAM_DEF_COMP_LZ4HC", "ZRAM_DEF_COMP_LZ4K", "ZRAM_DEF_COMP_LZ4K_OPLUS",
                    "ZRAM_DEF_COMP_DEFLATE", "ZRAM_DEF_COMP_842", "ZRAM_DEF_COMP_ZSTD"]:
         run(["scripts/config", "--file", str(defconfig), "--disable", option], kernel)
-    for line in fragment.splitlines():
+    for line in baseline_config(device):
         m = re.fullmatch(r"CONFIG_([A-Z0-9_]+)=(.*)", line)
         if m:
             option, value = m.groups()
@@ -161,18 +168,16 @@ def configure(kernel, profile="baseline"):
             else:
                 selection = ["--set-str", name, value.strip('"')]
             run(["scripts/config", "--file", str(defconfig), *selection], kernel)
-    if profile == IDLE_PROFILE:
-        run(["scripts/config", "--file", str(defconfig), "--enable", "PSI"], kernel)
-        for option in HONK_BUILTIN_CONFIG:
+    if device == "opd2413" and profile == IDLE_PROFILE:
+        for option in ("PSI", *HONK_BUILTIN_CONFIG):
             run(["scripts/config", "--file", str(defconfig), "--enable", option], kernel)
 
 
-def verify(kernel, report, profile="baseline"):
+def verify(kernel, report, profile="baseline", device="ace6"):
     version = kernel_version(kernel) if profile == IDLE_PROFILE else None
     idle = idle_source_report(kernel, policy=idle_policy(version)) if version else None
     actual = (kernel / "out/.config").read_text(encoding="utf-8").splitlines()
-    required = [line for line in (HERE / "ace6-baseline.config").read_text(encoding="utf-8").splitlines()
-                if line.startswith("CONFIG_")]
+    required = [line for line in baseline_config(device) if line.startswith("CONFIG_")]
     required += ["CONFIG_ZRAM=y", "CONFIG_ZSMALLOC=y"]
     if profile in CRYSTAL_PROFILES:
         required = [line for line in required if not line.startswith("CONFIG_ZRAM")]
@@ -230,7 +235,7 @@ def verify(kernel, report, profile="baseline"):
     if "GFP_KERNEL | __GFP_NOFAIL" not in erofs:
         missing.append("6.6 EROFS synchronous bounce allocation retry")
     honk_datapath = None
-    if version:
+    if version == "6.6.118" or (device == "opd2413" and version == "6.6.89"):
         # Honk loads its own eBPF object. Check the resolved GKI capabilities
         # for TCX, cgroup, netns routing and receive tracing without changing ABI.
         built_in = [f"CONFIG_{symbol}=y" for symbol in HONK_BUILTIN_CONFIG]
@@ -254,8 +259,9 @@ if __name__ == "__main__":
     parser.add_argument("--kernel", type=pathlib.Path, required=True)
     parser.add_argument("--report", type=pathlib.Path)
     parser.add_argument("--profile", choices=PROFILE_CHOICES, default="baseline")
+    parser.add_argument("--device", choices=("ace6", "opd2413"), default="ace6")
     args = parser.parse_args()
     kernel = args.kernel.resolve()
-    if args.action == "configure": configure(kernel, args.profile)
-    elif args.action == "apply": apply(kernel, args.report.resolve(), args.profile)
-    else: verify(kernel, args.report.resolve(), args.profile)
+    if args.action == "configure": configure(kernel, args.profile, args.device)
+    elif args.action == "apply": apply(kernel, args.report.resolve(), args.profile, args.device)
+    else: verify(kernel, args.report.resolve(), args.profile, args.device)

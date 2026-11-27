@@ -1,0 +1,50 @@
+name: Test Ace 6 XiaoCaiYe kernel interface
+
+on:
+  push:
+    branches: [codex/ace6-118-xcy-lmk]
+    paths:
+      - .github/workflows/Test_xcy_lmk.yml
+      - efficiency/xcy-lmk/probe.c
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ioctl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        with:
+          name: preflash-verification_6.6.118
+          path: candidate
+          run-id: 45542151257
+          github-token: ${{ github.token }}
+      - name: Verify the compiled Image and start a minimal ARM64 guest
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'c7c84154b4f7d3efa27742260b66d0830ef185b509008c66e74ce97a851057f7  candidate/Image' | sha256sum -c
+          sudo apt-get update -qq
+          sudo apt-get install -qq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-system-arm cpio
+          mkdir -p guest/dev guest/proc
+          sudo mknod guest/dev/console c 5 1
+          awk '/^diff --git / { if (header) exit; header = /include\/uapi\/linux\/xcy_lmk.h/ && 1 }
+               header && /^\+[^+]?/ && !/^\+\+\+/ { print substr($0, 2) }' \
+            efficiency/patches/xcy-lmk-policy-6.6.118.patch > xcy_lmk_uapi.h
+          aarch64-linux-gnu-gcc -static -O2 -Wall -Wextra -Werror -I. efficiency/xcy-lmk/probe.c -o guest/init
+          (cd guest && find . -print0 | cpio --null -o -H newc --quiet) | gzip -1 > initramfs.gz
+          timeout 240s qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a76 -smp 2 -m 1024 \
+            -display none -serial stdio -monitor none -nic none -no-reboot -kernel candidate/Image -initrd initramfs.gz \
+            -append 'console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init panic=-1 nokaslr' \
+            2>&1 | tee guest.log
+          grep -q '^XCY_LMK_RUNTIME_PASSED' guest.log
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: xcy-lmk-arm64-guest-log
+          path: guest.log
+          if-no-files-found: ignore

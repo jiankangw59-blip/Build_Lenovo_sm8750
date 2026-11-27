@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/Wcoom/oneplus_sm8750_kernel",
+  "commit": "13d291aef3d1d9607ad3fa5ff30dc23b2888a3da",
+  "files": {
+    "vendor/crystal_sddc_codec.c": "9394843d7ea78e81d0c8cc0c30954ede50a073685a313e8bf00226a5dc708f4a",
+    "vendor/crystal_sddc_codec.h": "ce0b93c01bf852de873f4373428dfd370ddd9954ada320ff65b99545fca087fa",
+    "vendor/crystal_sddc.c": "7f0b3dc9c0cc9a0ce54d3aa5dbc05aac2bb464f7778969281112981055a9af2d",
+    "vendor/crystal_sddc.h": "f22e978381f9aa0c391229dbfc52753b8dfffa94e71715229b6fa0776d32001e",
+    "vendor/lz4kd/lz4kd.h": "5b0bc8fc1a0e916d2cb1296763aadf3723c35c298a73994068632c8e7158e8c8",
+    "vendor/lz4kd/lz4kd_private.h": "34e637f59eb252db78053e978fba2858c11359102357dce7c54a29748c585d68",
+    "vendor/lz4kd/lz4kd_encode_private.h": "74931dc636c8c8399ee12165211c48b1a07054007ccaef9e1c9c39b93f8ca547",
+    "vendor/lz4kd/lz4kd_encode.c": "61363797a90da4762316b5e9e5f3226dafba61c44030bddcc1d9b6067abfe49a",
+    "vendor/lz4kd/lz4kd_encode_delta.c": "10cc756294de935344f492c7a3b3829a7c301fb0167961891d15fce331001081",
+    "vendor/lz4kd/lz4kd_decode.c": "7fbde65861106f77df7f4cb09423db9574f273c4c766cdf2c8ff1fe88a1b2466"
+  }
+}

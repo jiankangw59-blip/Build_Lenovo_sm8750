@@ -1,0 +1,142 @@
+{
+  "enabled": false,
+  "cpu": true,
+  "gpu": false,
+  "observe": false,
+  "sceneMode": "balance",
+  "sceneApps": {},
+  "fasMode": "balance",
+  "fps": [
+    30,
+    45,
+    60,
+    90,
+    120,
+    130,
+    144,
+    165
+  ],
+  "games": {
+    "com.hypergryph.arknights": [
+      30,
+      45,
+      60,
+      90,
+      120,
+      130,
+      144,
+      165
+    ],
+    "com.kurogame.mingchao": [
+      30,
+      45,
+      60,
+      90,
+      120,
+      130,
+      144,
+      165
+    ],
+    "com.miHoYo.Yuanshen": [
+      30,
+      45,
+      60,
+      90,
+      120,
+      130,
+      144,
+      165
+    ],
+    "com.miHoYo.enterprise.NGHSoD": [
+      30,
+      45,
+      60,
+      90,
+      120,
+      130,
+      144,
+      165
+    ],
+    "com.miHoYo.hkrpg": [
+      30,
+      45,
+      60,
+      90,
+      120,
+      130,
+      144,
+      165
+    ],
+    "com.mojang.minecraftpe": [
+      30,
+      45,
+      60,
+      90,
+      120,
+      130,
+      144,
+      165
+    ],
+    "com.netease.party": [
+      30,
+      45,
+      60,
+      90,
+      120,
+      130,
+      144,
+      165
+    ],
+    "com.pwrd.hotta.laohu": [
+      30,
+      45,
+      60,
+      90,
+      120,
+      130,
+      144,
+      165
+    ],
+    "com.shangyoo.neon": [
+      30,
+      45,
+      60,
+      90,
+      120,
+      130,
+      144,
+      165
+    ],
+    "com.tencent.tmgp.pubgmhd": [
+      30,
+      45,
+      60,
+      90,
+      120,
+      130,
+      144,
+      165
+    ],
+    "com.tencent.tmgp.sgame": [
+      30,
+      45,
+      60,
+      90,
+      120,
+      130,
+      144,
+      165
+    ]
+  },
+  "relations": true,
+  "gameCpuMHz": [
+    [
+      384,
+      3532.8
+    ],
+    [
+      1017.6,
+      4320
+    ]
+  ]
+}

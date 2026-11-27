@@ -1,0 +1,117 @@
+name: Build native frame policy configuration module
+
+on:
+  push:
+    branches: [codex/ace6-frame-policy, codex/scene-aux-control]
+    paths:
+      - .github/workflows/Build_frame_policy_config.yml
+      - efficiency/frame_policy/framectl.c
+      - efficiency/frame_policy/frame_policy_uapi.h
+      - efficiency/frame_policy/scene_policy_uapi.h
+      - efficiency/frame_policy/scene_policy.h
+      - efficiency/frame_policy/scene_aux_uapi.h
+      - efficiency/frame_policy/scene_aux_policy.h
+      - efficiency/frame_policy/fas_tuning_uapi.h
+      - efficiency/frame_policy/fas_control.h
+      - efficiency/frame_policy/frame_control.h
+      - efficiency/frame_policy/compile_fas_tuning.py
+      - efficiency/frame_policy/ksu/**
+      - efficiency/thread_affinity/affinityctl.c
+      - efficiency/thread_affinity/adaptive_watch.c
+      - efficiency/thread_affinity/adaptive_watch.h
+      - efficiency/thread_affinity/scene_context_wire.h
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  module:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate the actual configuration protocol and client
+        run: |
+          set -euo pipefail
+          node efficiency/frame_policy/ksu/test_protocol.js --defaults
+          node --test efficiency/frame_policy/ksu/test_scene_protocol.js
+          node --test efficiency/frame_policy/ksu/test_aux_protocol.js
+          python3 efficiency/frame_policy/ksu/test_aux_layout.py
+          node --test efficiency/frame_policy/ksu/test_app_fas.js efficiency/frame_policy/ksu/test_encode_settings.js
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
+            efficiency/frame_policy/framectl.c -o "$RUNNER_TEMP/framectl-host"
+          python3 efficiency/frame_policy/ksu/test_unpack.py --controller "$RUNNER_TEMP/framectl-host"
+          python3 efficiency/frame_policy/ksu/test_framectl_fas.py
+          python3 efficiency/frame_policy/ksu/test_framectl_aux.py
+          python3 efficiency/frame_policy/ksu/test_fas_protocol.py
+          python3 efficiency/frame_policy/ksu/test_package.py
+          python3 efficiency/frame_policy/ksu/test_transactions.py
+          python3 efficiency/frame_policy/ksu/test_handoff.py
+          python3 efficiency/frame_policy/ksu/test_service_startup.py
+          for file in efficiency/frame_policy/ksu/*.sh; do sh -n "$file"; done
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'ndk;28.2.13676358'
+          log-accepted-android-sdk-licenses: false
+      - name: Build the small Android ARM64 client and package the module
+        run: |
+          set -euo pipefail
+          ndk="$ANDROID_HOME/ndk/28.2.13676358"
+          compiler="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
+          "$compiler" -std=c11 -O2 -Wall -Wextra -Werror \
+            efficiency/frame_policy/framectl.c -o "$RUNNER_TEMP/framectl"
+          mkdir -p "$RUNNER_TEMP/module"
+          python3 efficiency/frame_policy/ksu/package.py --controller "$RUNNER_TEMP/framectl" \
+            --output "$RUNNER_TEMP/module/frame-policy-config.zip"
+          sha256sum "$RUNNER_TEMP/module/frame-policy-config.zip" > "$RUNNER_TEMP/module/SHA256SUMS"
+      - name: Build the existing thread affinity watcher client
+        run: |
+          set -euo pipefail
+          compiler="$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
+          mkdir -p "$RUNNER_TEMP/thread-affinity-client"
+          "$compiler" -std=c11 -O2 -Wall -Wextra -Werror \
+            efficiency/thread_affinity/affinityctl.c efficiency/thread_affinity/adaptive_watch.c \
+            -o "$RUNNER_TEMP/thread-affinity-client/affinityctl"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess
+          source = os.environ['GITHUB_SHA']
+          if not re.fullmatch(r'[0-9a-f]{40}', source) or source != subprocess.check_output(
+                  ['git', 'rev-parse', 'HEAD'], text=True).strip():
+              raise SystemExit('Client source commit does not match checkout')
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'thread-affinity-client'
+          binary = (output / 'affinityctl').read_bytes()
+          if binary[:6] != b'\x7fELF\x02\x01' or binary[18:20] != b'\xb7\x00':
+              raise SystemExit('Client must be a little-endian ARM64 ELF')
+          sources = ['efficiency/thread_affinity/' + name for name in (
+              'affinityctl.c', 'adaptive_watch.c', 'adaptive_watch.h', 'scene_context_wire.h')]
+          (output / 'source-commit.txt').write_text(source + '\n')
+          (output / 'provenance.json').write_text(json.dumps({
+              'source_commit': source,
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'workflow_run_id': os.environ['GITHUB_RUN_ID'],
+              'target': 'aarch64-linux-android35', 'ndk': '28.2.13676358',
+              'artifact_scope': 'existing_watcher_client_only',
+              'contains_private_rules': False,
+              'binary_sha256': hashlib.sha256(binary).hexdigest(),
+              'source_sha256': {name: hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+                                for name in sources},
+          }, indent=2) + '\n')
+          (output / 'SHA256SUMS').write_text(''.join(
+              hashlib.sha256((output / name).read_bytes()).hexdigest() + '  ' + name + '\n'
+              for name in ('affinityctl', 'source-commit.txt', 'provenance.json')))
+          PY
+      - uses: actions/upload-artifact@v6
+        with:
+          name: frame-policy-config-module
+          path: ${{ runner.temp }}/module/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v6
+        with:
+          name: thread-affinity-client
+          path: ${{ runner.temp }}/thread-affinity-client/
+          if-no-files-found: error

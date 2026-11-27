@@ -24,11 +24,15 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 
-#include "ace6_cpuset_affinity.h"
 #include "adaptive_policy.h"
+#include "frame_policy.h"
+
+#ifdef ACE6_OPD2413_CPUSET_TRACE
+#include "ace6_cpuset_affinity.h"
 
 DEFINE_TRACE(ace6_cpuset_attach_task, TP_PROTO(struct task_struct *task),
 	     TP_ARGS(task));
+#endif
 
 #define MAX_PENDING 4096
 #define INITIAL_SNAPSHOT 16384
@@ -103,9 +107,10 @@ static unsigned int revision;
 static unsigned int validated;
 static unsigned int lease_count;
 static unsigned int context_switches;
+static u64 scene_source_epoch;
 static unsigned int scene_captured_groups, scene_captured_threads;
 static atomic_t pending;
-static atomic_long_t dropped, changed, clamped, failed, adapted;
+static atomic_long_t dropped, changed, clamped, failed, adapted, exit_skipped;
 
 static struct thread_lease *find_lease(struct task_struct *task)
 {
@@ -186,23 +191,43 @@ static bool process_name(struct task_struct *task, char name[PROCESS_NAME_LEN])
 #include "ace6_sched_affinity.h"
 #endif
 
-/* Leave the task in its current Android cpuset. */
-static int apply_mask(struct task_struct *task, const struct cpumask *target,
-		      const struct cpumask *user_request, struct affinity_state *applied)
+enum affinity_result {
+	AFFINITY_APPLIED,
+	AFFINITY_FAILED,
+	AFFINITY_EXITING,
+};
+
+static enum affinity_result record_affinity_result(int ret, bool exiting)
 {
+	if (!ret)
+		return AFFINITY_APPLIED;
+	if (exiting) {
+		atomic_long_inc(&exit_skipped);
+		return AFFINITY_EXITING;
+	}
+	atomic_long_inc(&failed);
+	return AFFINITY_FAILED;
+}
+
+/* Leave the task in its current Android cpuset. */
+static enum affinity_result apply_mask(struct task_struct *task, const struct cpumask *target,
+				       const struct cpumask *user_request,
+				       struct affinity_state *applied)
+{
+	bool exiting = false;
+	int ret;
 #ifdef MODULE
 	cpumask_t allowed;
 	cpumask_t effective;
-	int ret;
 
 	cpuset_cpus_allowed(task, &allowed);
 	if (!cpumask_and(&effective, target, &allowed)) {
 		atomic_long_inc(&clamped);
-		return -EINVAL;
+		return record_affinity_result(-EINVAL, false);
 	}
 	ret = set_cpus_allowed_ptr(task, &effective);
 	if (ret)
-		return ret;
+		return record_affinity_result(ret, false);
 
 	/* A cpuset attach can overlap the write. Its event will also recheck policy. */
 	read_affinity(task, applied);
@@ -215,31 +240,29 @@ static int apply_mask(struct task_struct *task, const struct cpumask *target,
 	}
 	if (!cpumask_equal(target, &applied->effective))
 		atomic_long_inc(&clamped);
-	return ret;
 #else
 	const struct cred *saved;
-	int ret;
 
 	/* Use the loading client's security identity in asynchronous workers. */
 	saved = override_creds(policy_cred);
-	ret = ace6_set_task_affinity(task, target, user_request);
+	ret = ace6_set_task_affinity(task, target, user_request, &exiting);
 	revert_creds(saved);
 	if (!ret) {
 		read_affinity(task, applied);
 		if (!cpumask_equal(target, &applied->effective))
 			atomic_long_inc(&clamped);
 	}
-	return ret;
 #endif
+	return record_affinity_result(ret, exiting);
 }
 
-static int restore_mask(struct task_struct *task, const struct affinity_state *original)
+static void restore_mask(struct task_struct *task, const struct affinity_state *original)
 {
 	struct affinity_state applied;
 	const struct cpumask *request = original->has_request ? &original->requested : NULL;
 	const struct cpumask *mask = request ? request : &original->effective;
 
-	return apply_mask(task, mask, request, &applied);
+	apply_mask(task, mask, request, &applied);
 }
 
 static bool owns_affinity(const struct affinity_state *applied,
@@ -259,9 +282,8 @@ static void restore_lease(struct thread_lease *lease)
 		struct affinity_state observed;
 
 		read_affinity(lease->task, &observed);
-		if (owns_affinity(&lease->applied, &observed) &&
-		    restore_mask(lease->task, &lease->original))
-			atomic_long_inc(&failed);
+		if (owns_affinity(&lease->applied, &observed))
+			restore_mask(lease->task, &lease->original);
 	}
 	free_lease(lease);
 }
@@ -366,8 +388,8 @@ static void apply_task(struct task_struct *task, struct task_struct *parent, con
 	if (!requested) {
 		if (lease)
 			restore_lease(lease);
-		else if (!same_affinity(&original, &observed) && restore_mask(task, &original))
-			atomic_long_inc(&failed);
+		else if (!same_affinity(&original, &observed))
+			restore_mask(task, &original);
 		return;
 	}
 	if (lease && !owns_affinity(&lease->applied, &observed)) {
@@ -399,10 +421,13 @@ static void apply_task(struct task_struct *task, struct task_struct *parent, con
 		lease_count++;
 	}
 	if (!cpumask_equal(&observed.effective, &effective)) {
-		if (apply_mask(task, requested, requested, &lease->applied)) {
-			atomic_long_inc(&failed);
+		enum affinity_result result;
+
+		result = apply_mask(task, requested, requested, &lease->applied);
+		if (result == AFFINITY_EXITING)
+			free_lease(lease);
+		if (result != AFFINITY_APPLIED)
 			return;
-		}
 		atomic_long_inc(&changed);
 		if (automatic)
 			atomic_long_inc(&adapted);
@@ -615,15 +640,21 @@ static void on_rename(void *data, struct task_struct *task, const char *name)
 static void on_exec(void *data, struct task_struct *task, pid_t old_pid,
 		    struct linux_binprm *bprm)
 {
+	frame_policy_task_event(task);
 	queue_event(task, NULL, false);
 }
 
 static void on_exit(void *data, struct task_struct *task)
 {
+	frame_policy_task_event(task);
 	queue_event(task, NULL, true);
 }
 
+#ifdef ACE6_OPD2413_CPUSET_TRACE
 static void on_cpuset(void *data, struct task_struct *task)
+#else
+static void on_cpuset(void *data, struct cgroup_subsys_state *css, struct task_struct *task)
+#endif
 {
 	queue_event(task, NULL, false);
 }
@@ -637,6 +668,9 @@ static struct {
 	{ "task_rename", on_rename },
 	{ "sched_process_exec", on_exec },
 	{ "sched_process_exit", on_exit },
+#ifndef ACE6_OPD2413_CPUSET_TRACE
+	{ "android_vh_cpuset_attach_task", on_cpuset },
+#endif
 };
 
 static void find_hook(struct tracepoint *tp, void *data)
@@ -930,6 +964,9 @@ static int replace_scene(struct file *file, struct scene_context *next)
 	    strcmp(previous->foreground, next->foreground)))
 		stop_game();
 	scene = next;
+	/* A real visible/windowed change invalidates old input/load deadlines too. */
+	frame_policy_scene_full(next ? next->foreground : NULL,
+			   next && next->display_off, next && next->game, ++scene_source_epoch);
 	WRITE_ONCE(scene_owner, next ? file : NULL);
 	context_switches++;
 	if (rescan && ret) {
@@ -1027,17 +1064,17 @@ static ssize_t control_write(struct file *file, const char __user *user,
 static ssize_t control_read(struct file *file, char __user *user,
 			    size_t size, loff_t *offset)
 {
-	char stats[768];
+	char stats[1024];
 	int len;
 
 	mutex_lock(&policy_lock);
 	len = scnprintf(stats, sizeof(stats),
 		"revision=%u\nrules=%u\nvalidated=%u\nleases=%u\npending=%d\nchanged=%ld\nclamped=%ld\nfailed=%ld\ndropped=%ld\n"
-		"profile_wire=1\nwire_lines=%u\nstored_rules=%u\nprofiles=%u\nprofile_bindings=%u\n"
+		"profile_wire=1\ncontext_windowed=1\nwire_lines=%u\nstored_rules=%u\nprofiles=%u\nprofile_bindings=%u\n"
 		"adaptive=%s\nforeground=%s\ndisplay_off=%u\ncontext_switches=%u\nadapted=%ld\n"
 		"game_tgid=%d\ngame_top=%d,%d,%d\ngame_samples=%u\ngame_finalized=%u\n"
 		"snapshot_capacity=%u\nsnapshot_growths=%u\nscene_group_capacity=%u\n"
-		"scene_captured_groups=%u\nscene_captured_threads=%u\n",
+		"scene_captured_groups=%u\nscene_captured_threads=%u\nexit_skipped=%ld\n",
 		revision, policy ? policy->count : 0, validated, lease_count,
 		atomic_read(&pending), atomic_long_read(&changed),
 		atomic_long_read(&clamped), atomic_long_read(&failed),
@@ -1052,7 +1089,7 @@ static ssize_t control_read(struct file *file, char __user *user,
 		game_rank[1] ? task_pid_nr(game_rank[1]) : 0,
 		game_rank[2] ? task_pid_nr(game_rank[2]) : 0, game_passes, game_finalized,
 		snapshot.capacity, snapshot.growths, scene_groups.capacity,
-		scene_captured_groups, scene_captured_threads);
+		scene_captured_groups, scene_captured_threads, atomic_long_read(&exit_skipped));
 	mutex_unlock(&policy_lock);
 	return simple_read_from_buffer(user, size, offset, stats, len);
 }
@@ -1098,25 +1135,23 @@ static int __init affinity_init(void)
 	for (i = 0; i < ARRAY_SIZE(hooks); i++) {
 		if (!hooks[i].tp) {
 			ret = -ENOENT;
-			pr_err("ace6_affinity: missing tracepoint %s\n", hooks[i].name);
 			goto unregister;
 		}
 		ret = tracepoint_probe_register(hooks[i].tp, hooks[i].probe, NULL);
-		if (ret) {
-			pr_err("ace6_affinity: cannot register %s: %d\n", hooks[i].name, ret);
+		if (ret)
 			goto unregister;
-		}
 	}
+#ifdef ACE6_OPD2413_CPUSET_TRACE
 	ret = register_trace_ace6_cpuset_attach_task(on_cpuset, NULL);
-	if (ret) {
-		pr_err("ace6_affinity: cannot register cpuset migration: %d\n", ret);
+	if (ret)
 		goto unregister;
-	}
+#endif
 	ret = misc_register(&control);
 	if (!ret)
 		return 0;
-	pr_err("ace6_affinity: cannot register control device: %d\n", ret);
+#ifdef ACE6_OPD2413_CPUSET_TRACE
 	unregister_trace_ace6_cpuset_attach_task(on_cpuset, NULL);
+#endif
 unregister:
 	while (i--)
 		tracepoint_probe_unregister(hooks[i].tp, hooks[i].probe, NULL);
@@ -1134,7 +1169,9 @@ static void __exit affinity_exit(void)
 	unsigned int i;
 
 	misc_deregister(&control);
+#ifdef ACE6_OPD2413_CPUSET_TRACE
 	unregister_trace_ace6_cpuset_attach_task(on_cpuset, NULL);
+#endif
 	for (i = 0; i < ARRAY_SIZE(hooks); i++)
 		tracepoint_probe_unregister(hooks[i].tp, hooks[i].probe, NULL);
 	tracepoint_synchronize_unregister();

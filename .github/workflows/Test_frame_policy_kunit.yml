@@ -1,0 +1,62 @@
+name: Kernel frame policy locking and lifetime tests
+
+on:
+  push:
+    branches: [codex/ace6-frame-policy]
+    paths:
+      - .github/workflows/Test_frame_policy_kunit.yml
+      - efficiency/frame_policy/**
+      - '!efficiency/frame_policy/ksu/**'
+      - '!efficiency/frame_policy/framectl.c'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kunit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Record the source identity inside the evidence artifact
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          source = os.environ['GITHUB_SHA']
+          if not re.fullmatch(r'[0-9a-f]{40}', source):
+              raise SystemExit('Missing exact KUnit workflow source')
+          report = pathlib.Path(os.environ['RUNNER_TEMP']) / 'frame-kunit-report'
+          report.mkdir(exist_ok=False)
+          (report / 'workflow-commit.txt').write_text(source + '\n')
+          (report / 'kunit-provenance.json').write_text(json.dumps({
+              'source': source, 'repository': os.environ['GITHUB_REPOSITORY'],
+              'workflow_run_id': os.environ['GITHUB_RUN_ID'],
+              'kernel_source': '65b954a773b183a9999b06bb1b2f921f12eaaf11',
+              'production_image': False, 'device_testing': False,
+          }, indent=2) + '\n')
+          PY
+      - name: Prepare an isolated ARM64 kernel test environment
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq --no-install-recommends bc bison clang flex libelf-dev lld llvm qemu-system-arm
+          kernel="$RUNNER_TEMP/frame-kunit-kernel"
+          mkdir -p "$kernel"
+          curl --fail --location --retry 3 --silent --show-error \
+            https://codeload.github.com/OnePlusOSS/android_kernel_common_oneplus_sm8750/tar.gz/65b954a773b183a9999b06bb1b2f921f12eaaf11 \
+            | tar xz -C "$kernel" --strip-components=1
+          python3 efficiency/frame_policy/install_builtin.py --kernel "$kernel" --for-kunit
+      - name: Check scheduler context and concurrent fence cleanup under lockdep and KASAN
+        run: |
+          python3 efficiency/frame_policy/run_kunit.py \
+            --kernel "$RUNNER_TEMP/frame-kunit-kernel" \
+            --output "$RUNNER_TEMP/frame-kunit-out" \
+            --report "$RUNNER_TEMP/frame-kunit-report"
+      - name: Upload test evidence only
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: frame-policy-kunit-debug-evidence
+          path: ${{ runner.temp }}/frame-kunit-report/
+          if-no-files-found: warn

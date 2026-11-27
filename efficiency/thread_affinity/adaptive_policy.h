@@ -6,14 +6,7 @@
 #include <linux/cred.h>
 #include "affinity_rules.h"
 
-#define VISIBLE_PACKAGES_LEN 1024
-
-struct scene_context {
-	char foreground[PROCESS_NAME_LEN];
-	char visible[VISIBLE_PACKAGES_LEN];
-	bool display_off;
-	bool game;
-};
+#include "scene_context_wire.h"
 
 enum app_stage {
 	APP_STATIC,
@@ -55,50 +48,6 @@ static void init_adaptive_masks(void)
 			cpumask_set_cpu(cpu, &game_top_cpus);
 		index++;
 	}
-}
-
-static bool package_char(char c)
-{
-	return isalnum(c) || c == '.' || c == '_';
-}
-
-static int parse_scene_context(char *data, struct scene_context *out)
-{
-	char *foreground = strsep(&data, "\t");
-	char *visible = strsep(&data, "\t");
-	char *screen = strsep(&data, "\t\n");
-	char *game = strsep(&data, "\n");
-	const char *p;
-	size_t token = 0;
-
-	if (!foreground || !visible || !screen || !*foreground || !*visible ||
-	    (data && *data) || (strcmp(screen, "0") && strcmp(screen, "1")) ||
-	    (game && *game && strcmp(game, "0") && strcmp(game, "1")))
-		return -EINVAL;
-	if (strcmp(foreground, "-")) {
-		for (p = foreground; *p; p++)
-			if (!package_char(*p))
-				return -EINVAL;
-		if (strscpy(out->foreground, foreground, sizeof(out->foreground)) < 0)
-			return -E2BIG;
-	}
-	if (strcmp(visible, "-")) {
-		for (p = visible; *p; p++) {
-			if (*p == ',' && token) {
-				token = 0;
-				continue;
-			}
-			if (!package_char(*p) || ++token >= PROCESS_NAME_LEN)
-				return -EINVAL;
-		}
-		if (!token)
-			return -EINVAL;
-		if (strscpy(out->visible, visible, sizeof(out->visible)) < 0)
-			return -E2BIG;
-	}
-	out->display_off = *screen == '1';
-	out->game = game && *game == '1' && out->foreground[0] && !out->display_off;
-	return 0;
 }
 
 static bool same_package(const char *process, const char *package, size_t len)

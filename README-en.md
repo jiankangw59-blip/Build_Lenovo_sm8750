@@ -165,3 +165,5 @@ If you have any questions or suggestions, please contact us through the followin
 ---
 
 **Maintenance Status**: 🟢 Actively Maintained
+
+See the [OnePlus build guide](README.oneplus-en.md) for OnePlus devices, workflows, and inputs.

@@ -1,0 +1,107 @@
+name: Verify native frame and Scene frequency policies
+
+on:
+  push:
+    branches: [codex/ace6-frame-policy]
+    paths:
+      - .github/workflows/Test_frame_policy.yml
+      - efficiency/frame_policy/**
+      - '!efficiency/frame_policy/ksu/**'
+      - '!efficiency/frame_policy/framectl.c'
+      - efficiency/thread_affinity/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check controller, ABI and source imports
+        run: |
+          set -euo pipefail
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
+            efficiency/frame_policy/test_control.c -o "$RUNNER_TEMP/frame-control"
+          "$RUNNER_TEMP/frame-control"
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
+            efficiency/frame_policy/test_fas_control.c -o "$RUNNER_TEMP/fas-control"
+          "$RUNNER_TEMP/fas-control"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/frame_policy/test_fas_frames.c -o "$RUNNER_TEMP/fas-frames"
+          "$RUNNER_TEMP/fas-frames"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/frame_policy/test_fas_task_load.c -o "$RUNNER_TEMP/fas-task-load"
+          "$RUNNER_TEMP/fas-task-load"
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined \
+            efficiency/frame_policy/test_scene_policy.c -o "$RUNNER_TEMP/scene-policy"
+          "$RUNNER_TEMP/scene-policy"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/frame_policy/test_scene_aux.c -o "$RUNNER_TEMP/scene-aux"
+          "$RUNNER_TEMP/scene-aux"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/frame_policy/test_scene_limiter_feedback.c -o "$RUNNER_TEMP/scene-native-feedback"
+          "$RUNNER_TEMP/scene-native-feedback"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/frame_policy/test_scene_event_feedback.c -o "$RUNNER_TEMP/scene-event-feedback"
+          "$RUNNER_TEMP/scene-event-feedback"
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/thread_affinity/test_scene_refresh_policy.c -o "$RUNNER_TEMP/refresh-policy"
+          "$RUNNER_TEMP/refresh-policy"
+          cc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/thread_affinity/test_scene_refresh_display.c \
+            efficiency/thread_affinity/scene_refresh_display.c -lm -o "$RUNNER_TEMP/refresh-display"
+          "$RUNNER_TEMP/refresh-display"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined -fno-omit-frame-pointer -DSRCFG_TEST_WRAP \
+            efficiency/thread_affinity/scene_refresh_config.c \
+            efficiency/thread_affinity/test_scene_refresh_config.c \
+            -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=read,--wrap=__read_chk \
+            -o "$RUNNER_TEMP/refresh-config"
+          "$RUNNER_TEMP/refresh-config"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/thread_affinity/test_scene_activity_policy.c -o "$RUNNER_TEMP/scene-activity"
+          "$RUNNER_TEMP/scene-activity"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/thread_affinity/test_scene_activity_load.c -o "$RUNNER_TEMP/scene-activity-load"
+          "$RUNNER_TEMP/scene-activity-load"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/thread_affinity/test_scene_context.c -o "$RUNNER_TEMP/scene-context"
+          "$RUNNER_TEMP/scene-context"
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            efficiency/frame_policy/test_scene_activity_profiles.c -o "$RUNNER_TEMP/scene-activity-profiles"
+          "$RUNNER_TEMP/scene-activity-profiles"
+          cc -std=c11 -O2 -Wall -Wextra -Werror \
+            efficiency/frame_policy/framectl.c -o "$RUNNER_TEMP/framectl-host"
+          python3 -m py_compile efficiency/frame_policy/compile_config.py \
+            efficiency/frame_policy/install_builtin.py efficiency/frame_policy/compile_game_rules.py
+          python3 efficiency/frame_policy/test_game_rules.py
+          python3 efficiency/frame_policy/test_scene_policy.py
+          python3 efficiency/frame_policy/test_fas_tuning.py
+          python3 efficiency/frame_policy/test_kunit_coverage.py
+          python3 efficiency/thread_affinity/test_snapshot_growth.py
+          python3 efficiency/thread_affinity/test_affinity_exit.py
+      - name: Compile against the pinned ARM64 6.6.118 kernel
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq --no-install-recommends bc bison clang flex libelf-dev lld llvm
+          kernel="$RUNNER_TEMP/kernel"
+          out="$RUNNER_TEMP/out"
+          mkdir -p "$kernel"
+          curl --fail --location --retry 3 --silent --show-error \
+            https://codeload.github.com/OnePlusOSS/android_kernel_common_oneplus_sm8750/tar.gz/65b954a773b183a9999b06bb1b2f921f12eaaf11 \
+            | tar xz -C "$kernel" --strip-components=1
+          python3 efficiency/thread_affinity/install_builtin.py --kernel "$kernel"
+          python3 efficiency/frame_policy/install_builtin.py --kernel "$kernel"
+          make -s -C "$kernel" O="$out" ARCH=arm64 LLVM=1 gki_defconfig
+          grep -qx CONFIG_FRAME_POLICY=y "$out/.config"
+          make -s -C "$kernel" -j2 O="$out" ARCH=arm64 LLVM=1 \
+            kernel/sched/frame_policy/built-in.a kernel/sched/ace6_thread_affinity.o \
+            kernel/sched/core.o
+          llvm-nm --defined-only "$out/kernel/sched/core.o" | grep -E ' T ace6_set_task_affinity$'
+          llvm-nm --undefined-only "$out/kernel/sched/ace6_thread_affinity.o" \
+            | grep -E ' U ace6_set_task_affinity$'
+          llvm-ar t "$out/kernel/sched/frame_policy/built-in.a"

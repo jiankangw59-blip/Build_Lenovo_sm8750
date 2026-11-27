@@ -1,0 +1,192 @@
+"use strict";
+
+const FRAME_FAS_MODES = ["powersave", "balance", "performance", "fast"];
+const FRAME_FAS_DEFAULT_MFPS = [3000, 1000, 300, 0];
+
+function parseFrameFasMargin(margin) {
+  const milli = value => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+      throw new Error("FAS 余量必须为非负有限数值");
+    const text = String(value);
+    if (!/^(0|[1-9]\d*)(\.\d{1,3})?$/.test(text))
+      throw new Error("FAS 余量最多保留三位小数");
+    const [whole, fraction = ""] = text.split(".");
+    const result = Number(whole) * 1000 + Number(fraction.padEnd(3, "0"));
+    if (!Number.isSafeInteger(result)) throw new Error("FAS 余量超出范围");
+    return result;
+  };
+  let base, overrides = [];
+  if (margin && typeof margin === "object" && !Array.isArray(margin)) {
+    if (!Object.hasOwn(margin, "base")) throw new Error("高级 FAS 余量必须包含 base");
+    base = milli(margin.base);
+    for (const [key, value] of Object.entries(margin)) {
+      if (key === "base") continue;
+      if (!/^(0|[1-9]\d*)$/.test(key)) throw new Error("FAS 覆盖帧率必须为规范整数");
+      const fps = Number(key), amount = milli(value);
+      if (!Number.isSafeInteger(fps) || fps < 15 || fps > 240 || amount > fps * 1000 - 4000)
+        throw new Error("FAS 帧率覆盖余量超出范围");
+      overrides.push([fps, amount]);
+    }
+    overrides.sort((a, b) => a[0] - b[0]);
+  } else base = milli(margin);
+  if (base > 30000 || overrides.length > 8) throw new Error("FAS 基础余量或覆盖数量超出范围");
+  return {base, overrides};
+}
+
+function readFrameFasSettings(settings) {
+  const mode = Object.hasOwn(settings, "fasMode") ? settings.fasMode : "balance";
+  const index = FRAME_FAS_MODES.indexOf(mode);
+  if (index < 0) throw new Error("fasMode 必须为 powersave / balance / performance / fast");
+  const hasProfiles = Object.hasOwn(settings, "fasProfiles");
+  const hasLegacy = Object.hasOwn(settings, "fasMarginFps");
+  if (hasProfiles && hasLegacy) throw new Error("fasProfiles 与 fasMarginFps 不能同时设置");
+  const input = hasProfiles ? settings.fasProfiles : hasLegacy ? {[mode]: settings.fasMarginFps} : {};
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("fasProfiles 必须为档位配置对象");
+  const profiles = Object.fromEntries(FRAME_FAS_MODES.map(key => [key, null]));
+  let selected = {base: FRAME_FAS_DEFAULT_MFPS[index], overrides: []};
+  for (const [key, margin] of Object.entries(input)) {
+    if (!Object.hasOwn(profiles, key)) throw new Error(`未知 FAS 档位：${key}`);
+    if (hasProfiles && margin === null) continue;
+    const parsed = parseFrameFasMargin(margin);
+    profiles[key] = typeof margin === "number" ? margin : {...margin};
+    if (key === mode) selected = parsed;
+  }
+  const utilLimits = frameFasUtilLimits(settings);
+  const utilLimit = utilLimits[mode] === null ? null : parseFrameFasMargin(utilLimits[mode]).base;
+  return {mode, index, profiles, utilLimits, utilLimit, ...selected};
+}
+
+function frameFasUtilLimits(settings) {
+  const input = Object.hasOwn(settings, "fasUtilLimits") ? settings.fasUtilLimits : {};
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("fasUtilLimits 必须为档位配置对象");
+  const limits = Object.fromEntries(FRAME_FAS_MODES.map(mode => [mode, null]));
+  for (const [mode, value] of Object.entries(input)) {
+    if (!Object.hasOwn(limits, mode)) throw new Error(`未知 FAS 档位：${mode}`);
+    if (value === null) continue;
+    if (typeof value !== "number" || parseFrameFasMargin(value).base > 3000)
+      throw new Error("FAS 额外下调上限必须为 0～3 FPS，最多三位小数");
+    limits[mode] = value;
+  }
+  return limits;
+}
+
+function frameFasProfiles(settings) {
+  return readFrameFasSettings(settings).profiles;
+}
+
+function encodeFrameFas({mode, index, base, overrides, utilLimit}) {
+  const blob = new Uint8Array(utilLimit === null ? 80 : 88), view = new DataView(blob.buffer);
+  [1, index, base, overrides.length].forEach((value, i) => view.setUint32(i * 4, value, true));
+  overrides.forEach(([fps, amount], i) => {
+    view.setUint32(16 + i * 8, fps, true);
+    view.setUint32(20 + i * 8, amount, true);
+  });
+  if (utilLimit !== null) view.setUint32(80, utilLimit, true);
+  return {blob, mode, base, overrides, utilLimit};
+}
+
+function frameFasProtocol(settings) {
+  return encodeFrameFas(readFrameFasSettings(settings));
+}
+
+function frameSettingsProtocol(settings, seed, sceneSeed, auxSeed) {
+  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "sceneBaseMode", "sceneApps", "sceneAux", "sceneGpuLock", "fasMode", "fasMarginFps", "fasProfiles", "fasUtilLimits", "fps", "fallbackFps", "games", "relations", "gameCpuMHz"];
+  for (const key of Object.keys(settings)) if (!fields.includes(key)) throw new Error(`未知配置项：${key}`);
+  for (const key of ["enabled", "cpu", "gpu", "observe", "relations"])
+    if (typeof settings[key] !== "boolean") throw new Error(`${key} 必须为布尔值`);
+  if (!settings.cpu && !settings.gpu && settings.enabled) throw new Error("请至少启用 CPU 或 GPU 控制");
+  const rates = value => {
+    value = typeof value === "number" ? [value] : value;
+    if (!Array.isArray(value) || !value.length || value.length > 8 || value.some((v, i) =>
+      !Number.isInteger(v) || v < 15 || v > 240 || (i && v <= value[i - 1])))
+      throw new Error("帧率应为 15～240 范围内、递增且不重复的 1～8 个整数");
+    return value;
+  };
+  const fps = rates(settings.fps);
+  const fallback = Object.hasOwn(settings, "fallbackFps") ? rates(settings.fallbackFps) : fps;
+  if (!settings.games || typeof settings.games !== "object" || Array.isArray(settings.games))
+    throw new Error("games 必须为包名到帧率列表的映射");
+  const games = Object.create(null);
+  for (const [name, values] of Object.entries(settings.games)) {
+    if (!/^[A-Za-z0-9_.]{1,127}$/.test(name)) throw new Error(`包名不合法：${name}`);
+    games[name] = rates(values);
+  }
+  const fromBase64 = value => Uint8Array.from(typeof atob === "function" ? atob(value) :
+    Buffer.from(value, "base64").toString("binary"), c => c.charCodeAt(0));
+  const selectedBase = Object.hasOwn(settings, "sceneBaseMode") ? settings.sceneBaseMode : settings.sceneMode;
+  if (!["powersave", "balance", "performance", "fast"].includes(selectedBase))
+    throw new Error("sceneBaseMode 必须为合法的 Scene 模式");
+  const baseMode = selectedBase === "fast" ? "balance" : selectedBase;
+  if (!Object.hasOwn(seed.profiles, baseMode)) throw new Error("场景模式不存在");
+  const config = fromBase64(seed.profiles[baseMode]);
+  if (config.length !== 592) throw new Error("配置模板版本不匹配");
+  const cfg = new DataView(config.buffer, config.byteOffset, config.byteLength);
+  cfg.setUint32(4, (settings.cpu ? 1 : 0) | (settings.gpu ? 2 : 0) | (settings.observe ? 4 : 0), true);
+  cfg.setUint32(12, fps.at(-1), true);
+  cfg.setUint32(140, fps.length, true);
+  for (let i = 0; i < 8; i++) cfg.setUint32(560 + i * 4, fps[i] ?? 0, true);
+  if (!Array.isArray(settings.gameCpuMHz) || settings.gameCpuMHz.length !== seed.cpuIds.length)
+    throw new Error("游戏 CPU 频率范围数量错误");
+  settings.gameCpuMHz.forEach((limits, i) => {
+    if (!Array.isArray(limits) || limits.length !== 2 || limits.some(v => !Number.isFinite(v)))
+      throw new Error("CPU 频率范围格式错误");
+    const khz = limits.map(v => Math.round(v * 1000));
+    if (khz[0] < seed.cpuBounds[i][0] || khz[1] > seed.cpuBounds[i][1] || khz[0] > khz[1])
+      throw new Error(`policy${seed.cpuIds[i]} 的频率超出硬件范围`);
+    cfg.setUint32(144 + i * 104 + 16, khz[0], true);
+    cfg.setUint32(144 + i * 104 + 20, khz[1], true);
+  });
+
+  const names = [...new Set([...Object.keys(seed.relations.rules), ...Object.keys(games)])].sort();
+  if (names.length > 32) throw new Error("逐游戏配置超过 32 项");
+  const table = new Uint8Array(7556), view = new DataView(table.buffer);
+  [1, names.length, seed.cpuIds.length, 0, ...seed.cpuIds].forEach((v, i) => view.setUint32(i * 4, v, true));
+  function rule(name, index, overrides) {
+    const start = 32 + index * 228;
+    table.set(new TextEncoder().encode(name), start);
+    const relations = settings.relations ? overrides : {};
+    for (let i = 0; i < 4; i++) {
+      const rel = relations[i] ?? [0, 0, 0, 0];
+      view.setUint32(start + 128 + i * 16, rel[0], true);
+      view.setUint32(start + 132 + i * 16, rel[1], true);
+      view.setInt32(start + 136 + i * 16, rel[2], true);
+      view.setInt32(start + 140 + i * 16, rel[3], true);
+    }
+    const values = games[name] ?? fallback;
+    view.setUint32(start + 192, values.length, true);
+    values.forEach((v, i) => view.setUint32(start + 196 + i * 4, v, true));
+  }
+  rule("", 0, seed.relations.fallback);
+  names.forEach((name, i) => rule(name, i + 1, Object.hasOwn(seed.relations.rules, name) ?
+    seed.relations.rules[name] : seed.relations.fallback));
+  const tuning = readFrameFasSettings(settings), fas = encodeFrameFas(tuning).blob;
+  if (settings.sceneAux !== undefined && typeof settings.sceneAux !== "boolean") throw new Error("sceneAux 必须为布尔值");
+  if (settings.sceneGpuLock !== undefined && typeof settings.sceneGpuLock !== "boolean") throw new Error("sceneGpuLock 必须为布尔值");
+  const encodeAux = typeof module !== "undefined" ? require("./scene_aux_protocol.js").frameSceneAuxProtocol : frameSceneAuxProtocol;
+  const aux = encodeAux(settings, auxSeed).table;
+  const normalized = {...settings, fasMode: tuning.mode};
+  if (Object.hasOwn(settings, "fasProfiles")) normalized.fasProfiles = tuning.profiles;
+  if (Object.hasOwn(settings, "fasUtilLimits")) normalized.fasUtilLimits = tuning.utilLimits;
+  const json = new TextEncoder().encode(JSON.stringify(normalized, null, 2) + "\n");
+  if (json.length > 49152) throw new Error("配置文件过大");
+  const encodeScene = typeof module !== "undefined" ? require("./scene_protocol.js").frameSceneProtocol : frameSceneProtocol;
+  const scene = encodeScene(settings, sceneSeed).table;
+  const requiresScene = settings.sceneMode === "fast" || Object.keys(settings.sceneApps ?? {}).length > 0 ||
+    selectedBase !== settings.sceneMode;
+  const withAux = settings.sceneAux === true, headerSize = withAux ? 40 : 32;
+  const payload = new Uint8Array(headerSize + json.length + config.length + table.length + scene.length + fas.length + (withAux ? aux.length : 0));
+  const envelope = new DataView(payload.buffer);
+  const words = withAux ? [0x46505333, json.length, config.length, table.length, scene.length, fas.length, aux.length,
+    settings.enabled ? 1 : 0, requiresScene ? 1 : 0, 1] : [0x46505332, json.length, config.length, table.length, scene.length, fas.length,
+    settings.enabled ? 1 : 0, requiresScene ? 1 : 0];
+  words.forEach((v, i) => envelope.setUint32(i * 4, v, true));
+  let cursor = headerSize;
+  for (const bytes of [json, config, table, scene, fas, ...(withAux ? [aux] : [])]) {
+    payload.set(bytes, cursor); cursor += bytes.length;
+  }
+  return {payload, config, table, scene, fas, aux, settings: normalized};
+}
+
+if (typeof module !== "undefined") module.exports = {frameSettingsProtocol, frameFasProtocol, frameFasProfiles, frameFasUtilLimits};

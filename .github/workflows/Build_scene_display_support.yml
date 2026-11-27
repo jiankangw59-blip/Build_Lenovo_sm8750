@@ -1,0 +1,37 @@
+name: Build Scene display persistence support
+
+on:
+  push:
+    branches: [codex/ace6-frame-policy]
+    paths:
+      - .github/workflows/Build_scene_display_support.yml
+      - efficiency/scene_sampling_opt/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scene-display:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platforms;android-36 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
+      - name: Exercise production refresh hook against the exact callback contracts
+        run: python3 efficiency/scene_sampling_opt/tests/run_refresh_persistence.py
+      - name: Compile unsigned module without uploading any signing key
+        run: python3 efficiency/scene_sampling_opt/build_cloud.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: scene-display-support-unsigned
+          path: ${{ runner.temp }}/scene-display-artifact/
+          if-no-files-found: error
+          retention-days: 7

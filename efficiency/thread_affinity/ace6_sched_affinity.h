@@ -2,10 +2,12 @@
 #ifndef ACE6_SCHED_AFFINITY_H
 #define ACE6_SCHED_AFFINITY_H
 
+#include <linux/types.h>
+
 struct task_struct;
 struct cpumask;
 
 int ace6_set_task_affinity(struct task_struct *task, const struct cpumask *mask,
-			   const struct cpumask *requested);
+			   const struct cpumask *requested, bool *exiting);
 
 #endif

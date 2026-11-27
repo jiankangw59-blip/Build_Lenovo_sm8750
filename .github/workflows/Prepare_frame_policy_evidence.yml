@@ -1,0 +1,77 @@
+name: Verify and trim an existing frame policy candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run:
+        default: '45766812184'
+        type: string
+      test_run:
+        default: '45766754638'
+        type: string
+      source:
+        default: '21b91a50f7e6e32090c6b767c559ec3739377d85'
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BUILD_RUN: ${{ inputs.build_run || '45766812184' }}
+      TEST_RUN: ${{ inputs.test_run || '45766754638' }}
+      EXPECTED_SOURCE: ${{ inputs.source || '21b91a50f7e6e32090c6b767c559ec3739377d85' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check build and test identity
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          if not re.fullmatch(r'[0-9a-f]{40}', os.environ['EXPECTED_SOURCE']):
+              raise SystemExit('Expected a full source SHA')
+          for field in ('BUILD_RUN', 'TEST_RUN'):
+              run = str(int(os.environ[field]))
+              data = json.loads(subprocess.check_output([
+                  'gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{run}']))
+              if data['conclusion'] != 'success' or data['head_sha'] != os.environ['EXPECTED_SOURCE']:
+                  raise SystemExit('Build/test identity or result mismatch')
+          PY
+      - uses: actions/download-artifact@v5
+        with:
+          name: preflash-verification_6.6.118
+          run-id: ${{ env.BUILD_RUN }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/candidate
+      - uses: actions/download-artifact@v5
+        with:
+          name: preflash-verification_6.6.118
+          run-id: 45642470781
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/baseline
+      - uses: actions/download-artifact@v5
+        with:
+          name: frame-policy-kunit-debug-evidence
+          run-id: ${{ env.TEST_RUN }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/kunit
+      - name: Verify KMI, exact configuration delta, Image provenance and linked notes
+        run: |
+          python3 efficiency/frame_policy/prepare_ci_evidence.py \
+            --candidate "$RUNNER_TEMP/candidate" --baseline "$RUNNER_TEMP/baseline" \
+            --kunit "$RUNNER_TEMP/kunit" --source "$EXPECTED_SOURCE" \
+            --output "$RUNNER_TEMP/summary"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: frame-policy-preflash-summary
+          path: ${{ runner.temp }}/summary
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v6
+        with:
+          name: frame-policy-Image
+          path: ${{ runner.temp }}/candidate/Image
+          if-no-files-found: error

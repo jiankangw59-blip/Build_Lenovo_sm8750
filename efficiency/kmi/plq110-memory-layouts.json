@@ -1,0 +1,390 @@
+{
+  "pglist_data": {
+    "size": 11264,
+    "members": [
+      {
+        "name": "node_zones",
+        "offset_bits": 0,
+        "bitfield_bits": 0,
+        "type": "array[5]:struct:zone:1664"
+      },
+      {
+        "name": "node_zonelists",
+        "offset_bits": 66560,
+        "bitfield_bits": 0,
+        "type": "array[1]:struct:zonelist:96"
+      },
+      {
+        "name": "nr_zones",
+        "offset_bits": 67328,
+        "bitfield_bits": 0,
+        "type": "int:int:4:16777248"
+      },
+      {
+        "name": "node_size_lock",
+        "offset_bits": 67360,
+        "bitfield_bits": 0,
+        "type": "struct:spinlock:4"
+      },
+      {
+        "name": "node_start_pfn",
+        "offset_bits": 67392,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long:8:64"
+      },
+      {
+        "name": "node_present_pages",
+        "offset_bits": 67456,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long:8:64"
+      },
+      {
+        "name": "node_spanned_pages",
+        "offset_bits": 67520,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long:8:64"
+      },
+      {
+        "name": "node_id",
+        "offset_bits": 67584,
+        "bitfield_bits": 0,
+        "type": "int:int:4:16777248"
+      },
+      {
+        "name": "kswapd_wait",
+        "offset_bits": 67648,
+        "bitfield_bits": 0,
+        "type": "struct:wait_queue_head:24"
+      },
+      {
+        "name": "pfmemalloc_wait",
+        "offset_bits": 67840,
+        "bitfield_bits": 0,
+        "type": "struct:wait_queue_head:24"
+      },
+      {
+        "name": "reclaim_wait",
+        "offset_bits": 68032,
+        "bitfield_bits": 0,
+        "type": "array[4]:struct:wait_queue_head:24"
+      },
+      {
+        "name": "nr_writeback_throttled",
+        "offset_bits": 68800,
+        "bitfield_bits": 0,
+        "type": "struct::4"
+      },
+      {
+        "name": "nr_reclaim_start",
+        "offset_bits": 68864,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long:8:64"
+      },
+      {
+        "name": "kswapd_lock",
+        "offset_bits": 68928,
+        "bitfield_bits": 0,
+        "type": "struct:mutex:48"
+      },
+      {
+        "name": "kswapd",
+        "offset_bits": 69312,
+        "bitfield_bits": 0,
+        "type": "pointer:struct:task_struct:4800"
+      },
+      {
+        "name": "kswapd_order",
+        "offset_bits": 69376,
+        "bitfield_bits": 0,
+        "type": "int:int:4:16777248"
+      },
+      {
+        "name": "kswapd_highest_zoneidx",
+        "offset_bits": 69408,
+        "bitfield_bits": 0,
+        "type": "kind6:zone_type:4"
+      },
+      {
+        "name": "kswapd_failures",
+        "offset_bits": 69440,
+        "bitfield_bits": 0,
+        "type": "int:int:4:16777248"
+      },
+      {
+        "name": "android_oem_data1",
+        "offset_bits": 69504,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long long:8:64"
+      },
+      {
+        "name": "kcompactd_max_order",
+        "offset_bits": 69568,
+        "bitfield_bits": 0,
+        "type": "int:int:4:16777248"
+      },
+      {
+        "name": "kcompactd_highest_zoneidx",
+        "offset_bits": 69600,
+        "bitfield_bits": 0,
+        "type": "kind6:zone_type:4"
+      },
+      {
+        "name": "kcompactd_wait",
+        "offset_bits": 69632,
+        "bitfield_bits": 0,
+        "type": "struct:wait_queue_head:24"
+      },
+      {
+        "name": "kcompactd",
+        "offset_bits": 69824,
+        "bitfield_bits": 0,
+        "type": "pointer:struct:task_struct:4800"
+      },
+      {
+        "name": "proactive_compact_trigger",
+        "offset_bits": 69888,
+        "bitfield_bits": 0,
+        "type": "int:_Bool:1:67108872"
+      },
+      {
+        "name": "totalreserve_pages",
+        "offset_bits": 69952,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long:8:64"
+      },
+      {
+        "name": "_pad1_",
+        "offset_bits": 70144,
+        "bitfield_bits": 0,
+        "type": "struct:cacheline_padding:0"
+      },
+      {
+        "name": "deferred_split_queue",
+        "offset_bits": 70144,
+        "bitfield_bits": 0,
+        "type": "struct:deferred_split:32"
+      },
+      {
+        "name": "__lruvec",
+        "offset_bits": 70400,
+        "bitfield_bits": 0,
+        "type": "struct:lruvec:1600"
+      },
+      {
+        "name": "flags",
+        "offset_bits": 83200,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long:8:64"
+      },
+      {
+        "name": "mm_walk",
+        "offset_bits": 83264,
+        "bitfield_bits": 0,
+        "type": "struct:lru_gen_mm_walk:224"
+      },
+      {
+        "name": "memcg_lru",
+        "offset_bits": 85056,
+        "bitfield_bits": 0,
+        "type": "struct:lru_gen_memcg:232"
+      },
+      {
+        "name": "_pad2_",
+        "offset_bits": 87040,
+        "bitfield_bits": 0,
+        "type": "struct:cacheline_padding:0"
+      },
+      {
+        "name": "per_cpu_nodestats",
+        "offset_bits": 87040,
+        "bitfield_bits": 0,
+        "type": "pointer:struct:per_cpu_nodestat:43"
+      },
+      {
+        "name": "vm_stat",
+        "offset_bits": 87104,
+        "bitfield_bits": 0,
+        "type": "array[42]:struct::8"
+      },
+      {
+        "name": "android_kabi_reserved1",
+        "offset_bits": 89792,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long long:8:64"
+      }
+    ]
+  },
+  "scan_control": {
+    "size": 128,
+    "members": [
+      {
+        "name": "nr_to_reclaim",
+        "offset_bits": 0,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long:8:64"
+      },
+      {
+        "name": "nodemask",
+        "offset_bits": 64,
+        "bitfield_bits": 0,
+        "type": "pointer:struct::8"
+      },
+      {
+        "name": "target_mem_cgroup",
+        "offset_bits": 128,
+        "bitfield_bits": 0,
+        "type": "pointer:struct:mem_cgroup:2304"
+      },
+      {
+        "name": "anon_cost",
+        "offset_bits": 192,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long:8:64"
+      },
+      {
+        "name": "file_cost",
+        "offset_bits": 256,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long:8:64"
+      },
+      {
+        "name": "may_deactivate",
+        "offset_bits": 320,
+        "bitfield_bits": 2,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "force_deactivate",
+        "offset_bits": 322,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "skipped_deactivate",
+        "offset_bits": 323,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "may_writepage",
+        "offset_bits": 324,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "may_unmap",
+        "offset_bits": 325,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "may_swap",
+        "offset_bits": 326,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "proactive",
+        "offset_bits": 327,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "memcg_low_reclaim",
+        "offset_bits": 328,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "memcg_low_skipped",
+        "offset_bits": 329,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "hibernation_mode",
+        "offset_bits": 330,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "compaction_ready",
+        "offset_bits": 331,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "cache_trim_mode",
+        "offset_bits": 332,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "file_is_tiny",
+        "offset_bits": 333,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "no_demotion",
+        "offset_bits": 334,
+        "bitfield_bits": 1,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "order",
+        "offset_bits": 336,
+        "bitfield_bits": 0,
+        "type": "int:signed char:1:16777224"
+      },
+      {
+        "name": "priority",
+        "offset_bits": 344,
+        "bitfield_bits": 0,
+        "type": "int:signed char:1:16777224"
+      },
+      {
+        "name": "reclaim_idx",
+        "offset_bits": 352,
+        "bitfield_bits": 0,
+        "type": "int:signed char:1:16777224"
+      },
+      {
+        "name": "gfp_mask",
+        "offset_bits": 384,
+        "bitfield_bits": 0,
+        "type": "int:unsigned int:4:32"
+      },
+      {
+        "name": "nr_scanned",
+        "offset_bits": 448,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long:8:64"
+      },
+      {
+        "name": "nr_reclaimed",
+        "offset_bits": 512,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long:8:64"
+      },
+      {
+        "name": "nr",
+        "offset_bits": 576,
+        "bitfield_bits": 0,
+        "type": "struct::28"
+      },
+      {
+        "name": "reclaim_state",
+        "offset_bits": 832,
+        "bitfield_bits": 0,
+        "type": "struct:reclaim_state:16"
+      },
+      {
+        "name": "android_vendor_data1",
+        "offset_bits": 960,
+        "bitfield_bits": 0,
+        "type": "int:unsigned long long:8:64"
+      }
+    ]
+  }
+}

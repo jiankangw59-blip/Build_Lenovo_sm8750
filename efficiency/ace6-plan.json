@@ -1,0 +1,37 @@
+{
+  "device": {"model": "PLQ110", "soc": "SM8750", "os": "ColorOS 16", "kernel_series": "6.6", "required_kernel_version": "6.6.89", "source_commit": "c1802dd6f3343e71c166a3c67c50554c81880b6e", "selected_cpuidle_governor": "qcom-cpu-lpm", "preserve_platform_cpuidle_governor": true},
+  "reference": {
+    "requested_repository": "https://github.com/whitewhale0612/android_kernel_common_oneplus_sm8750-C16",
+    "public_head": "5d6a242c375e656097504b02a2cb613ae090028e",
+    "public_head_contains_source": false,
+    "retained_source_repository": "https://github.com/Wcoom/oneplus_sm8750_kernel",
+    "retained_source_commit": "13d291aef3d1d9607ad3fa5ff30dc23b2888a3da",
+    "integration_method": "Audit and port selected changes onto the device-specific official source; do not inherit the 13T defconfig or hardware overrides."
+  },
+  "rekernel": {
+    "repository": "https://github.com/Sakion-Team/Re-Kernel",
+    "path": "LKM-Source",
+    "commit": "ac08296174d7fb2801c0eee1084f067a34f8a0fe",
+    "required_linkage": "built-in",
+    "preserve_official_functionality_and_protocol": true,
+    "integration_changes_only": ["Kbuild linkage", "Kconfig selection", "binder relative include path", "module_init to late_initcall"],
+    "builtin_reference": {"repository": "jiankangw59-blip/Build_Oneplus_Realme_Action", "branch": "codex/rekernel-builtin", "commit": "0e47686327464c7612f34b5feee5119793635ae7", "source_path": "patch/rekernel-builtin.patch"},
+    "required_transport": "Generic Netlink; verified from the phone's installed and loaded ReKernel ELF",
+    "replace_existing_ksu_loader_only_after_runtime_verification": true
+  },
+  "memory_route": "target-crystal-hybridswap-zms-lz4kds; native-and-crystal-lz4kd-controls-retained",
+  "preserve": ["BakaSU", "SUSFS", "FUSE dentry revalidation 3943780", "AppOpt rules and thread affinity", "factory WALT and thermal/charging/network modules", "factory HMBIRD implementation"],
+  "stages": [
+    {"id": "baseline", "requires": ["cpuidle-teo-menu", "pending-ipi", "rcu-lazy", "power-efficient-workqueue", "workqueue-cpumask-3f", "native-zram-lz4kd-writeback", "mglru-and-mm-fixes", "f2fs-compression-atgc-gc-merge", "f2fs-idle-gc", "erofs-pcpu-and-bounce-retry", "bbr3-fq-codel-ecn2", "builtin-rekernel", "clang18-thinlto-o2", "kmi-preflight", "five-device-gates", "idle-power-baseline"]},
+    {"id": "kcompressd", "after": "baseline", "single_changed_feature": "Kcompressd-Unofficial", "requires": ["readback-integrity", "kmi-preflight", "five-device-gates", "controlled-comparison"]},
+    {"id": "le9uo", "after": "baseline", "single_changed_feature": "le9uo", "requires": ["readback-integrity", "kmi-preflight", "five-device-gates", "controlled-comparison"]},
+    {"id": "crystal", "after": "kcompressd", "single_changed_feature": "Crystal HybridSwap + ZMS, pure Crypto API LZ4KD control", "requires": ["pinned-source-import", "kmi-preflight", "independent-backing-file", "packed-stream-flush-and-physical-readback", "five-device-gates", "controlled-backing-write-comparison"]},
+    {"id": "crystal-lz4kds-test", "after": "crystal", "single_changed_feature": "SDDC/LZ4KDS support with independent zramN testing", "requires": ["kmi-preflight", "codec-and-state-kunit-tests", "alias-and-delta-counters", "generation-and-overwrite-readback", "packed-backing-cold-read"]},
+    {"id": "crystal-lz4kds", "after": "crystal-lz4kds-test", "single_changed_feature": "Use LZ4KDS as the primary ZRAM compressor", "requires": ["kmi-preflight", "approved-boot-and-rollback", "five-device-gates", "main-zram-owned-data-readback", "longer-stability-and-controlled-comparison"]}
+  ],
+  "optional_review": ["factory HMBIRD exception-path fixes", "SM_IDLE with unchanged exported structure layout", "ADIOS as an isolated A/B variant", "ARM64 memcpy/strlen/crypto assembly where applicable"],
+  "retained_controls": ["native ZRAM with pure LZ4KD", "Crystal/ZMS with pure LZ4KD"],
+  "experiments": [{"id": "lz4kds_lab", "purpose": "Restore source against decompiled KO and DWARF, isolated codec tests", "enabled_on_phone": false}],
+  "forbidden": ["UKSM", "BFQ", "device-tree overwriter", "module overlay framework", "13T charging overrides", "BORE", "HZ=1000", "voltage table changes", "factory module blacklisting", "task_struct or rq KMI layout changes"],
+  "completion_requires": ["successful reproducible kernel build", "boot and rollback artifacts", "actual factory module load verification", "RCU lazy active on all eight CPUs", "workqueue mask 3f and worker affinity verification", "pure lz4kd with actual writeback and verified readback", "official built-in ReKernel with no loaded duplicate ko and successful Generic Netlink version query; upstream does not create proc nodes in this transport", "idle-current baseline", "required isolated follow-up comparisons"]
+}

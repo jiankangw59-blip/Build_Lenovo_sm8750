@@ -1,0 +1,88 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef FRAME_POLICY_UAPI_H
+#define FRAME_POLICY_UAPI_H
+
+#include <linux/ioctl.h>
+#include <linux/types.h>
+
+#define FP_ABI 4
+#define FP_MAX_CPUS 4
+#define FP_MAX_MARGINS 8
+#define FP_MAX_RATES 8
+#define FP_MAX_GAME_RULES 32
+#define FP_GAME_RULES_ABI 1
+#define FP_REL_NONE 0U
+#define FP_REL_ABSOLUTE 1U
+#define FP_REL_POLICY 2U
+#define FP_CPU 1U
+#define FP_GPU 2U
+#define FP_OBSERVE 4U
+#define FP_FLAGS (FP_CPU | FP_GPU | FP_OBSERVE)
+
+struct fp_limits {
+	__u32 min_khz;
+	__u32 max_khz;
+};
+
+struct fp_cpu_config {
+	__u32 cpu;
+	__u32 reserved;
+	struct fp_limits scene;
+	struct fp_limits game;
+	struct fp_limits idle;
+	__u32 margin_count;
+	__u32 reserved2;
+	struct {
+		__u32 threshold_khz;
+		__u32 percent;
+	} margins[FP_MAX_MARGINS];
+};
+
+struct fp_config {
+	__u32 abi;
+	__u32 flags;
+	__u32 cpu_count;
+	__u32 target_fps;
+	__u64 probe_offset;
+	__u8 probe_bytes[16];
+	char gpu_device[64];
+	struct fp_limits gpu_scene;
+	struct fp_limits gpu_game;
+	struct fp_limits gpu_idle;
+	__u32 gpu_scene_percent;
+	__u32 gpu_game_percent;
+	__s32 gpu_percent_fd;
+	__u32 fps_count;
+	struct fp_cpu_config cpus[FP_MAX_CPUS];
+	__u32 fps_values[FP_MAX_RATES];
+};
+
+struct fp_relation {
+	__u32 kind;
+	__u32 reference;
+	__s32 minimum_khz;
+	__s32 maximum_khz;
+};
+
+struct fp_game_rule {
+	char package[128];
+	struct fp_relation cpus[FP_MAX_CPUS];
+	__u32 fps_count;
+	__u32 fps_values[FP_MAX_RATES];
+};
+
+struct fp_game_rules {
+	__u32 abi;
+	__u32 count;
+	__u32 cpu_count;
+	__u32 reserved;
+	__u32 cpu_ids[FP_MAX_CPUS];
+	struct fp_game_rule fallback;
+	struct fp_game_rule rules[FP_MAX_GAME_RULES];
+};
+
+#define FP_CONFIG _IOW('F', 0x80, struct fp_config)
+#define FP_DISABLE _IO('F', 0x81)
+#define FP_GAME_RULES _IOW('F', 0x82, struct fp_game_rules)
+
+#endif

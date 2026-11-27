@@ -1,0 +1,14 @@
+config FRAME_POLICY
+	bool "Event-driven Android frame and Scene frequency policies"
+	depends on ARM64 && UPROBES && CPU_FREQ && PM && TRACING
+	depends on PERF_EVENTS && SYNC_FILE && INPUT
+	default n
+	help
+	  Provides mutually exclusive Scene and game frame frequency requests.
+	  Runtime configuration and an existing Scene event owner are required.
+	  CPU and GPU policies can be enabled independently.
+
+config FRAME_POLICY_KUNIT_TEST
+	bool "Frame policy context and fence lifecycle KUnit tests"
+	depends on FRAME_POLICY && KUNIT=y
+	default n
