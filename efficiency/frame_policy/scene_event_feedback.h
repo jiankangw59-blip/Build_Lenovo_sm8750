@@ -56,6 +56,18 @@ static inline bool fp_scene_event_valid(const struct fp_scene_event_state *state
 	return epoch && state->epoch == epoch;
 }
 
+/* A continuously attached panel can outlive an eligible foreground scene.
+ * Keep the absolute input intervals and discard profile-specific notify state.
+ */
+static inline bool fp_scene_event_rebase_gesture(struct fp_scene_event_state *state,
+						u64 epoch, u64 now_ns)
+{
+	state->epoch = epoch;
+	state->kswapd = (struct fp_scene_limiter_notify){};
+	state->notify_pulse = (struct fp_scene_limiter_pulse){};
+	return fp_scene_limiter_pulse_advance(&state->gesture_pulse, now_ns);
+}
+
 /* Release clears gesture recognition. A previously published pulse expires
  * on its own deadline and may have one successor queued by earlier motion.
  */

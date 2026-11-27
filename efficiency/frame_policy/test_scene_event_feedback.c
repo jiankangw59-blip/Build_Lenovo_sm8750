@@ -78,6 +78,33 @@ static void test_kswapd_and_earliest_deadline(void)
 	assert(!state.kswapd.running_ns && !state.watch_kswapd && !state.gesture_contact);
 }
 
+static void test_gesture_rebase_keeps_absolute_intervals(void)
+{
+	struct fp_scene_event_state state;
+	struct fp_scene_event_snapshot snapshot;
+	const u64 epoch = 8, start = 10000000, duration = 500000000;
+	const u64 first_deadline = start + 2 + duration;
+
+	fp_scene_event_reset(&state, epoch, &active_config);
+	fp_scene_event_touch_contact(&state, epoch, start, 1, true);
+	assert(!fp_scene_event_touch_axis(&state, epoch, start, 1, 0, 10, 1000, 1800));
+	assert(!fp_scene_event_touch_axis(&state, epoch, start, 1, 1, 400, 1000, 1800));
+	assert(!fp_scene_event_rebase_gesture(&state, epoch + 1, start + 1));
+	assert(!fp_scene_event_touch_axis(&state, epoch, start + 2, 1, 0, 70, 1000, 1800));
+	assert(fp_scene_event_touch_axis(&state, epoch + 1, start + 2, 1, 0, 70, 1000, 1800));
+	assert(!fp_scene_event_touch_axis(&state, epoch + 1, start + 3, 1, 0, 71, 1000, 1800));
+	assert(!fp_scene_event_sched_switch(&state, epoch + 1, start + 4, 185, false, true));
+	assert(fp_scene_event_sched_switch(&state, epoch + 1, start + 6600005, 185, true, false));
+	assert(fp_scene_event_rebase_gesture(&state, epoch + 2, start + 6600006));
+	snapshot = fp_scene_event_snapshot(&state, epoch + 2, start + 6600006);
+	assert(snapshot.gesture_active && snapshot.force_core && !snapshot.notify_active);
+	assert(snapshot.next_deadline_ns == first_deadline && state.gesture_pulse.pending_ns == duration);
+	assert(fp_scene_event_rebase_gesture(&state, epoch + 3, first_deadline + 1));
+	assert(state.gesture_pulse.deadline_ns == first_deadline + duration);
+	assert(!fp_scene_event_rebase_gesture(&state, epoch + 4, first_deadline + duration));
+	assert(!state.gesture_pulse.deadline_ns && !state.gesture_pulse.pending_ns);
+}
+
 static void test_late_expiry_and_disabled_options(void)
 {
 	struct fp_scene_event_state state;
@@ -125,6 +152,7 @@ int main(void)
 {
 	test_live_gesture_and_stale_epoch();
 	test_kswapd_and_earliest_deadline();
+	test_gesture_rebase_keeps_absolute_intervals();
 	test_late_expiry_and_disabled_options();
 	test_kswapd_switch_out_boundary();
 	puts("Scene event feedback: trusted inputs, epoch invalidation and one-shot deadlines passed");

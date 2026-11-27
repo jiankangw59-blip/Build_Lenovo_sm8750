@@ -792,6 +792,14 @@ static void fp_test_mt_contact(bool down, int x, int y)
 	input_sync(fp_test_activity_input);
 }
 
+static void fp_test_mt_replace_during_handoff(void)
+{
+	fp_test_mt_contact(false, 0, 0);
+	fp_test_mt_contact(true, 10, 730);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, 70);
+	input_sync(fp_test_activity_input);
+}
+
 static void frame_test_scene_native_additive_and_physical_gesture(struct kunit *test)
 {
 	struct fp_scene_aux_cpu metadata = {
@@ -804,8 +812,11 @@ static void frame_test_scene_native_additive_and_physical_gesture(struct kunit *
 	struct fp_test_aux_value *values;
 	struct fp_scene_table *table;
 	struct fp_scene_event_snapshot events;
+	struct fp_scene_event_config changed = {
+		.gesture_enabled = true, .gesture_duration_ms = 700,
+	};
 	struct sab_status activity;
-	u64 before;
+	u64 before, epoch, deadline;
 	int error;
 
 	KUNIT_ASSERT_EQ(test, cpufreq_register_driver(&fp_test_cpufreq_driver), 0);
@@ -868,6 +879,23 @@ static void frame_test_scene_native_additive_and_physical_gesture(struct kunit *
 	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 1500000);
 	fp_test_mt_contact(false, 0, 0);
 	fp_test_mt_contact(true, 10, 400);
+	/* A release/replacement in one report still looks like one contact. */
+	input_mt_report_slot_state(fp_test_activity_input, MT_TOOL_FINGER, false);
+	input_mt_report_slot_state(fp_test_activity_input, MT_TOOL_FINGER, true);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, 540);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_Y, 480);
+	input_sync(fp_test_activity_input);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_EXPECT_FALSE(test, events.gesture_active);
+	fp_test_mt_contact(false, 0, 0);
+	fp_test_mt_contact(true, 10, 410);
+	epoch = scene_activity_epoch;
+	mutex_lock(&config_lock);
+	frame_policy_scene_full("frame.policy.kunit.native.next", false, false, 401);
+	frame_policy_scene_full("frame.policy.kunit.native.coalesced", false, false, 402);
+	mutex_unlock(&config_lock);
+	flush_work(&control_work);
+	KUNIT_ASSERT_EQ(test, scene_activity_epoch, epoch + 2);
 	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, 69);
 	input_sync(fp_test_activity_input);
 	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
@@ -882,16 +910,123 @@ static void frame_test_scene_native_additive_and_physical_gesture(struct kunit *
 	KUNIT_EXPECT_FALSE(test, events.notify_active);
 	KUNIT_EXPECT_GT(test, events.next_deadline_ns, ktime_get_ns());
 	KUNIT_EXPECT_TRUE(test, delayed_work_pending(&scene_feedback_deadline));
+	deadline = events.next_deadline_ns;
+	epoch = scene_activity_epoch;
+	mutex_lock(&config_lock);
+	frame_policy_scene_full("frame.policy.kunit.native.last", false, false, 403);
+	/* Reproduce the end of a control round overtaken by a normal foreground. */
+	reconcile_scene_activity();
+	scene_activity_backend_feedback(epoch, ktime_get_ns(), &events);
+	mutex_unlock(&config_lock);
+	KUNIT_EXPECT_TRUE(test, events.gesture_active);
+	KUNIT_EXPECT_EQ(test, events.next_deadline_ns, deadline);
+	flush_work(&control_work);
+	scene_activity_backend_test_flush();
+	irq_work_sync(&scene_irq_work);
+	flush_work(&scene_work);
+	KUNIT_ASSERT_EQ(test, scene_activity_epoch, epoch + 1);
+	scene_activity_backend_feedback(epoch, ktime_get_ns(), &events);
+	KUNIT_EXPECT_FALSE(test, events.gesture_active);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_ASSERT_TRUE(test, events.gesture_active);
+	KUNIT_EXPECT_EQ(test, events.next_deadline_ns, deadline);
+	KUNIT_EXPECT_EQ(test, scene_feedback_at, deadline);
+	KUNIT_EXPECT_TRUE(test, delayed_work_pending(&scene_feedback_deadline));
+	/* A different slot moving and disappearing inside one SYN must not
+	 * queue a successor while the original slot remains the sole contact.
+	 */
+	input_mt_slot(fp_test_activity_input, 1);
+	input_mt_report_slot_state(fp_test_activity_input, MT_TOOL_FINGER, true);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, 300);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_Y, 600);
+	input_mt_report_slot_state(fp_test_activity_input, MT_TOOL_FINGER, false);
+	input_sync(fp_test_activity_input);
 	fp_test_mt_contact(false, 0, 0);
 	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
 	KUNIT_EXPECT_TRUE(test, events.gesture_active); /* release does not revoke the pulse */
-	frame_policy_scene_full("frame.policy.kunit.native-game", true, true, 401);
+	epoch = scene_activity_epoch;
+	scene_activity_backend_test_flush();
+	scene_activity_changed(epoch, true);
+	irq_work_sync(&activity_control_irq);
+	flush_work(&control_work);
+	irq_work_sync(&scene_irq_work);
+	flush_work(&scene_work);
+	KUNIT_EXPECT_TRUE(test, scene_inactive);
+	KUNIT_EXPECT_EQ(test, scene_activity_epoch, epoch);
+	KUNIT_EXPECT_EQ(test, scene_feedback_at, deadline);
+	KUNIT_EXPECT_TRUE(test, delayed_work_pending(&scene_feedback_deadline));
+	scene_activity_backend_feedback(scene_activity_epoch, deadline, &events);
+	KUNIT_EXPECT_FALSE(test, events.gesture_active);
+	/* A different finger begins and crosses the threshold while the
+	 * activity worker is being reconfigured for a normal foreground.
+	 */
+	fp_test_mt_contact(true, 540, 500);
+	scene_activity_backend_test_configure_hook(fp_test_mt_replace_during_handoff);
+	frame_policy_scene_full("frame.policy.kunit.native.paused", false, false, 404);
+	flush_work(&control_work);
+	scene_activity_backend_test_configure_hook(NULL);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_ASSERT_TRUE(test, events.gesture_active);
+	fp_test_mt_contact(false, 0, 0);
+	scene_activity_backend_feedback(scene_activity_epoch, events.next_deadline_ns, &events);
+	KUNIT_EXPECT_FALSE(test, events.gesture_active);
+	fp_test_mt_contact(true, 10, 510);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, 70);
+	input_sync(fp_test_activity_input);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_ASSERT_TRUE(test, events.gesture_active);
+	scene_activity_backend_set_feedback(scene_activity_epoch, &changed, scene_feedback_changed);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_EXPECT_FALSE(test, events.gesture_active);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, 150);
+	input_sync(fp_test_activity_input);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_EXPECT_FALSE(test, events.gesture_active); /* held input cannot revive the old anchor */
+	fp_test_mt_contact(false, 0, 0);
+	fp_test_mt_contact(true, 10, 700);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, 70);
+	input_sync(fp_test_activity_input);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_ASSERT_TRUE(test, events.gesture_active);
+	mutex_lock(&config_lock);
+	frame_policy_scene_full("frame.policy.kunit.native.off", true, false, 405);
+	frame_policy_scene_full("frame.policy.kunit.native.resume", false, false, 406);
+	mutex_unlock(&config_lock);
+	flush_work(&control_work);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_EXPECT_FALSE(test, events.gesture_active);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, 150);
+	input_sync(fp_test_activity_input);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_EXPECT_FALSE(test, events.gesture_active);
+	fp_test_mt_contact(false, 0, 0);
+	fp_test_mt_contact(true, 10, 710);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, 70);
+	input_sync(fp_test_activity_input);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_ASSERT_TRUE(test, events.gesture_active);
+	mutex_lock(&config_lock);
+	frame_policy_scene_full("frame.policy.kunit.native-game", false, true, 407);
+	frame_policy_scene_full("frame.policy.kunit.native.resume", false, false, 408);
+	mutex_unlock(&config_lock);
+	flush_work(&control_work);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_EXPECT_FALSE(test, events.gesture_active);
+	fp_test_mt_contact(false, 0, 0);
+	fp_test_mt_contact(true, 10, 720);
+	input_report_abs(fp_test_activity_input, ABS_MT_POSITION_X, 70);
+	input_sync(fp_test_activity_input);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_ASSERT_TRUE(test, events.gesture_active);
+	frame_policy_scene_full("frame.policy.kunit.native-game", true, true, 409);
 	flush_work(&control_work);
 	KUNIT_EXPECT_TRUE(test, scene_active); /* game screen-off is Scene off, never FAS */
 	KUNIT_EXPECT_FALSE(test, game_active);
 	KUNIT_EXPECT_PTR_EQ(test, pmus, NULL);
 	KUNIT_EXPECT_FALSE(test, delayed_work_pending(&scene_feedback_deadline));
-	frame_policy_scene_full("frame.policy.kunit.native-game", false, true, 402);
+	scene_activity_backend_feedback(scene_activity_epoch, ktime_get_ns(), &events);
+	KUNIT_EXPECT_FALSE(test, events.gesture_active);
+	frame_policy_scene_full("frame.policy.kunit.native-game", false, true, 410);
 	flush_work(&control_work);
 	KUNIT_EXPECT_EQ(test, last_error, 0);
 	KUNIT_EXPECT_TRUE(test, configured);
@@ -901,7 +1036,7 @@ static void frame_test_scene_native_additive_and_physical_gesture(struct kunit *
 	KUNIT_EXPECT_FALSE(test, activity.registered);
 	KUNIT_EXPECT_EQ(test, values[FP_AUX_KNOB_UP_RATE].value, 41);
 	configuration.flags = 0;
-	frame_policy_scene_full("frame.policy.kunit.native", false, false, 403);
+	frame_policy_scene_full("frame.policy.kunit.native", false, false, 411);
 	flush_work(&control_work);
 	scene_activity_backend_status(&activity);
 	KUNIT_EXPECT_TRUE(test, configured);

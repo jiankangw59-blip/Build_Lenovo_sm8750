@@ -189,6 +189,7 @@ static atomic64_t next_scene_sample = ATOMIC64_INIT(0);
 static u64 scene_samples;
 /* Distinct from generation: an inactive QoS update must not reset its own input epoch. */
 static u64 scene_activity_epoch, scene_inactive_events;
+static bool scene_gesture_boundary; /* frame_lock */
 #if IS_ENABLED(CONFIG_FRAME_POLICY_KUNIT_TEST)
 static bool test_activity_present_at_game_start;
 static bool (*test_scene_cpu_sample)(unsigned int cpu, u32 *khz);
@@ -1156,15 +1157,25 @@ static void reconcile_scene_activity(void)
 	struct fp_scene_event_config events = {};
 	const struct fp_scene_aux_options *options = fp_scene_aux_options();
 	unsigned long flags;
-	bool current_source;
+	bool current_source, boundary_pending;
 
 	spin_lock_irqsave(&frame_lock, flags);
 	context.epoch = scene_activity_epoch;
 	current_source = applied_generation == generation;
+	boundary_pending = scene_gesture_boundary;
 	spin_unlock_irqrestore(&frame_lock, flags);
 	context.valid = source_valid;
 	context.screen_off = display_off;
 	context.game = source_game;
+	events.gesture_enabled = options && (options->valid_mask & FP_AUX_OPT_GESTURE) &&
+		options->gesture_boost;
+	/* A newer ordinary foreground already queued control. Leave its panel
+	 * attached while this stale snapshot finishes dropping frequency votes.
+	 */
+	if (!current_source && !boundary_pending && configured && context.valid &&
+	    !context.game && !context.screen_off && (configuration.flags & FP_CPU) &&
+	    !observe_only() && events.gesture_enabled)
+		return;
 	/* These are explicit launcher package identities, never a windowed app guess. */
 	context.launcher = !strcmp(foreground, "com.android.launcher") ||
 		!strcmp(foreground, "com.oplus.launcher");
@@ -1179,8 +1190,6 @@ static void reconcile_scene_activity(void)
 		configuration.cpu_count ? configuration.cpus[0].cpu : 0);
 	if (context.enabled && !context.game && !context.screen_off && native_scene_feedback() &&
 	    (configuration.flags & FP_CPU) && !observe_only() && options) {
-		events.gesture_enabled = (options->valid_mask & FP_AUX_OPT_GESTURE) &&
-			options->gesture_boost;
 		events.gesture_duration_ms = options->gesture_duration_ms;
 		scene_activity_backend_set_feedback(context.epoch, &events, scene_feedback_changed);
 	} else {
@@ -1198,12 +1207,17 @@ static void apply_control(struct work_struct *work)
 	unsigned long flags;
 	u64 epoch;
 	bool aux_applied = false;
+	bool clear_gesture;
 
 	mutex_lock(&config_lock);
 	spin_lock_irqsave(&frame_lock, flags);
 	next = pending_scene;
 	epoch = generation;
+	clear_gesture = scene_gesture_boundary;
+	scene_gesture_boundary = false;
 	spin_unlock_irqrestore(&frame_lock, flags);
+	if (clear_gesture)
+		scene_activity_backend_set_feedback(0, NULL, NULL);
 	if (applied_generation == epoch && target &&
 	    !(READ_ONCE(target->flags) & PF_EXITING) && READ_ONCE(target->mm) == target_mm)
 		goto out;
@@ -2127,6 +2141,8 @@ void frame_policy_scene_full(const char *package, bool off, bool game, u64 sourc
 	pending_scene.off = off;
 	pending_scene.inactive = false;
 	pending_scene.provider_epoch = source_epoch;
+	if (!valid || off || game)
+		scene_gesture_boundary = true;
 	scene_activity_epoch++;
 	generation++;
 	spin_unlock_irqrestore(&frame_lock, flags);
@@ -2319,6 +2335,7 @@ static int replace_game_rules(unsigned long arg)
 	remove_requests();
 	previous = game_rules;
 	game_rules = next;
+	scene_activity_backend_set_feedback(0, NULL, NULL);
 	last_error = 0;
 	last_error_stage = "none";
 	spin_lock_irqsave(&frame_lock, flags);
@@ -2387,6 +2404,7 @@ static int replace_scene_table(unsigned long arg)
 	previous = scene_table;
 	scene_table = next;
 	scene_table_epoch++;
+	scene_activity_backend_set_feedback(0, NULL, NULL);
 	memset(&scene_core, 0, sizeof(scene_core));
 	last_error = 0;
 	last_error_stage = "none";
@@ -2455,6 +2473,7 @@ static int replace_scene_aux(unsigned long arg)
 		cpu_candidate = NULL;
 		gpu_aux_error = 0;
 		memset(&scene_core, 0, sizeof(scene_core));
+		scene_activity_backend_set_feedback(0, NULL, NULL);
 		spin_lock_irqsave(&frame_lock, flags);
 		scene_activity_epoch++;
 		pending_scene.inactive = false;
@@ -2563,6 +2582,7 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (cmd == FP_CONFIG && !error)
 		configuration = next;
 	configured = cmd == FP_CONFIG && !error;
+	scene_activity_backend_set_feedback(0, NULL, NULL);
 	last_error = error;
 	if (!error)
 		last_error_stage = "none";

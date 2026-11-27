@@ -32,6 +32,7 @@ void scene_activity_backend_exit(void);
 #if IS_ENABLED(CONFIG_FRAME_POLICY_KUNIT_TEST)
 struct input_dev;
 void scene_activity_backend_test_connect_hook(void (*hook)(struct input_dev *dev));
+void scene_activity_backend_test_configure_hook(void (*hook)(void));
 int scene_activity_backend_test_pause_worker(void);
 void scene_activity_backend_test_resume_worker(void);
 void scene_activity_backend_test_flush(void);
