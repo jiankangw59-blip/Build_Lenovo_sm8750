@@ -48,6 +48,7 @@ jobs:
           python3 efficiency/frame_policy/ksu/test_package.py
           python3 efficiency/frame_policy/ksu/test_transactions.py
           python3 efficiency/frame_policy/ksu/test_handoff.py
+          python3 efficiency/frame_policy/ksu/test_service_startup.py
           for file in efficiency/frame_policy/ksu/*.sh; do sh -n "$file"; done
       - uses: actions/setup-java@v5
         with:
