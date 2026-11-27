@@ -54,6 +54,17 @@ def main(controller):
             assert (destination / "settings.json").read_bytes() == settings
             assert (destination / "enabled").read_bytes() == b"1\n"
         valid2 = envelope2 + content + fas
+        for limit in (0, 1, 500, 3000):
+            extended = fas + struct.pack("<2I", limit, 0)
+            target = parent / ("limit-" + str(limit))
+            target.mkdir()
+            header = struct.pack("<8I", 0x46505332, len(settings), 592, 7556, 14384, 88, 1, 0)
+            result = subprocess.run([str(controller), "unpack-settings", str(target)],
+                                    input=header + content + extended, capture_output=True)
+            assert result.returncode == 0, result.stderr
+            assert (target / "fas.bin").read_bytes() == extended
+        for tail in (struct.pack("<2I", 3001, 0), struct.pack("<2I", 0, 1)):
+            cases.append(header + content + fas + tail)
         # A typed, metadata-only table needs no sysfs or policy device to decode.
         aux = bytearray(26584)
         struct.pack_into("<4I", aux, 0, 1, 0, 1, 1)
@@ -71,7 +82,7 @@ def main(controller):
             javascript = r'''
 const fs=require('fs'),p=require('./webroot/protocol.js').frameSettingsProtocol;
 const load=n=>JSON.parse(fs.readFileSync('./defaults/'+n+'.json','utf8'));
-const settings={...load('settings'),sceneAux:true,sceneGpuLock:process.argv[1]==='true'};
+const settings={...load('settings'),sceneAux:true,sceneGpuLock:process.argv[1]==='true',fasUtilLimits:{balance:0}};
 process.stdout.write(Buffer.from(p(settings,load('seed'),load('scene-seed'),load('scene-aux-seed')).payload));
 '''
             encoded = subprocess.run(["node", "-e", javascript, str(gpu_lock).lower()], cwd=HERE,
@@ -79,7 +90,7 @@ process.stdout.write(Buffer.from(p(settings,load('seed'),load('scene-seed'),load
             destination=parent/("encoder-gpu-"+str(gpu_lock));destination.mkdir()
             decoded=subprocess.run([str(controller),"unpack-settings",str(destination)],input=encoded,capture_output=True)
             assert decoded.returncode==0,decoded.stderr
-            for name,value in (("config.bin",config),("games.bin",rules),("scene.bin",scene),("fas.bin",fas)):
+            for name,value in (("config.bin",config),("games.bin",rules),("scene.bin",scene),("fas.bin",fas+bytes(8))):
                 assert (destination/name).read_bytes()==value,name
             policy=(destination/"aux.bin").read_bytes()
             assert len(policy)==26584 and struct.unpack_from("<I",policy,168)==(2047,)

@@ -6,6 +6,8 @@
 
 #define FP_FAS_ABI 1U
 #define FP_FAS_MODES 4U
+#define FP_FAS_UTIL_LIMIT_DEFAULT 3000U
+#define FP_FAS_UTIL_LIMIT_MAX 3000U
 
 /* FPS values use thousandths; frequency feedback uses kHz, never floating point. */
 struct fp_fas_tuning {
@@ -20,5 +22,14 @@ struct fp_fas_tuning {
 };
 
 #define FP_FAS_TUNING _IOW('F', 0x84, struct fp_fas_tuning)
+
+/* Separate ioctl preserves the original 80-byte ABI and its 3 FPS default. */
+struct fp_fas_tuning_ext {
+	struct fp_fas_tuning tuning;
+	__u32 util_limit_mfps;
+	__u32 reserved;
+};
+
+#define FP_FAS_TUNING_EXT _IOW('F', 0x86, struct fp_fas_tuning_ext)
 
 #endif

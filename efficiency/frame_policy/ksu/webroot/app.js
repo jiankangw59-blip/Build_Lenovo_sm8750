@@ -4,6 +4,7 @@ let counter = 0, savedHash = "", seed, sceneSeed, auxSeed, busy = false;
 const editor = document.getElementById("editor"), message = document.getElementById("message");
 const fasMode = document.getElementById("fasMode"), fasBase = document.getElementById("fasMarginBase");
 const fasOverrides = document.getElementById("fasOverrides");
+const fasUtilLimit = document.getElementById("fasUtilLimit");
 const fasPreviewFps = document.getElementById("fasPreviewFps");
 const fallbackFps = document.getElementById("fallbackFps");
 const sceneAux = document.getElementById("sceneAux");
@@ -13,6 +14,7 @@ const fasDefaults = {powersave: 3, balance: 1, performance: 0.3, fast: 0};
 const fasLabels = {powersave: "省电", balance: "均衡", performance: "性能", fast: "快速"};
 const adaptiveLimits = {powersave: 3000, balance: 500, performance: 200, fast: 0};
 let fasEditError = "", otherEditError = "", editingMode = "balance", displayedBase = "", displayedOverrides = "";
+let displayedUtilLimit = "", supportsUtilLimit = false;
 let supportsFas = false, supportsStrength = false;
 let gpuLockEdited = false;
 function showFasProfile(settings) {
@@ -24,6 +26,9 @@ function showFasProfile(settings) {
   displayedBase = fasBase.value = margin === null ? "" : String(advanced ? margin.base : margin);
   displayedOverrides = fasOverrides.value = JSON.stringify(advanced
     ? Object.fromEntries(Object.entries(margin).filter(([key]) => key !== "base")) : {}, null, 2);
+  const limit = frameFasUtilLimits(settings)[editingMode];
+  displayedUtilLimit = fasUtilLimit.value = limit === null ? "" : String(limit);
+  fasUtilLimit.disabled = busy || !supportsUtilLimit;
 }
 function showSettings(settings) {
   showFasProfile(settings);
@@ -41,11 +46,12 @@ function showFasPreview(settings) {
   document.getElementById("fasStrength").hidden = !supportsFas || !validFps || Boolean(fasEditError);
   if (!supportsFas || !validFps || fasEditError) return;
   const profiles = frameFasProfiles(settings);
+  const utilLimits = frameFasUtilLimits(settings);
   for (const mode of Object.keys(fasLabels)) {
-    const tuning = frameFasProtocol({fasMode: mode, fasProfiles: profiles});
+    const tuning = frameFasProtocol({fasMode: mode, fasProfiles: profiles, fasUtilLimits: utilLimits});
     const override = tuning.overrides.find(([rate]) => rate === fps);
     const margin = override?.[1] ?? (supportsStrength && fps >= 60 ? tuning.base : Math.floor(tuning.base * fps / 60));
-    const extra = supportsStrength ? adaptiveLimits[mode] : 3000;
+    const extra = tuning.utilLimit ?? (supportsStrength ? adaptiveLimits[mode] : 3000);
     const lower = Math.max(1000, fps * 1000 - margin - extra) / 1000;
     const upper = Math.max(1000, fps * 1000 - margin) / 1000;
     document.getElementById(`fas-${mode}-margin`).textContent = `${margin / 1000}${override ? "（覆盖）" : ""}`;
@@ -78,6 +84,13 @@ function editFasSettings(nextMode, reset = false) {
     const settings = JSON.parse(editor.value);
     const profiles = frameFasProfiles(settings);
     profiles[editingMode] = reset ? null : readFasProfile();
+    if (fasUtilLimit.validity?.badInput) throw new Error("FAS 额外下调上限必须为数值");
+    const utilLimits = frameFasUtilLimits(settings);
+    const limit = reset || fasUtilLimit.value.trim() === "" ? null : Number(fasUtilLimit.value);
+    if (limit !== null || Object.hasOwn(settings, "fasUtilLimits")) {
+      utilLimits[editingMode] = limit;
+      settings.fasUtilLimits = utilLimits;
+    }
     settings.fasMode = nextMode;
     delete settings.fasMarginFps;
     settings.fasProfiles = profiles;
@@ -106,7 +119,7 @@ function editOtherSettings() {
   updateEditMessage();
 }
 fasMode.addEventListener("change", () => editFasSettings(fasMode.value));
-for (const control of [fasBase, fasOverrides]) control.addEventListener("change", () => editFasSettings(editingMode));
+for (const control of [fasBase, fasOverrides, fasUtilLimit]) control.addEventListener("change", () => editFasSettings(editingMode));
 document.getElementById("fasReset").onclick = () => editFasSettings(editingMode, true);
 fasPreviewFps.addEventListener("input", () => {
   try { showFasPreview(JSON.parse(editor.value)); }
@@ -148,11 +161,15 @@ async function refresh() {
   const status = rawStatus.replace(/\r/g, "");
   const features = (status.match(/^features=(.*)$/m)?.[1] ?? "").split(",");
   supportsStrength = features.includes("fas_mode_strength_v1");
+  supportsUtilLimit = features.includes("fas_util_limit_v1");
   supportsFas = supportsStrength || features.includes("fas_tuning");
   const activeMode = Object.keys(fasLabels)[Number(status.match(/^fas_mode=(\d+)$/m)?.[1])];
   const base = status.match(/^fas_margin_base_mfps=(\d+)$/m)?.[1];
   const effective = Number(status.match(/^fas_effective_mfps=(\d+)$/m)?.[1]);
-  const limit = supportsStrength ? status.match(/^fas_util_limit_mfps=(\d+)$/m)?.[1] : "3000";
+  const limit = supportsStrength || supportsUtilLimit ? status.match(/^fas_util_limit_mfps=(\d+)$/m)?.[1] : "3000";
+  document.getElementById("fasUtilLimitNote").textContent = supportsUtilLimit
+    ? "当前内核支持可调上限。修改后点击保存并应用，以上方内核读回值为准。"
+    : "当前内核不支持可调上限，请先更新内核；此项暂不可编辑。";
   const liveStatus = document.getElementById("fasLiveStatus");
   if (activeMode && /^configured=1$/m.test(status)) {
     const owner = status.match(/^owner=(\w+)$/m)?.[1];
@@ -171,6 +188,8 @@ async function refresh() {
   } else liveStatus.textContent = "当前未报告已载入的 FAS 档位。";
   document.getElementById("fasStrengthNote").textContent = supportsStrength
     ? "60 FPS 起按基础值扣减，低于 60 FPS 按比例折算。"
+    : supportsUtilLimit
+      ? "基础余量按「帧率 ÷ 60」折算。额外下调使用本档上限，留空时为 3 FPS。"
     : supportsFas
       ? "当前内核使用旧版 FAS。高帧率档位按「帧率 ÷ 60」放大基础余量，自适应最多再下调 3 FPS。"
       : "当前状态未报告 FAS 调优能力。";
@@ -187,13 +206,17 @@ async function run(task) {
     busy = false;
     formControls.forEach(control => control.disabled = false);
     sceneGpuLock.disabled = !sceneAux.checked;
+    fasUtilLimit.disabled = !supportsUtilLimit;
   }
 }
 document.getElementById("save").onclick = () => run(async () => {
-  if (fasBase.validity?.badInput || fasBase.value !== displayedBase || fasOverrides.value !== displayedOverrides)
+  if (fasBase.validity?.badInput || fasUtilLimit.validity?.badInput || fasBase.value !== displayedBase ||
+      fasOverrides.value !== displayedOverrides || fasUtilLimit.value !== displayedUtilLimit)
     editFasSettings(editingMode);
   if (fasEditError || otherEditError) throw new Error(fasEditError || otherEditError);
   const settings = JSON.parse(editor.value);
+  if (frameFasProtocol(settings).utilLimit !== null && !supportsUtilLimit)
+    throw new Error("当前内核不支持可调下调上限，未保存；请先更新内核");
   const {payload} = frameSettingsProtocol(settings, seed, sceneSeed, auxSeed);
   let binary = "";
   for (let i = 0; i < payload.length; i += 8192) binary += String.fromCharCode(...payload.subarray(i, i + 8192));

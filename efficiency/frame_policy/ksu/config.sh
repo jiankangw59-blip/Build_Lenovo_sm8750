@@ -115,6 +115,15 @@ apply_dir() {
         grep -qx 'gpu_aux_error=0' "$state/last-apply.txt" || return 1
         grep -qx 'gpu_aux_rollback_error=0' "$state/last-apply.txt" || return 1
     fi
+    if printf '%s\n' "$native" | grep -Eq '^features=([^,]*,)*fas_util_limit_v1(,|$)'; then
+        expected_limit=3000
+        if [ "$(wc -c < "$fas")" -eq 88 ]; then
+            expected_limit=$(od -An -tu4 -j80 -N4 "$fas") || return 1
+        fi
+        grep -qx "fas_util_limit_mfps=$((expected_limit))" "$state/last-apply.txt" || {
+            fail '内核下调上限读回不一致，未提交新配置'; return 1;
+        }
+    fi
     cat /proc/sys/kernel/random/boot_id > "$state/applied-boot" || return 1
     return 0
 }

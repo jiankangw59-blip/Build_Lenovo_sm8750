@@ -99,6 +99,7 @@ static void fp_test_reset(void)
 	fas_tuning = (struct fp_fas_tuning){
 		.abi = FP_FAS_ABI, .mode = 1, .margin_base_mfps = 1000,
 	};
+	fas_util_limit_mfps = FP_FAS_UTIL_LIMIT_DEFAULT;
 	configuration.flags = FP_OBSERVE;
 	configuration.target_fps = 60;
 	configuration.fps_count = 1;
@@ -989,18 +990,18 @@ static void frame_test_fas_tuning_hot_change(struct kunit *test)
 	}));
 	KUNIT_EXPECT_EQ(test, sizeof(next), (size_t)80);
 	KUNIT_EXPECT_EQ(test, _IOC_SIZE(FP_FAS_TUNING), 80U);
-	KUNIT_ASSERT_EQ(test, set_fas_tuning(&next), 0);
+	KUNIT_ASSERT_EQ(test, set_fas_tuning(&next, FP_FAS_UTIL_LIMIT_DEFAULT), 0);
 	KUNIT_EXPECT_PTR_EQ(test, cpu_requests[0].policy, owned);
 	KUNIT_EXPECT_EQ(test, generation, epoch);
 	KUNIT_EXPECT_EQ(test, game_targets[0], 2010000U);
 	KUNIT_EXPECT_EQ(test, fas_events.count, 1U);
 	saved = fas_tuning;
 	next.mode = FP_FAS_MODES;
-	KUNIT_EXPECT_EQ(test, set_fas_tuning(&next), -EINVAL);
+	KUNIT_EXPECT_EQ(test, set_fas_tuning(&next, FP_FAS_UTIL_LIMIT_DEFAULT), -EINVAL);
 	KUNIT_EXPECT_EQ(test, memcmp(&fas_tuning, &saved, sizeof(saved)), 0);
 	next = saved;
 	next.overrides[0].fps = 60; /* Unused tail cannot smuggle an active override. */
-	KUNIT_EXPECT_EQ(test, set_fas_tuning(&next), -EINVAL);
+	KUNIT_EXPECT_EQ(test, set_fas_tuning(&next, FP_FAS_UTIL_LIMIT_DEFAULT), -EINVAL);
 	KUNIT_EXPECT_EQ(test, memcmp(&fas_tuning, &saved, sizeof(saved)), 0);
 	KUNIT_ASSERT_TRUE(test, enqueue_fas_frame((struct fp_fas_event){
 		.ended_ns = last_frame_ns + 16666667, .interval_ns = 16666667,
@@ -1012,6 +1013,33 @@ static void frame_test_fas_tuning_hot_change(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, game_targets[0], 2005001U);
 	KUNIT_EXPECT_EQ(test, fas_last_adjustment, 0LL);
 	KUNIT_EXPECT_EQ(test, freq_qos_read_value(&fp_test_policy->constraints, FREQ_QOS_MAX), 3000000);
+}
+
+static void frame_test_fas_adaptive_limit(struct kunit *test)
+{
+	struct fp_fas_tuning next = {.abi = FP_FAS_ABI, .mode = 1, .margin_base_mfps = 1000};
+	struct fp_fas_tuning saved;
+	u64 epoch;
+
+	KUNIT_ASSERT_EQ(test, fp_test_prepare_fas(), 0);
+	epoch = generation;
+	fas_feedback.util_offset_mfps = -3000;
+	KUNIT_EXPECT_EQ(test, sizeof(struct fp_fas_tuning_ext), (size_t)88);
+	KUNIT_EXPECT_EQ(test, _IOC_NR(FP_FAS_TUNING_EXT), 0x86U);
+	KUNIT_EXPECT_EQ(test, _IOC_SIZE(FP_FAS_TUNING_EXT), 88U);
+	KUNIT_ASSERT_EQ(test, set_fas_tuning(&next, 501), 0);
+	KUNIT_EXPECT_EQ(test, fas_util_limit_mfps, 501U);
+	KUNIT_EXPECT_EQ(test, fas_feedback.util_offset_mfps, -501);
+	KUNIT_ASSERT_EQ(test, set_fas_tuning(&next, 0), 0);
+	KUNIT_EXPECT_EQ(test, fas_feedback.util_offset_mfps, 0);
+	KUNIT_EXPECT_EQ(test, generation, epoch);
+	saved = fas_tuning;
+	KUNIT_EXPECT_EQ(test, set_fas_tuning(&next, 3001), -EINVAL);
+	KUNIT_EXPECT_EQ(test, memcmp(&fas_tuning, &saved, sizeof(saved)), 0);
+	KUNIT_EXPECT_EQ(test, fas_util_limit_mfps, 0U);
+	/* The original ioctl/old generations retain their 3 FPS behavior. */
+	KUNIT_ASSERT_EQ(test, set_fas_tuning(&next, FP_FAS_UTIL_LIMIT_DEFAULT), 0);
+	KUNIT_EXPECT_EQ(test, fas_util_limit_mfps, 3000U);
 }
 
 static void frame_test_fas_overflow_releases_votes(struct kunit *test)
@@ -1249,6 +1277,7 @@ static struct kunit_case frame_policy_cases[] = {
 	KUNIT_CASE(frame_test_fas_batch_preserves_each_step),
 	KUNIT_CASE(frame_test_fas_long_frame_preserves_thermal_cap),
 	KUNIT_CASE(frame_test_fas_tuning_hot_change),
+	KUNIT_CASE(frame_test_fas_adaptive_limit),
 	KUNIT_CASE(frame_test_fas_overflow_releases_votes),
 	KUNIT_CASE(frame_test_fas_stale_generation_has_no_votes),
 	KUNIT_CASE(frame_test_fas_late_deadline_is_once),

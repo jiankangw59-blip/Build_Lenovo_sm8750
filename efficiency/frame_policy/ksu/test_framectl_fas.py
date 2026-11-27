@@ -20,7 +20,8 @@ WRAPPER = r'''
 int __wrap_ioctl(int fd, unsigned long request, ...) {
  va_list arguments;
  (void)fd;
- if (request != FP_FAS_TUNING || _IOC_NR(request) != 0x84 || _IOC_SIZE(request) != 80) {
+ if ((request != FP_FAS_TUNING || _IOC_NR(request) != 0x84 || _IOC_SIZE(request) != 80) &&
+     (request != FP_FAS_TUNING_EXT || _IOC_NR(request) != 0x86 || _IOC_SIZE(request) != 88)) {
   errno = ENOTTY; return -1;
  }
  va_start(arguments, request);
@@ -29,7 +30,7 @@ int __wrap_ioctl(int fd, unsigned long request, ...) {
  FILE *log = fopen(getenv("FAS_IOCTL_LOG"), "wb");
  if (!log) return -1;
  fprintf(log, "%lu\n", request);
- if (fwrite(value, 1, sizeof(*value), log) != sizeof(*value)) { fclose(log); return -1; }
+ if (fwrite(value, 1, _IOC_SIZE(request), log) != _IOC_SIZE(request)) { fclose(log); return -1; }
  fclose(log);
  if (getenv("FAS_IOCTL_FAIL")) { errno = EIO; return -1; }
  return 0;
@@ -111,6 +112,36 @@ class FasIoctl(unittest.TestCase):
         result = self.call(success=False, fail=True)
         self.assertTrue(self.log.exists())
         self.assertIn(b"update frame policy", result.stderr)
+
+    def test_extended_limits_use_separate_ioctl_and_exact_bytes(self):
+        self.device.write_text("features=fas_tuning,fas_util_limit_v1\n")
+        for limit in (0, 1, 200, 501, 3000):
+            with self.subTest(limit=limit):
+                value = self.tuning() + struct.pack("<2I", limit, 0)
+                self.blob.write_bytes(value)
+                self.log.unlink(missing_ok=True)
+                self.call("check-fas")
+                self.assertFalse(self.log.exists())
+                self.call()
+                number, payload = self.log.read_bytes().split(b"\n", 1)
+                self.assertEqual(int(number), 0x40584686)
+                self.assertEqual(payload, value)
+
+    def test_extended_capability_and_validation_fail_before_ioctl(self):
+        self.blob.write_bytes(self.tuning() + struct.pack("<2I", 0, 0))
+        for features in ("fas_tuning", "fas_util_limit_v1", "fas_tuning,fas_util_limit_v10",
+                         "fas_tuning,my_fas_util_limit_v1"):
+            self.device.write_text("features=" + features + "\n")
+            self.call(success=False)
+            self.assertFalse(self.log.exists())
+        self.device.write_text("features=fas_tuning,fas_util_limit_v1\n")
+        for limit, reserved in ((3001, 0), (0xffffffff, 0), (0, 1)):
+            self.blob.write_bytes(self.tuning() + struct.pack("<2I", limit, reserved))
+            self.call(success=False)
+            self.assertFalse(self.log.exists())
+        self.blob.write_bytes(self.tuning())
+        self.call()  # New kernels/clients continue to accept the old 80-byte path.
+        self.assertEqual(int(self.log.read_bytes().split(b"\n", 1)[0]), 0x40504684)
 
 
 if __name__ == "__main__":

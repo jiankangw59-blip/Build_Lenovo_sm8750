@@ -88,6 +88,43 @@ test("the running kernel controls the visible FAS strength guidance", async () =
   assert.equal(state.packets.length, 0);
 });
 
+test("per-mode adaptive limits preserve zero and other modes, preview and reset", async () => {
+  const state = await app(), e = state.elements;
+  assert.equal(e.fasUtilLimit.disabled, true);
+  state.setStatus("configured=1\nowner=scene\nfeatures=fas_tuning,fas_util_limit_v1\nfas_mode=1\nfas_util_limit_mfps=500\n");
+  await e.refresh.onclick();
+  assert.equal(e.fasUtilLimit.disabled, false);
+  e.fasUtilLimit.value = "0.501"; e.fasUtilLimit.listeners.change();
+  e.fasMode.value = "performance"; e.fasMode.listeners.change();
+  assert.equal(e.fasUtilLimit.value, "");
+  e.fasUtilLimit.value = "0"; e.fasUtilLimit.listeners.change();
+  assert.equal(e["fas-performance-extra"].textContent, "0");
+  assert.equal(e["fas-performance-target"].textContent, "164.175");
+  e.fasMode.value = "balance"; e.fasMode.listeners.change();
+  assert.equal(e.fasUtilLimit.value, "0.501");
+  assert.match(e.fasLiveStatus.textContent, /最多再下调 0\.5 FPS/);
+  await e.save.onclick();
+  assert.deepEqual(state.settings().fasUtilLimits, {powersave:null,balance:0.501,performance:0,fast:null});
+  let fas = state.packets.at(-1).subarray(-88);
+  assert.equal(fas.readUInt32LE(80), 501); assert.equal(fas.readUInt32LE(84), 0);
+  e.fasReset.onclick(); await e.save.onclick();
+  assert.equal(state.settings().fasUtilLimits.balance, null);
+  assert.equal(state.settings().fasUtilLimits.performance, 0);
+  assert.equal(state.packets.at(-1).readUInt32LE(20), 80);
+});
+
+test("unsupported kernels and invalid adaptive limits cannot silently save", async () => {
+  const state = await app(), e = state.elements;
+  for (const limit of [0, -1, 3.001, 0.0001]) {
+    const settings = JSON.parse(e.editor.value);
+    settings.fasUtilLimits = {balance:limit};
+    e.editor.value = JSON.stringify(settings); e.editor.listeners.input();
+    await e.save.onclick();
+    assert.equal(state.packets.length, 0);
+    assert.equal(e.message.dataset.error, "true");
+  }
+});
+
 test("round trips lock all editors until the running state returns", async () => {
   const state = await app(), e = state.elements;
   assert.equal(e.sceneGpuLock.disabled, true);

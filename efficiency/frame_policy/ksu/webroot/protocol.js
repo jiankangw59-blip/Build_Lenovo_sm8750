@@ -52,21 +52,39 @@ function readFrameFasSettings(settings) {
     profiles[key] = typeof margin === "number" ? margin : {...margin};
     if (key === mode) selected = parsed;
   }
-  return {mode, index, profiles, ...selected};
+  const utilLimits = frameFasUtilLimits(settings);
+  const utilLimit = utilLimits[mode] === null ? null : parseFrameFasMargin(utilLimits[mode]).base;
+  return {mode, index, profiles, utilLimits, utilLimit, ...selected};
+}
+
+function frameFasUtilLimits(settings) {
+  const input = Object.hasOwn(settings, "fasUtilLimits") ? settings.fasUtilLimits : {};
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("fasUtilLimits 必须为档位配置对象");
+  const limits = Object.fromEntries(FRAME_FAS_MODES.map(mode => [mode, null]));
+  for (const [mode, value] of Object.entries(input)) {
+    if (!Object.hasOwn(limits, mode)) throw new Error(`未知 FAS 档位：${mode}`);
+    if (value === null) continue;
+    if (typeof value !== "number" || parseFrameFasMargin(value).base > 3000)
+      throw new Error("FAS 额外下调上限必须为 0～3 FPS，最多三位小数");
+    limits[mode] = value;
+  }
+  return limits;
 }
 
 function frameFasProfiles(settings) {
   return readFrameFasSettings(settings).profiles;
 }
 
-function encodeFrameFas({mode, index, base, overrides}) {
-  const blob = new Uint8Array(80), view = new DataView(blob.buffer);
+function encodeFrameFas({mode, index, base, overrides, utilLimit}) {
+  const blob = new Uint8Array(utilLimit === null ? 80 : 88), view = new DataView(blob.buffer);
   [1, index, base, overrides.length].forEach((value, i) => view.setUint32(i * 4, value, true));
   overrides.forEach(([fps, amount], i) => {
     view.setUint32(16 + i * 8, fps, true);
     view.setUint32(20 + i * 8, amount, true);
   });
-  return {blob, mode, base, overrides};
+  if (utilLimit !== null) view.setUint32(80, utilLimit, true);
+  return {blob, mode, base, overrides, utilLimit};
 }
 
 function frameFasProtocol(settings) {
@@ -74,7 +92,7 @@ function frameFasProtocol(settings) {
 }
 
 function frameSettingsProtocol(settings, seed, sceneSeed, auxSeed) {
-  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "sceneBaseMode", "sceneApps", "sceneAux", "sceneGpuLock", "fasMode", "fasMarginFps", "fasProfiles", "fps", "fallbackFps", "games", "relations", "gameCpuMHz"];
+  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "sceneBaseMode", "sceneApps", "sceneAux", "sceneGpuLock", "fasMode", "fasMarginFps", "fasProfiles", "fasUtilLimits", "fps", "fallbackFps", "games", "relations", "gameCpuMHz"];
   for (const key of Object.keys(settings)) if (!fields.includes(key)) throw new Error(`未知配置项：${key}`);
   for (const key of ["enabled", "cpu", "gpu", "observe", "relations"])
     if (typeof settings[key] !== "boolean") throw new Error(`${key} 必须为布尔值`);
@@ -150,6 +168,7 @@ function frameSettingsProtocol(settings, seed, sceneSeed, auxSeed) {
   const aux = encodeAux(settings, auxSeed).table;
   const normalized = {...settings, fasMode: tuning.mode};
   if (Object.hasOwn(settings, "fasProfiles")) normalized.fasProfiles = tuning.profiles;
+  if (Object.hasOwn(settings, "fasUtilLimits")) normalized.fasUtilLimits = tuning.utilLimits;
   const json = new TextEncoder().encode(JSON.stringify(normalized, null, 2) + "\n");
   if (json.length > 49152) throw new Error("配置文件过大");
   const encodeScene = typeof module !== "undefined" ? require("./scene_protocol.js").frameSceneProtocol : frameSceneProtocol;
@@ -170,4 +189,4 @@ function frameSettingsProtocol(settings, seed, sceneSeed, auxSeed) {
   return {payload, config, table, scene, fas, aux, settings: normalized};
 }
 
-if (typeof module !== "undefined") module.exports = {frameSettingsProtocol, frameFasProtocol, frameFasProfiles};
+if (typeof module !== "undefined") module.exports = {frameSettingsProtocol, frameFasProtocol, frameFasProfiles, frameFasUtilLimits};

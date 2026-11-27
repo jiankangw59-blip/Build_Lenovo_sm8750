@@ -51,6 +51,11 @@ def compile_tuning(mode, standard, user):
     blob = struct.pack("<4I", 1, MODES.index(mode), base, len(overrides))
     blob += b"".join(struct.pack("<2I", *item) for item in overrides) + bytes((8 - len(overrides)) * 8)
     assert len(blob) == 80
+    if "util_limit_fps" in config:
+        limit = milli(config["util_limit_fps"])
+        if limit > 3000:
+            raise ValueError("Adaptive limit must be between 0 and 3 FPS")
+        blob += struct.pack("<2I", limit, 0)
     return blob, {"abi": 1, "mode": mode, "base_margin_mfps": base, "overrides": overrides,
                   "sha256": hashlib.sha256(blob).hexdigest(), "device_modified": False}
 

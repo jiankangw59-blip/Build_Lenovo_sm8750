@@ -19,10 +19,13 @@ label{display:block;margin:10px 0}input,select{background:#192631;color:#e5edf3;
 <fieldset><legend>游戏 FAS 模式</legend>
 <label>模式 <select id="fasMode"><option value="powersave">省电 powersave</option><option value="balance">均衡 balance</option><option value="performance">性能 performance</option><option value="fast">快速 fast</option></select></label>
 <label>基础帧率余量（FPS，留空随档） <input id="fasMarginBase" type="number" min="0" max="30" step="0.001"></label>
+<label>额外下调上限（FPS，留空保持 3） <input id="fasUtilLimit" type="number" min="0" max="3" step="0.001" placeholder="3" disabled></label>
+<p id="fasUtilLimitNote">正在读取内核可调上限能力…</p>
 <label>按帧率覆盖余量（可选，例如 {"165":0.3}）<textarea id="fasOverrides" spellcheck="false" aria-label="FAS 按帧率余量覆盖">{}</textarea></label>
 <button id="fasReset" type="button">恢复当前档默认值</button>
 <label>未单独配置游戏的帧率（留空沿用全局） <input id="fallbackFps" type="text" placeholder="30, 45, 60, 90, 120, 130, 144, 165" aria-label="未单独配置游戏的帧率"></label>
 <p>每档独立保存。基础余量留空且覆盖为 {} 时使用本档默认值。省电、均衡、性能、快速依次为 3、1、0.3、0 FPS。匹配的帧率覆盖优先，使用填写的绝对余量。</p>
+<p>额外下调上限每档独立，0 表示关闭自适应下调，范围为 0～3 FPS；基础余量仍单独生效。“恢复当前档默认值”同时恢复本档基础余量和下调上限。</p>
 <p id="fasLiveStatus" aria-live="polite">正在读取内核已载入档位…</p>
 <p id="fasStrengthNote" aria-live="polite">正在读取内核 FAS 能力…</p>
 <label>预览帧率（FPS） <input id="fasPreviewFps" type="number" min="15" max="240" step="1" value="165"></label>

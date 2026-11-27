@@ -46,10 +46,25 @@ static inline u32 fp_fas_margin(const struct fp_fas_tuning *tuning, u32 fps)
 	return (u64)tuning->margin_base_mfps * fps / 60;
 }
 
+static inline bool fp_fas_tuning_ext_valid(const struct fp_fas_tuning_ext *next)
+{
+	return fp_fas_tuning_valid(&next->tuning) &&
+	       next->util_limit_mfps <= FP_FAS_UTIL_LIMIT_MAX && !next->reserved;
+}
+
+static inline void fp_fas_clamp_offset(struct fp_fas_feedback *state, u32 limit)
+{
+	if (state->util_offset_mfps < -(__s32)limit)
+		state->util_offset_mfps = -(__s32)limit;
+	if (state->util_offset_mfps > 0)
+		state->util_offset_mfps = 0;
+}
+
 /* Called by real frame work; elapsed idle time never produces catch-up ticks. */
 static inline void fp_fas_util_event(struct fp_fas_feedback *state, u64 now,
-				      u32 util_permille)
+				      u32 util_permille, u32 limit)
 {
+	fp_fas_clamp_offset(state, limit);
 	if (!state->util_sample_ns || now < state->util_sample_ns) {
 		state->util_sample_ns = now;
 		return;
@@ -63,10 +78,7 @@ static inline void fp_fas_util_event(struct fp_fas_feedback *state, u64 now,
 		state->util_offset_mfps -= 100;
 	else if (util_permille >= 650)
 		state->util_offset_mfps += 100;
-	if (state->util_offset_mfps < -3000)
-		state->util_offset_mfps = -3000;
-	if (state->util_offset_mfps > 0)
-		state->util_offset_mfps = 0;
+	fp_fas_clamp_offset(state, limit);
 }
 
 static inline u32 fp_fas_effective_rate_margin(const struct fp_fas_feedback *state,

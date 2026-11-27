@@ -207,6 +207,21 @@ for (const settings of [
 }
 console.log("FAS protocol: four independent modes, legacy default, decimal margins, overrides and invalid ranges passed");
 
+for (const value of [null, [], false, {unknown:null}, {fast:-1}, {fast:3.001},
+  {fast:0.0001}, {fast:true}, {fast:"0"}, {fast:{}}, JSON.parse('{"__proto__":0}')])
+  assert.throws(() => frameFasProtocol({fasUtilLimits:value}));
+for (const mode of ["powersave", "balance", "performance", "fast"]) {
+  for (const limit of [0, 0.001, 0.501, 3]) {
+    const result = frameFasProtocol({fasMode:mode,fasUtilLimits:{[mode]:limit}});
+    assert.equal(result.blob.length, 88);
+    const view = new DataView(result.blob.buffer);
+    assert.equal(view.getUint32(80,true), Math.round(limit*1000));
+    assert.equal(view.getUint32(84,true), 0);
+  }
+}
+assert.equal(frameFasProtocol({fasUtilLimits:{balance:null,fast:0}}).blob.length,80);
+console.log("FAS adaptive limits: all banks validated, zero preserved, exact extended ABI and old default passed");
+
 if (process.argv[2] === "--defaults") {
   fs.writeFileSync(path.join(__dirname, "defaults/config.bin"), packet.config);
   fs.writeFileSync(path.join(__dirname, "defaults/games.bin"), packet.table);

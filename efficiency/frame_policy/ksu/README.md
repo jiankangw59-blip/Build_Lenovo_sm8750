@@ -165,3 +165,23 @@ scaling and thermal/maximum constraints remain active. It does not write
 devfreq/min_freq or reinterpret mod_percent as a substitute. Preflight only
 reads the fixed KGSL topology and verifies writable attributes, while the
 kernel owns the independent lease and conditional restoration.
+
+### Per-mode adaptive downshift limit
+
+`fasUtilLimits` optionally maps `powersave`, `balance`, `performance`, and
+`fast` to a limit in FPS (0 through 3, at most three decimal places). Missing
+or null entries retain the original 3 FPS default. Zero disables only the
+utilization-driven offset; base/per-FPS margins still apply separately and
+retain the current kernel's original frame-rate scaling.
+
+An explicit selected limit uses an 88-byte FAS body in the existing FPS2/FPS3
+envelope. The first 80 bytes remain ABI1; the final words are the limit in
+thousandths of an FPS and a zero reserved word. A separate `0x86` ioctl requires
+the exact `fas_util_limit_v1` feature. The old 80-byte ioctl restores the default
+limit so boot/rollback cannot inherit another generation's custom limit.
+All four banks are validated even when inactive. Unsupported kernels reject
+custom limits before disabling or stopping either controller. The transaction
+checks `fas_util_limit_mfps` in the loaded kernel status before committing;
+a mismatch recovers the previous generation. A lower hot-applied bound clamps
+the existing offset immediately, including a change to zero. This adds no
+timer, worker, or daemon; the existing real-frame feedback events do the work.

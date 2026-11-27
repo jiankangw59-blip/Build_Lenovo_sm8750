@@ -138,6 +138,7 @@ static struct fp_fas_tuning fas_tuning = {
 	.abi = FP_FAS_ABI, .mode = 1, .margin_base_mfps = 1000,
 };
 static struct fp_fas_feedback fas_feedback;
+static u32 fas_util_limit_mfps = FP_FAS_UTIL_LIMIT_DEFAULT;
 static struct fp_fas_events fas_events;
 /* Ordered worker owns this batch under config_lock; never put 3KiB on stack. */
 static struct fp_fas_event fas_batch[FP_FAS_EVENTS];
@@ -1789,7 +1790,8 @@ static bool run_fas_batch(const struct fp_fas_event *events, unsigned int count,
 
 		if (!event->late)
 			fp_fas_util_event(&state->feedback, event->ended_ns,
-					  state->util_valid ? state->util_permille : 0);
+					  state->util_valid ? state->util_permille : 0,
+					  fas_util_limit_mfps);
 		state->effective_mfps = fp_fas_effective_rate_margin(&state->feedback,
 							     event->fps, event->margin_mfps);
 		state->last_adjustment = fp_fas_proportional(event->interval_ns, state->effective_mfps);
@@ -2496,15 +2498,17 @@ static int replace_scene_aux(unsigned long arg)
 	return error;
 }
 
-static int set_fas_tuning(const struct fp_fas_tuning *next)
+static int set_fas_tuning(const struct fp_fas_tuning *next, u32 limit)
 {
 	unsigned long flags;
 
-	if (!fp_fas_tuning_valid(next))
+	if (!fp_fas_tuning_valid(next) || limit > FP_FAS_UTIL_LIMIT_MAX)
 		return -EINVAL;
 	mutex_lock(&config_lock);
 	spin_lock_irqsave(&frame_lock, flags);
 	fas_tuning = *next;
+	fas_util_limit_mfps = limit;
+	fp_fas_clamp_offset(&fas_feedback, limit);
 	spin_unlock_irqrestore(&frame_lock, flags);
 	mutex_unlock(&config_lock);
 	return 0;
@@ -2530,7 +2534,16 @@ static long policy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 		if (copy_from_user(&tuning, (void __user *)arg, sizeof(tuning)))
 			return -EFAULT;
-		return set_fas_tuning(&tuning);
+		return set_fas_tuning(&tuning, FP_FAS_UTIL_LIMIT_DEFAULT);
+	}
+	if (cmd == FP_FAS_TUNING_EXT) {
+		struct fp_fas_tuning_ext tuning;
+
+		if (copy_from_user(&tuning, (void __user *)arg, sizeof(tuning)))
+			return -EFAULT;
+		if (!fp_fas_tuning_ext_valid(&tuning))
+			return -EINVAL;
+		return set_fas_tuning(&tuning.tuning, tuning.util_limit_mfps);
 	}
 	if (cmd != FP_CONFIG && cmd != FP_DISABLE)
 		return -ENOTTY;
@@ -2641,13 +2654,14 @@ static int format_policy_status(char *status, size_t capacity, const struct sab_
 	spin_unlock_irqrestore(&frame_lock, flags);
 	length = scnprintf(status, capacity,
 		"abi=%u\nconfigured=%u\nobserve=%u\nowner=%s\nforeground=%s\n"
-		"features=cpu,scene_pmu,game_frames,gpu,gpu_file_credentials,game_relations,fps_per_game,scene_table,scene_activity,scene_aux,fas_common_p,fas_tuning,fas_task_util\n"
+		"features=cpu,scene_pmu,game_frames,gpu,gpu_file_credentials,game_relations,fps_per_game,scene_table,scene_activity,scene_aux,fas_common_p,fas_tuning,fas_task_util,fas_util_limit_v1\n"
 		"game_pid=%d\nprobe=%u\ngeneration=%llu\napplied_generation=%llu\n"
 		"frames=%llu\nselected_frames=%llu\nframe_errors=%llu\nlevel=%u\n"
 		"qualified_fps=%u\n"
 		"fas_steps=%llu\nfas_late_steps=%llu\nfas_overflows=%llu\n"
 		"fas_effective_mfps=%u\nfas_last_adjustment=%lld\n"
 		"fas_mode=%u\nfas_margin_base_mfps=%u\nfas_util_offset_mfps=%d\n"
+		"fas_util_limit_mfps=%u\n"
 		"fas_task_samples=%llu\nfas_task_sample_errors=%llu\nfas_task_rollbacks=%llu\n"
 		"fas_util_valid=%u\nfas_util_permille=%u\nfas_critical_mask=%016llx\nrender_cpu=%d\n"
 		"gpu_samples=%llu\ngpu_unknown=%llu\ngpu_level=%u\ngpu_pending_ns=%llu\n"
@@ -2676,6 +2690,7 @@ static int format_policy_status(char *status, size_t capacity, const struct sab_
 		applied_generation, frames, used, errors, level, fps,
 		fas_steps, fas_late_steps, overflows, fas_effective_mfps, fas_last_adjustment,
 		fas_tuning.mode, fas_tuning.margin_base_mfps, fas_feedback.util_offset_mfps,
+		fas_util_limit_mfps,
 		fas_task_samples, fas_task_sample_errors, fas_task_rollbacks,
 		fas_util_valid, fas_util_permille, fas_critical_mask, renderer,
 		gpu_count, gpu_missing, gpu_level, gpu_average,

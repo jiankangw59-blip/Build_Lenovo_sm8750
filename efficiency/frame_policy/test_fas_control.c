@@ -27,14 +27,30 @@ int main(void)
 	assert(fp_fas_effective_rate(&tuning, &state, 165) == 164700);
 	assert(fp_fas_margin(&tuning, 120) == 2000);
 	for (i = 1; i < 50; i++)
-		fp_fas_util_event(&state, (u64)i * 1000000000ULL, 500);
+		fp_fas_util_event(&state, (u64)i * 1000000000ULL, 500, FP_FAS_UTIL_LIMIT_DEFAULT);
 	assert(state.util_offset_mfps == -3000);
-	fp_fas_util_event(&state, 49500000000ULL, 1000);
+	fp_fas_util_event(&state, 49500000000ULL, 1000, FP_FAS_UTIL_LIMIT_DEFAULT);
 	assert(state.util_offset_mfps == -3000);
-	fp_fas_util_event(&state, 100000000000ULL, 1000);
+	fp_fas_util_event(&state, 100000000000ULL, 1000, FP_FAS_UTIL_LIMIT_DEFAULT);
 	assert(state.util_offset_mfps == -2900); /* One real event, no idle catch-up loop. */
-	fp_fas_util_event(&state, 101000000000ULL, 100);
+	fp_fas_util_event(&state, 101000000000ULL, 100, FP_FAS_UTIL_LIMIT_DEFAULT);
 	assert(state.util_offset_mfps == 0);
+	for (u32 limit = 0; limit <= FP_FAS_UTIL_LIMIT_MAX; limit++) {
+		struct fp_fas_tuning_ext extended = {.tuning = tuning, .util_limit_mfps = limit};
+
+		assert(sizeof(extended) == 88);
+		assert(fp_fas_tuning_ext_valid(&extended));
+		state = (struct fp_fas_feedback){.util_offset_mfps = -3000};
+		fp_fas_util_event(&state, 1000000000ULL, 500, limit);
+		assert(state.util_offset_mfps == -(int)limit);
+		for (i = 2; i < 45; i++)
+			fp_fas_util_event(&state, (u64)i * 1000000000ULL, 500, limit);
+		assert(state.util_offset_mfps == -(int)limit);
+		extended.reserved = 1;
+		assert(!fp_fas_tuning_ext_valid(&extended));
+	}
+	struct fp_fas_tuning_ext invalid_limit = {.tuning = tuning, .util_limit_mfps = 3001};
+	assert(!fp_fas_tuning_ext_valid(&invalid_limit));
 	assert(fp_fas_common_target(2000000, 1800000, 250, true, false, -5000, 4320000) == 900000);
 	assert(fp_fas_common_target(2000000, 1800000, 250, true, true, 60000, 4320000) == 2060000);
 	assert(fp_fas_common_target(2000000, 1800000, 250, false, false, -5000, 4320000) == 1995000);

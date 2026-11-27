@@ -28,6 +28,11 @@ def status():
  print('aux_error='+('-5' if (s/'aux-reported-error').exists() else '0'))
  print('gpu_aux_error='+('-5' if (s/'gpu-aux-reported-error').exists() else '0'))
  print('gpu_aux_rollback_error='+('-5' if (s/'gpu-aux-rollback-reported-error').exists() else '0'))
+ if 'fas_util_limit_v1' in (s/'features').read_text().strip().split(','):
+  value=(s/'runtime-fas').read_bytes() if (s/'runtime-fas').exists() else bytes(80)
+  limit=struct.unpack_from('<I',value,80)[0] if len(value)==88 else 3000
+  if (s/'report-limit-wrong-B').exists() and (s/'runtime').read_text()=='B':limit=999
+  print('fas_util_limit_mfps='+str(limit))
 def clean():
  if (s/'cleanup-blocked').exists() or (s/'legacy-running').exists():return 1
  print('legacy_was_running='+str(int((s/'legacy-stop-pending').exists())))
@@ -43,9 +48,13 @@ elif a=='check-aux':
  if struct.unpack_from('<I',value,12)[0] and 'scene_aux' not in (s/'features').read_text().split(','):sys.exit(1)
 elif a=='check-fas':
  value=pathlib.Path(sys.argv[2]).read_bytes()
- if 'fas_tuning' not in (s/'features').read_text().strip().split(',') or len(value)!=80:sys.exit(1)
+ features=(s/'features').read_text().strip().split(',')
+ if 'fas_tuning' not in features or len(value) not in (80,88):sys.exit(1)
  abi,mode,base,count=struct.unpack_from('<4I',value)
  if abi!=1 or mode>=4 or base>30000 or count>8:sys.exit(1)
+ if len(value)==88:
+  limit,reserved=struct.unpack_from('<2I',value,80)
+  if 'fas_util_limit_v1' not in features or limit>3000 or reserved:sys.exit(1)
 elif a=='suspend-legacy':
  if (s/'legacy-running').exists():
   boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
@@ -180,6 +189,39 @@ os.execv({shutil.which('flock')!r},['flock']+sys.argv[1:])
         (target / "scene-required").write_text("1\n")
         (self.state / "features").write_text("cpu,gpu_file_credentials,game_relations,fps_per_game,scene_table,fas_tuning,scene_aux")
         return bytes(aux)
+
+    def test_adaptive_limit_readback_and_rollback_restore_original_bytes(self):
+        features = self.state / "features"
+        features.write_text(features.read_text() + ",fas_util_limit_v1")
+        original = self.select("A")
+        target = self.fixtures / "B/fas.bin"
+        target.write_bytes(target.read_bytes() + struct.pack("<2I", 0, 0))
+        self.save("B")
+        self.assertEqual((self.state / "runtime-fas").read_bytes(), target.read_bytes())
+        self.run_command("rollback")
+        self.assertEqual((self.state / "runtime-fas").read_bytes(), (original / "fas.bin").read_bytes())
+
+    def test_adaptive_limit_bad_readback_cancels_commit_and_recovers(self):
+        features = self.state / "features"
+        features.write_text(features.read_text() + ",fas_util_limit_v1")
+        original = self.select("A")
+        target = self.fixtures / "B/fas.bin"
+        target.write_bytes(target.read_bytes() + struct.pack("<2I", 500, 0))
+        (self.state / "report-limit-wrong-B").touch()
+        self.save("B", success=False)
+        self.assertEqual(self.current(), original)
+        self.assertEqual((self.state / "runtime-fas").read_bytes(), (original / "fas.bin").read_bytes())
+
+    def test_adaptive_limit_unsupported_preflight_keeps_old_controller_running(self):
+        original = self.select("A")
+        target = self.fixtures / "B/fas.bin"
+        target.write_bytes(target.read_bytes() + bytes(8))
+        (self.state / "legacy-running").touch()
+        self.save("B", success=False)
+        calls = (self.state / "calls").read_text().splitlines()
+        self.assertNotIn("disable", calls)
+        self.assertNotIn("suspend-legacy", calls)
+        self.assertEqual(self.current(), original)
 
     def test_aux_resource_preflight_precedes_any_legacy_or_native_mutation(self):
         self.select("A")

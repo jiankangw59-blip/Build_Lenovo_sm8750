@@ -10,6 +10,8 @@ from compile_fas_tuning import MODES, compile_tuning
 
 BANK = {"powersave": {"base": 2.7, "30": 0.5}, "balance": 0, "performance": None}
 CASES = [{}, *({"fasMode": mode} for mode in MODES),
+         *({"fasMode": mode, "fasUtilLimits": {mode: limit}} for mode in MODES
+           for limit in (None, 0, 0.001, 0.501, 3, -1, 3.001, 0.0001, True, "1")),
          *({"fasMode": mode, "fasProfiles": BANK} for mode in MODES),
          {"fasMode": "fast", "fasMarginFps": {"base": 1.001, "165": 0.3, "60": 0}},
          {"fasMarginFps": 0.001}, {"fasMarginFps": -0.0},
@@ -39,6 +41,9 @@ def main():
         if "fasProfiles" in settings:
             custom = {key: {"margin_fps": value}
                       for key, value in settings["fasProfiles"].items() if value is not None}
+        for key, value in settings.get("fasUtilLimits", {}).items():
+            if value is not None:
+                custom.setdefault(key, {})["util_limit_fps"] = value
         try:
             blob, _ = compile_tuning(mode, {}, custom)
         except (ValueError, TypeError):
