@@ -55,8 +55,8 @@ a number for a custom base, or an object such as
 base is at most 30 FPS, and each mode accepts up to eight per-FPS overrides.
 An existing `fasMarginFps` is assigned to the mode selected in the legacy
 configuration when the user edits or switches modes. Other modes start at
-their defaults. The module continues to load the active profile in the existing
-80-byte kernel format.
+their defaults. The active profile uses the existing 80-byte kernel format
+when its adaptive limit defaults to the value provided by the kernel.
 
 With `fas_mode_strength_v1`, the base is used directly from 60 FPS up and scales
 by FPS / 60 below 60. The four modes allow up to 3, 0.5, 0.2 and 0 FPS of extra
@@ -69,7 +69,7 @@ The preview starts at 165 FPS. Changing it only recalculates the table and
 leaves global and per-game FPS targets unchanged.
 
 Activation requires the exact `fas_tuning` kernel capability. The read-only
-`framectl check-fas` validates capability and the 80-byte tuning before either
+`framectl check-fas` validates capability and the tuning data before either
 controller is stopped. `load-fas` issues the actual tuning ioctl before the main
 configuration is enabled. A built blob or passing host test is not evidence
 that this new controller has been flashed or accepted on a physical device.
@@ -180,8 +180,11 @@ thousandths of an FPS and a zero reserved word. A separate `0x86` ioctl requires
 the exact `fas_util_limit_v1` feature. The old 80-byte ioctl restores the default
 limit so boot/rollback cannot inherit another generation's custom limit.
 All four banks are validated even when inactive. Unsupported kernels reject
-custom limits before disabling or stopping either controller. The transaction
-checks `fas_util_limit_mfps` in the loaded kernel status before committing;
-a mismatch recovers the previous generation. A lower hot-applied bound clamps
+an explicit selected limit on save or rollback before disabling or stopping
+either controller, including when committing a disabled generation. A disabled
+generation with the legacy 80-byte tuning can still be committed without native
+kernel support. When scheduling is enabled, the transaction checks
+`fas_util_limit_mfps` in the loaded kernel status before committing. A mismatch
+recovers the previous generation. A lower hot-applied bound clamps
 the existing offset immediately, including a change to zero. This adds no
 timer, worker, or daemon; the existing real-frame feedback events do the work.

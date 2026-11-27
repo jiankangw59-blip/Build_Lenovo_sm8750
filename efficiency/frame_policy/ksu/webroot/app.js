@@ -84,7 +84,7 @@ function editFasSettings(nextMode, reset = false) {
     const settings = JSON.parse(editor.value);
     const profiles = frameFasProfiles(settings);
     profiles[editingMode] = reset ? null : readFasProfile();
-    if (fasUtilLimit.validity?.badInput) throw new Error("FAS 额外下调上限必须为数值");
+    if (!reset && fasUtilLimit.validity?.badInput) throw new Error("FAS 额外下调上限必须为数值");
     const utilLimits = frameFasUtilLimits(settings);
     const limit = reset || fasUtilLimit.value.trim() === "" ? null : Number(fasUtilLimit.value);
     if (limit !== null || Object.hasOwn(settings, "fasUtilLimits")) {
@@ -169,7 +169,7 @@ async function refresh() {
   const limit = supportsStrength || supportsUtilLimit ? status.match(/^fas_util_limit_mfps=(\d+)$/m)?.[1] : "3000";
   document.getElementById("fasUtilLimitNote").textContent = supportsUtilLimit
     ? "当前内核支持可调上限。修改后点击保存并应用，以上方内核读回值为准。"
-    : "当前内核不支持可调上限，请先更新内核；此项暂不可编辑。";
+    : "当前内核不支持可调上限。待保存预览中的自定义上限需更新内核才能应用。";
   const liveStatus = document.getElementById("fasLiveStatus");
   if (activeMode && /^configured=1$/m.test(status)) {
     const owner = status.match(/^owner=(\w+)$/m)?.[1];

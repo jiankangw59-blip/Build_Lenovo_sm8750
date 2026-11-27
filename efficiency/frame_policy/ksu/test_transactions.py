@@ -105,7 +105,7 @@ class Transactions(unittest.TestCase):
         source = source.replace("state=/data/adb/frame-policy", f"state='{self.state}'")
         source = source.replace("legacy=/data/adb/modules/fas_rs/event-control.sh",
                                 f"legacy='{self.module / 'legacy.sh'}'")
-        source = source.replace("/dev/frame_policy", "/dev/null")
+        source = source.replace("/dev/frame_policy", '"${TRANSACTION_DEVICE:-/dev/null}"')
         source = source.replace("sha256sum /system/lib64/libgui.so", f"sha256sum '{self.root / 'libgui'}'")
         (self.module / "config.sh").write_text(source, encoding="utf-8")
         (self.root / "libgui").write_bytes(b"test libgui")
@@ -222,6 +222,54 @@ os.execv({shutil.which('flock')!r},['flock']+sys.argv[1:])
         self.assertNotIn("disable", calls)
         self.assertNotIn("suspend-legacy", calls)
         self.assertEqual(self.current(), original)
+
+    def test_disabled_adaptive_limit_save_rejects_unsupported_kernel(self):
+        original = self.select("A")
+        target = self.fixtures / "off/fas.bin"
+        target.write_bytes(target.read_bytes() + bytes(8))
+        (self.state / "legacy-running").touch()
+        self.save("off", success=False)
+        self.assertEqual(self.current(), original)
+        self.assertEqual((self.state / "runtime").read_text(), "A")
+        self.assertTrue((self.state / "legacy-running").exists())
+        self.assertEqual((self.state / "calls").read_text().splitlines(), ["unpack-settings", "check-fas"])
+
+    def test_disabled_adaptive_limit_rollback_rejects_feature_suffix(self):
+        features = self.state / "features"
+        features.write_text(features.read_text() + ",fas_util_limit_v10")
+        target = self.fixtures / "off/fas.bin"
+        target.write_bytes(target.read_bytes() + struct.pack("<2I", 500, 0))
+        previous = self.select("off")
+        original = self.select("A", parent=previous.name)
+        self.run_command("rollback", success=False)
+        self.assertEqual(self.current(), original)
+        self.assertEqual((self.state / "runtime").read_text(), "A")
+        self.assertEqual((self.state / "calls").read_text().splitlines(), ["check-fas"])
+
+    def test_supported_disabled_adaptive_limit_can_be_saved_and_restored_without_loading(self):
+        features = self.state / "features"
+        features.write_text(features.read_text() + ",fas_util_limit_v1")
+        target = self.fixtures / "off/fas.bin"
+        target.write_bytes(target.read_bytes() + bytes(8))
+        self.save("off")
+        original = self.current()
+        self.assertEqual((original / "fas.bin").read_bytes(), target.read_bytes())
+        self.assertEqual((self.state / "calls").read_text().splitlines(),
+                         ["unpack-settings", "check-fas", "disable"])
+        self.run_command("rollback")
+        self.run_command("rollback")
+        self.assertEqual((self.current() / "fas.bin").read_bytes(), target.read_bytes())
+        self.assertEqual((self.state / "runtime").read_text(), "none")
+        self.assertEqual((self.state / "calls").read_text().splitlines(),
+                         ["unpack-settings", "check-fas", "disable", "disable", "check-fas", "disable"])
+
+    def test_legacy_disabled_save_and_rollback_work_without_frame_policy_device(self):
+        self.environment["TRANSACTION_DEVICE"] = str(self.root / "missing-device")
+        self.save("off")
+        self.assertEqual((self.current() / "fas.bin").stat().st_size, 80)
+        self.run_command("rollback")
+        self.assertEqual((self.current() / "fas.bin").stat().st_size, 80)
+        self.assertEqual((self.state / "calls").read_text().splitlines(), ["unpack-settings"])
 
     def test_aux_resource_preflight_precedes_any_legacy_or_native_mutation(self):
         self.select("A")

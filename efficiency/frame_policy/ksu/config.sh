@@ -46,7 +46,19 @@ resume_owned_legacy() {
 apply_dir() {
     chosen=$1
     apply_touched=0
+    # Older immutable generations predate FAS data. Their compatibility value
+    # is always balance/1 FPS, supplied by the module without rewriting history.
+    fas=$chosen/fas.bin
+    [ -f "$fas" ] || fas=$module/defaults/fas.bin
     if [ "$(cat "$chosen/enabled")" != 1 ]; then
+        # An explicit limit still requires kernel support when stored disabled.
+        # Legacy disabled configurations also work without a frame policy device.
+        if [ -f "$fas" ]; then
+            fas_size=$(wc -c < "$fas") || return 1
+            if [ "$fas_size" -eq 88 ]; then
+                "$controller" check-fas "$fas" >/dev/null || return 1
+            fi
+        fi
         apply_touched=1
         if [ -c /dev/frame_policy ]; then "$controller" disable >/dev/null || return 1; fi
         rm -f "$state/applied-boot"
@@ -68,10 +80,6 @@ apply_dir() {
        ! printf '%s\n' "$native" | grep -q 'features=.*scene_table'; then
         fail '当前内核尚未接入 Scene 策略表，不能应用 fast 或逐应用 Scene 配置'; return 1
     fi
-    # Older immutable generations predate FAS data. Their compatibility value
-    # is always balance/1 FPS, supplied by the module without rewriting history.
-    fas=$chosen/fas.bin
-    [ -f "$fas" ] || fas=$module/defaults/fas.bin
     aux=$chosen/aux.bin
     aux_required=0
     if [ -f "$chosen/aux-required" ]; then

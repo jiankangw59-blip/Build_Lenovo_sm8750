@@ -115,6 +115,7 @@ test("per-mode adaptive limits preserve zero and other modes, preview and reset"
 
 test("unsupported kernels and invalid adaptive limits cannot silently save", async () => {
   const state = await app(), e = state.elements;
+  assert.match(e.fasUtilLimitNote.textContent, /待保存预览中的自定义上限需更新内核才能应用/);
   for (const limit of [0, -1, 3.001, 0.0001]) {
     const settings = JSON.parse(e.editor.value);
     settings.fasUtilLimits = {balance:limit};
@@ -123,6 +124,22 @@ test("unsupported kernels and invalid adaptive limits cannot silently save", asy
     assert.equal(state.packets.length, 0);
     assert.equal(e.message.dataset.error, "true");
   }
+});
+
+test("reset discards browser-invalid adaptive limit input", async () => {
+  const state = await app(), e = state.elements;
+  state.setStatus("features=fas_tuning,fas_util_limit_v1\n");
+  await e.refresh.onclick();
+  e.fasUtilLimit.value = "0.501";
+  e.fasUtilLimit.listeners.change();
+  e.fasUtilLimit.value = "";
+  e.fasUtilLimit.validity = {badInput: true};
+  e.fasUtilLimit.listeners.change();
+  assert.equal(e.message.dataset.error, "true");
+  e.fasReset.onclick();
+  assert.equal(e.message.dataset.error, "false");
+  assert.equal(JSON.parse(e.editor.value).fasUtilLimits.balance, null);
+  assert.equal(e["fas-balance-extra"].textContent, "3");
 });
 
 test("round trips lock all editors until the running state returns", async () => {

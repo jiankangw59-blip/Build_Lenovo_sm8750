@@ -19,7 +19,7 @@ label{display:block;margin:10px 0}input,select{background:#192631;color:#e5edf3;
 <fieldset><legend>游戏 FAS 模式</legend>
 <label>模式 <select id="fasMode"><option value="powersave">省电 powersave</option><option value="balance">均衡 balance</option><option value="performance">性能 performance</option><option value="fast">快速 fast</option></select></label>
 <label>基础帧率余量（FPS，留空随档） <input id="fasMarginBase" type="number" min="0" max="30" step="0.001"></label>
-<label>额外下调上限（FPS，留空保持 3） <input id="fasUtilLimit" type="number" min="0" max="3" step="0.001" placeholder="3" disabled></label>
+<label>额外下调上限（FPS，留空使用默认上限） <input id="fasUtilLimit" type="number" min="0" max="3" step="0.001" disabled></label>
 <p id="fasUtilLimitNote">正在读取内核可调上限能力…</p>
 <label>按帧率覆盖余量（可选，例如 {"165":0.3}）<textarea id="fasOverrides" spellcheck="false" aria-label="FAS 按帧率余量覆盖">{}</textarea></label>
 <button id="fasReset" type="button">恢复当前档默认值</button>
