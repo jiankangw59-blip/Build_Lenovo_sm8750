@@ -33,8 +33,8 @@ class Package(unittest.TestCase):
                 self.assertEqual(archive.read("defaults/aux-required"), b"0\n")
                 self.assertFalse(metadata["resident_process_added"])
                 module = archive.read("module.prop").splitlines()
-                self.assertIn(b"version=0.3.5-test", module)
-                self.assertIn(b"versionCode=305", module)
+                self.assertIn(b"version=0.3.6-test", module)
+                self.assertIn(b"versionCode=306", module)
                 self.assertIn(b"load-fas", archive.read("config.sh"))
 
 
