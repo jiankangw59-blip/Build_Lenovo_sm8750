@@ -3,14 +3,18 @@
 
 /* The policy owns a task reference. Keep the scheduler's cpuset and vendor checks. */
 int ace6_set_task_affinity(struct task_struct *task, const struct cpumask *mask,
-			   const struct cpumask *requested)
+			   const struct cpumask *requested, bool *exiting)
 {
 	struct cpumask *user_mask = NULL;
 	struct affinity_context ctx;
+	unsigned int flags = READ_ONCE(task->flags);
 	bool skip = false;
 	int ret;
 
-	if (READ_ONCE(task->flags) & (PF_EXITING | PF_NO_SETAFFINITY))
+	flags &= PF_EXITING | PF_NO_SETAFFINITY;
+	/* Report only the rejection caused by exit alone. */
+	*exiting = flags == PF_EXITING;
+	if (flags)
 		return -ESRCH;
 	trace_android_vh_sched_setaffinity_early(task, mask, &skip);
 	if (skip)

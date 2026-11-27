@@ -82,6 +82,7 @@ jobs:
           python3 efficiency/frame_policy/test_fas_tuning.py
           python3 efficiency/frame_policy/test_kunit_coverage.py
           python3 efficiency/thread_affinity/test_snapshot_growth.py
+          python3 efficiency/thread_affinity/test_affinity_exit.py
       - name: Compile against the pinned ARM64 6.6.118 kernel
         run: |
           set -euo pipefail
@@ -98,5 +99,9 @@ jobs:
           make -s -C "$kernel" O="$out" ARCH=arm64 LLVM=1 gki_defconfig
           grep -qx CONFIG_FRAME_POLICY=y "$out/.config"
           make -s -C "$kernel" -j2 O="$out" ARCH=arm64 LLVM=1 \
-            kernel/sched/frame_policy/built-in.a kernel/sched/ace6_thread_affinity.o
+            kernel/sched/frame_policy/built-in.a kernel/sched/ace6_thread_affinity.o \
+            kernel/sched/core.o
+          llvm-nm --defined-only "$out/kernel/sched/core.o" | grep -E ' T ace6_set_task_affinity$'
+          llvm-nm --undefined-only "$out/kernel/sched/ace6_thread_affinity.o" \
+            | grep -E ' U ace6_set_task_affinity$'
           llvm-ar t "$out/kernel/sched/frame_policy/built-in.a"
