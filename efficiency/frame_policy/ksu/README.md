@@ -39,11 +39,35 @@ control changes. Basic presets can fall back to their global CPU/GPU bounds.
 The module does not enable Scene's original
 userspace performance scheduler or core_ctl.
 
-FAS mode is independent from Scene: `fasMode` accepts `powersave`, `balance`,
-`performance`, or `fast`. Optional `fasMarginFps` is a number or an advanced
-object such as `{"base":1,"120":0.5,"165":0.3}`. Without an explicit margin the
-four mode bases are 3, 1, 0.3 and 0 FPS. Numbers have at most three decimal places;
-the base is at most 30 FPS, and up to eight per-FPS overrides are accepted.
+Open KernelSU Manager → Modules → 原生帧调度配置 → WebUI → 游戏 FAS 模式.
+Choose a mode and use 保存并应用. Each mode preserves its own base and overrides
+when switching modes. Use 恢复当前档默认值 to clear the selected mode's settings,
+or leave its base blank and its overrides set to `{}`. The default bases for
+`powersave`, `balance`, `performance` and `fast` are 3, 1, 0.3 and 0 FPS.
+Adding overrides with a blank base stores that mode's default base with its
+overrides. A matching FPS override supplies an absolute margin and takes
+precedence over the base.
+
+`fasMode` selects the active FAS profile independently of Scene and defaults
+to `balance`. Each entry in `fasProfiles` can be `null` for the mode default,
+a number for a custom base, or an object such as
+`{"base":1,"120":0.5,"165":0.3}`. Margins have up to three decimal places, the
+base is at most 30 FPS, and each mode accepts up to eight per-FPS overrides.
+An existing `fasMarginFps` is assigned to the mode selected in the legacy
+configuration when the user edits or switches modes. Other modes start at
+their defaults. The module continues to load the active profile in the existing
+80-byte kernel format.
+
+With `fas_mode_strength_v1`, the base is used directly from 60 FPS up and scales
+by FPS / 60 below 60. The four modes allow up to 3, 0.5, 0.2 and 0 FPS of extra
+adaptive reduction. At 165 FPS the default internal targets range from
+159–162, 163.5–164, 164.5–164.7 and 165 FPS, respectively. Actual frame rate
+depends on the game, workload and thermal limits. Earlier FAS-capable kernels
+scale the base by FPS / 60 at every grade and allow up to 3 FPS of extra adaptive
+reduction. The WebUI displays the running mode separately from the draft preview.
+The preview starts at 165 FPS. Changing it only recalculates the table and
+leaves global and per-game FPS targets unchanged.
+
 Activation requires the exact `fas_tuning` kernel capability. The read-only
 `framectl check-fas` validates capability and the 80-byte tuning before either
 controller is stopped. `load-fas` issues the actual tuning ioctl before the main

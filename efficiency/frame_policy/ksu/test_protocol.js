@@ -2,7 +2,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const {frameSettingsProtocol, frameFasProtocol} = require("./webroot/protocol.js");
+const {frameSettingsProtocol, frameFasProtocol, frameFasProfiles} = require("./webroot/protocol.js");
 for (const name of ["enabled", "libgui.sha256", "seed.json", "settings.json"])
   assert.ok(!fs.readFileSync(path.join(__dirname, "defaults", name)).includes(13), `${name} must use LF`);
 const seed = JSON.parse(fs.readFileSync(path.join(__dirname, "defaults/seed.json"), "utf8"));
@@ -152,6 +152,59 @@ assert.deepEqual(custom.overrides, [[60, 0], [165, 300]]);
 assert.equal(view(custom.blob).getUint32(4, true), 3);
 assert.equal(frameFasProtocol({fasMarginFps: 0.001}).base, 1);
 assert.equal(frameFasProtocol({fasMarginFps: {base: 30, "240": 236}}).overrides[0][1], 236000);
+const legacyMargin = {...settings(), fasMode: "fast", fasMarginFps: {base: 2.1, 165: 0}};
+const legacyProfiles = frameFasProfiles(legacyMargin);
+assert.deepEqual(legacyProfiles, {powersave: null, balance: null, performance: null, fast: {base: 2.1, 165: 0}});
+assert.deepEqual(frameFasProfiles({fasMarginFps: 0}), {powersave: null, balance: 0, performance: null, fast: null});
+legacyProfiles.fast.base = 9;
+assert.equal(legacyMargin.fasMarginFps.base, 2.1, "Profiles must be safe for the UI to edit");
+const legacyPacket = frameSettingsProtocol(legacyMargin, seed, sceneSeed);
+assert.deepEqual(legacyPacket.settings, legacyMargin, "An unrelated save retains the legacy settings shape");
+assert.deepEqual(legacyPacket.fas, frameFasProtocol({fasMode: "fast", fasMarginFps: {base: 2.1, 165: 0}}).blob);
+
+const bank = {balance: 0, performance: null, fast: {base: 2.5, 120: 0, 165: 0.125}};
+const normalizedBank = {powersave: null, ...bank};
+const bankInput = {...settings(), fasMode: "fast", fasProfiles: bank};
+const bankPacket = frameSettingsProtocol(bankInput, seed, sceneSeed);
+assert.deepEqual(bankPacket.settings, {...bankInput, fasProfiles: normalizedBank});
+assert.equal(Object.hasOwn(bank, "powersave"), false);
+for (const key of ["config", "table", "scene", "aux"])
+  assert.deepEqual(bankPacket[key], packet[key], `Profile bank cannot change ${key} bytes`);
+const {payload: bankPayload} = bankPacket, bankView = view(bankPayload);
+const bankJson = bankPayload.subarray(32, 32 + bankView.getUint32(4, true));
+assert.deepEqual(JSON.parse(new TextDecoder().decode(bankJson)), bankPacket.settings);
+assert.equal(bankView.getUint32(0, true), header.getUint32(0, true));
+assert.equal(bankView.getUint32(20, true), 80);
+const auxSeed = JSON.parse(fs.readFileSync(path.join(__dirname, "defaults/scene-aux-seed.json"), "utf8"));
+const auxInput = {...settings(), sceneAux: true, sceneGpuLock: true,
+  sceneApps: {"com.example.private": {mode: "performance", category: "Camera"}}};
+const auxBefore = frameSettingsProtocol(auxInput, seed, sceneSeed, auxSeed);
+const auxBank = frameSettingsProtocol({...auxInput, fasProfiles: bank}, seed, sceneSeed, auxSeed);
+for (const key of ["config", "table", "scene", "aux"])
+  assert.deepEqual(auxBank[key], auxBefore[key], `Profile bank cannot change FPS3 ${key} bytes`);
+assert.deepEqual(auxBank.settings, {...auxBefore.settings, fasProfiles: normalizedBank});
+assert.deepEqual(auxBank.payload.subarray(8, 40), auxBefore.payload.subarray(8, 40));
+assert.equal(view(auxBank.payload).getUint32(0, true), 0x46505333);
+for (const [mode, base, overrides] of [
+  ["powersave", 3000, []], ["balance", 0, []], ["performance", 300, []],
+  ["fast", 2500, [[120, 0], [165, 125]]],
+]) {
+  const tuned = frameFasProtocol({...bankInput, fasMode: mode});
+  assert.equal(tuned.base, base);
+  assert.deepEqual(tuned.overrides, overrides);
+}
+assert.equal(frameFasProtocol({fasProfiles: {balance: null}}).base, 1000);
+for (const settings of [
+  {fasProfiles: null}, {fasProfiles: false}, {fasProfiles: []},
+  {fasProfiles: {unknown: null}}, {fasProfiles: JSON.parse('{"__proto__":null}')},
+  {fasProfiles: {fast: false}}, {fasProfiles: {fast: "0"}}, {fasProfiles: {fast: {165: 2}}},
+  {fasProfiles: {fast: {base: 0, 14: 1}}}, {fasProfiles: {fast: {base: Infinity}}},
+  {fasProfiles: {fast: {base: 1, 60: 56.001}}}, {fasMode: "missing", fasProfiles: {}},
+  {fasMarginFps: 0, fasProfiles: {}}, {fasMarginFps: null, fasProfiles: {balance: null}},
+]) {
+  assert.throws(() => frameFasProfiles(settings));
+  assert.throws(() => frameFasProtocol(settings));
+}
 console.log("FAS protocol: four independent modes, legacy default, decimal margins, overrides and invalid ranges passed");
 
 if (process.argv[2] === "--defaults") {

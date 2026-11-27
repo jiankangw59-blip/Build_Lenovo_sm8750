@@ -1,10 +1,9 @@
 "use strict";
 
-function frameFasProtocol(settings) {
-  const modes = ["powersave", "balance", "performance", "fast"];
-  const mode = Object.hasOwn(settings, "fasMode") ? settings.fasMode : "balance";
-  const index = modes.indexOf(mode);
-  if (index < 0) throw new Error("fasMode 必须为 powersave / balance / performance / fast");
+const FRAME_FAS_MODES = ["powersave", "balance", "performance", "fast"];
+const FRAME_FAS_DEFAULT_MFPS = [3000, 1000, 300, 0];
+
+function parseFrameFasMargin(margin) {
   const milli = value => {
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
       throw new Error("FAS 余量必须为非负有限数值");
@@ -16,7 +15,6 @@ function frameFasProtocol(settings) {
     if (!Number.isSafeInteger(result)) throw new Error("FAS 余量超出范围");
     return result;
   };
-  const margin = Object.hasOwn(settings, "fasMarginFps") ? settings.fasMarginFps : [3, 1, 0.3, 0][index];
   let base, overrides = [];
   if (margin && typeof margin === "object" && !Array.isArray(margin)) {
     if (!Object.hasOwn(margin, "base")) throw new Error("高级 FAS 余量必须包含 base");
@@ -32,6 +30,36 @@ function frameFasProtocol(settings) {
     overrides.sort((a, b) => a[0] - b[0]);
   } else base = milli(margin);
   if (base > 30000 || overrides.length > 8) throw new Error("FAS 基础余量或覆盖数量超出范围");
+  return {base, overrides};
+}
+
+function readFrameFasSettings(settings) {
+  const mode = Object.hasOwn(settings, "fasMode") ? settings.fasMode : "balance";
+  const index = FRAME_FAS_MODES.indexOf(mode);
+  if (index < 0) throw new Error("fasMode 必须为 powersave / balance / performance / fast");
+  const hasProfiles = Object.hasOwn(settings, "fasProfiles");
+  const hasLegacy = Object.hasOwn(settings, "fasMarginFps");
+  if (hasProfiles && hasLegacy) throw new Error("fasProfiles 与 fasMarginFps 不能同时设置");
+  const input = hasProfiles ? settings.fasProfiles : hasLegacy ? {[mode]: settings.fasMarginFps} : {};
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("fasProfiles 必须为档位配置对象");
+  const profiles = Object.fromEntries(FRAME_FAS_MODES.map(key => [key, null]));
+  let selected = {base: FRAME_FAS_DEFAULT_MFPS[index], overrides: []};
+  for (const [key, margin] of Object.entries(input)) {
+    if (!Object.hasOwn(profiles, key)) throw new Error(`未知 FAS 档位：${key}`);
+    if (hasProfiles && margin === null) continue;
+    const parsed = parseFrameFasMargin(margin);
+    profiles[key] = typeof margin === "number" ? margin : {...margin};
+    if (key === mode) selected = parsed;
+  }
+  return {mode, index, profiles, ...selected};
+}
+
+function frameFasProfiles(settings) {
+  return readFrameFasSettings(settings).profiles;
+}
+
+function encodeFrameFas({mode, index, base, overrides}) {
   const blob = new Uint8Array(80), view = new DataView(blob.buffer);
   [1, index, base, overrides.length].forEach((value, i) => view.setUint32(i * 4, value, true));
   overrides.forEach(([fps, amount], i) => {
@@ -41,8 +69,12 @@ function frameFasProtocol(settings) {
   return {blob, mode, base, overrides};
 }
 
+function frameFasProtocol(settings) {
+  return encodeFrameFas(readFrameFasSettings(settings));
+}
+
 function frameSettingsProtocol(settings, seed, sceneSeed, auxSeed) {
-  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "sceneBaseMode", "sceneApps", "sceneAux", "sceneGpuLock", "fasMode", "fasMarginFps", "fps", "fallbackFps", "games", "relations", "gameCpuMHz"];
+  const fields = ["enabled", "cpu", "gpu", "observe", "sceneMode", "sceneBaseMode", "sceneApps", "sceneAux", "sceneGpuLock", "fasMode", "fasMarginFps", "fasProfiles", "fps", "fallbackFps", "games", "relations", "gameCpuMHz"];
   for (const key of Object.keys(settings)) if (!fields.includes(key)) throw new Error(`未知配置项：${key}`);
   for (const key of ["enabled", "cpu", "gpu", "observe", "relations"])
     if (typeof settings[key] !== "boolean") throw new Error(`${key} 必须为布尔值`);
@@ -111,12 +143,13 @@ function frameSettingsProtocol(settings, seed, sceneSeed, auxSeed) {
   rule("", 0, seed.relations.fallback);
   names.forEach((name, i) => rule(name, i + 1, Object.hasOwn(seed.relations.rules, name) ?
     seed.relations.rules[name] : seed.relations.fallback));
-  const tuning = frameFasProtocol(settings), fas = tuning.blob;
+  const tuning = readFrameFasSettings(settings), fas = encodeFrameFas(tuning).blob;
   if (settings.sceneAux !== undefined && typeof settings.sceneAux !== "boolean") throw new Error("sceneAux 必须为布尔值");
   if (settings.sceneGpuLock !== undefined && typeof settings.sceneGpuLock !== "boolean") throw new Error("sceneGpuLock 必须为布尔值");
   const encodeAux = typeof module !== "undefined" ? require("./scene_aux_protocol.js").frameSceneAuxProtocol : frameSceneAuxProtocol;
   const aux = encodeAux(settings, auxSeed).table;
   const normalized = {...settings, fasMode: tuning.mode};
+  if (Object.hasOwn(settings, "fasProfiles")) normalized.fasProfiles = tuning.profiles;
   const json = new TextEncoder().encode(JSON.stringify(normalized, null, 2) + "\n");
   if (json.length > 49152) throw new Error("配置文件过大");
   const encodeScene = typeof module !== "undefined" ? require("./scene_protocol.js").frameSceneProtocol : frameSceneProtocol;
@@ -137,4 +170,4 @@ function frameSettingsProtocol(settings, seed, sceneSeed, auxSeed) {
   return {payload, config, table, scene, fas, aux, settings: normalized};
 }
 
-if (typeof module !== "undefined") module.exports = {frameSettingsProtocol, frameFasProtocol};
+if (typeof module !== "undefined") module.exports = {frameSettingsProtocol, frameFasProtocol, frameFasProfiles};

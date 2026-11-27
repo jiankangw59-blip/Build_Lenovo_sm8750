@@ -6,9 +6,11 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-from compile_fas_tuning import compile_tuning
+from compile_fas_tuning import MODES, compile_tuning
 
-CASES = [{}, *({"fasMode": mode} for mode in ("powersave", "balance", "performance", "fast")),
+BANK = {"powersave": {"base": 2.7, "30": 0.5}, "balance": 0, "performance": None}
+CASES = [{}, *({"fasMode": mode} for mode in MODES),
+         *({"fasMode": mode, "fasProfiles": BANK} for mode in MODES),
          {"fasMode": "fast", "fasMarginFps": {"base": 1.001, "165": 0.3, "60": 0}},
          {"fasMarginFps": 0.001}, {"fasMarginFps": -0.0},
          {"fasMarginFps": {"base": 30, "240": 236}},
@@ -34,6 +36,9 @@ def main():
     for index, (settings, result) in enumerate(zip(CASES, results, strict=True)):
         mode = settings.get("fasMode", "balance")
         custom = {mode: {"margin_fps": settings["fasMarginFps"]}} if "fasMarginFps" in settings else {}
+        if "fasProfiles" in settings:
+            custom = {key: {"margin_fps": value}
+                      for key, value in settings["fasProfiles"].items() if value is not None}
         try:
             blob, _ = compile_tuning(mode, {}, custom)
         except (ValueError, TypeError):

@@ -4,54 +4,125 @@ let counter = 0, savedHash = "", seed, sceneSeed, auxSeed, busy = false;
 const editor = document.getElementById("editor"), message = document.getElementById("message");
 const fasMode = document.getElementById("fasMode"), fasBase = document.getElementById("fasMarginBase");
 const fasOverrides = document.getElementById("fasOverrides");
+const fasPreviewFps = document.getElementById("fasPreviewFps");
 const fallbackFps = document.getElementById("fallbackFps");
 const sceneAux = document.getElementById("sceneAux");
 const sceneGpuLock = document.getElementById("sceneGpuLock");
+const formControls = document.querySelectorAll("button, input, select, textarea");
 const fasDefaults = {powersave: 3, balance: 1, performance: 0.3, fast: 0};
-let fasEditError = "";
+const fasLabels = {powersave: "省电", balance: "均衡", performance: "性能", fast: "快速"};
+const adaptiveLimits = {powersave: 3000, balance: 500, performance: 200, fast: 0};
+let fasEditError = "", otherEditError = "", editingMode = "balance", displayedBase = "", displayedOverrides = "";
+let supportsFas = false, supportsStrength = false;
 let gpuLockEdited = false;
-function showFasSettings(settings) {
-  const tuning = frameFasProtocol(settings);
-  fasMode.value = tuning.mode;
+function showFasProfile(settings) {
+  editingMode = frameFasProtocol(settings).mode;
+  fasMode.value = editingMode;
+  fasBase.placeholder = String(fasDefaults[editingMode]);
+  const margin = frameFasProfiles(settings)[editingMode];
+  const advanced = margin !== null && typeof margin === "object";
+  displayedBase = fasBase.value = margin === null ? "" : String(advanced ? margin.base : margin);
+  displayedOverrides = fasOverrides.value = JSON.stringify(advanced
+    ? Object.fromEntries(Object.entries(margin).filter(([key]) => key !== "base")) : {}, null, 2);
+}
+function showSettings(settings) {
+  showFasProfile(settings);
   sceneAux.checked = settings.sceneAux ?? false;
   sceneGpuLock.checked = settings.sceneGpuLock ?? Boolean(auxSeed?.options?.gpuLock);
-  sceneGpuLock.disabled = !sceneAux.checked;
+  sceneGpuLock.disabled = busy || !sceneAux.checked;
   gpuLockEdited = false;
-  fasBase.placeholder = String(fasDefaults[tuning.mode]);
-  const margin = settings.fasMarginFps;
-  const advanced = margin && typeof margin === "object" && !Array.isArray(margin);
-  fasBase.value = margin === undefined ? "" : String(advanced ? margin.base : margin);
-  fasOverrides.value = JSON.stringify(advanced ? Object.fromEntries(Object.entries(margin).filter(([key]) => key !== "base")) : {}, null, 2);
   fallbackFps.value = settings.fallbackFps === undefined ? "" :
     (Array.isArray(settings.fallbackFps) ? settings.fallbackFps.join(", ") : String(settings.fallbackFps));
 }
-function editFasSettings() {
+function showFasPreview(settings) {
+  const fps = Number(fasPreviewFps.value);
+  const validFps = Number.isInteger(fps) && fps >= 15 && fps <= 240;
+  document.getElementById("fasPreviewMessage").textContent = validFps ? "" : "请输入 15～240 的整数帧率。";
+  document.getElementById("fasStrength").hidden = !supportsFas || !validFps || Boolean(fasEditError);
+  if (!supportsFas || !validFps || fasEditError) return;
+  const profiles = frameFasProfiles(settings);
+  for (const mode of Object.keys(fasLabels)) {
+    const tuning = frameFasProtocol({fasMode: mode, fasProfiles: profiles});
+    const override = tuning.overrides.find(([rate]) => rate === fps);
+    const margin = override?.[1] ?? (supportsStrength && fps >= 60 ? tuning.base : Math.floor(tuning.base * fps / 60));
+    const extra = supportsStrength ? adaptiveLimits[mode] : 3000;
+    const lower = Math.max(1000, fps * 1000 - margin - extra) / 1000;
+    const upper = Math.max(1000, fps * 1000 - margin) / 1000;
+    document.getElementById(`fas-${mode}-margin`).textContent = `${margin / 1000}${override ? "（覆盖）" : ""}`;
+    document.getElementById(`fas-${mode}-extra`).textContent = String(extra / 1000);
+    document.getElementById(`fas-${mode}-target`).textContent = lower === upper ? String(upper) : `${lower}–${upper}`;
+  }
+}
+function readFasProfile() {
+  if (fasBase.validity?.badInput) throw new Error("FAS 基础余量必须为数值");
+  const overrides = JSON.parse(fasOverrides.value || "{}");
+  if (!overrides || typeof overrides !== "object" || Array.isArray(overrides) || Object.hasOwn(overrides, "base"))
+    throw new Error("按帧率覆盖必须是帧率到余量的对象，不包含 base");
+  const hasOverrides = Object.keys(overrides).length > 0;
+  const blank = fasBase.value.trim() === "";
+  if (blank && !hasOverrides) return null;
+  const base = blank ? fasDefaults[editingMode] : Number(fasBase.value);
+  return hasOverrides ? {base, ...overrides} : base;
+}
+function storeDraft(settings) {
+  frameSettingsProtocol(settings, seed, sceneSeed, auxSeed);
+  editor.value = JSON.stringify(settings, null, 2) + "\n";
+}
+function updateEditMessage() {
+  const error = fasEditError || otherEditError;
+  message.textContent = error || "配置已编辑，点击保存并应用后生效。";
+  message.dataset.error = String(Boolean(error));
+}
+function editFasSettings(nextMode, reset = false) {
   try {
-    if (fasBase.validity?.badInput) throw new Error("FAS 基础余量必须为数值");
-    const settings = JSON.parse(editor.value), overrides = JSON.parse(fasOverrides.value || "{}");
-    if (!overrides || typeof overrides !== "object" || Array.isArray(overrides) || Object.hasOwn(overrides, "base"))
-      throw new Error("按帧率覆盖必须是帧率到余量的对象，不包含 base");
-    settings.fasMode = fasMode.value;
+    const settings = JSON.parse(editor.value);
+    const profiles = frameFasProfiles(settings);
+    profiles[editingMode] = reset ? null : readFasProfile();
+    settings.fasMode = nextMode;
+    delete settings.fasMarginFps;
+    settings.fasProfiles = profiles;
+    storeDraft(settings);
+    fasEditError = "";
+    showFasProfile(settings);
+    showFasPreview(settings);
+  } catch (error) {
+    fasMode.value = editingMode;
+    fasEditError = error.message;
+    document.getElementById("fasStrength").hidden = true;
+  }
+  updateEditMessage();
+}
+function editOtherSettings() {
+  try {
+    const settings = JSON.parse(editor.value);
     if (sceneAux.checked || Object.hasOwn(settings, "sceneAux")) settings.sceneAux = Boolean(sceneAux.checked);
     if (gpuLockEdited || Object.hasOwn(settings, "sceneGpuLock")) settings.sceneGpuLock = Boolean(sceneGpuLock.checked);
     if (fallbackFps.value.trim() === "") delete settings.fallbackFps;
     else settings.fallbackFps = fallbackFps.value.trim().split(/[,，\s]+/).filter(Boolean).map(Number);
-    if (fasBase.value.trim() === "" && !Object.keys(overrides).length) delete settings.fasMarginFps;
-    else {
-      const base = fasBase.value.trim() === "" ? fasDefaults[settings.fasMode] : Number(fasBase.value);
-      settings.fasMarginFps = Object.keys(overrides).length ? {base, ...overrides} : base;
-    }
-    frameSettingsProtocol(settings, seed, sceneSeed, auxSeed);
-    fasEditError = "";
-    editor.value = JSON.stringify(settings, null, 2) + "\n";
-    fasBase.placeholder = String(fasDefaults[settings.fasMode]);
-    sceneGpuLock.disabled = !sceneAux.checked;
-    message.textContent = "配置已编辑，点击保存并应用后生效。"; message.dataset.error = "false";
-  } catch (error) { fasEditError = error.message; message.textContent = error.message; message.dataset.error = "true"; }
+    storeDraft(settings);
+    otherEditError = "";
+    sceneGpuLock.disabled = busy || !sceneAux.checked;
+  } catch (error) { otherEditError = error.message; }
+  updateEditMessage();
 }
-for (const control of [fasMode, fasBase, fasOverrides, fallbackFps, sceneAux]) control.addEventListener("change", editFasSettings);
-sceneGpuLock.addEventListener("change", () => { gpuLockEdited = true; editFasSettings(); });
-editor.addEventListener("input", () => { try { showFasSettings(JSON.parse(editor.value)); fasEditError = ""; } catch (_) {} });
+fasMode.addEventListener("change", () => editFasSettings(fasMode.value));
+for (const control of [fasBase, fasOverrides]) control.addEventListener("change", () => editFasSettings(editingMode));
+document.getElementById("fasReset").onclick = () => editFasSettings(editingMode, true);
+fasPreviewFps.addEventListener("input", () => {
+  try { showFasPreview(JSON.parse(editor.value)); }
+  catch (_) { document.getElementById("fasStrength").hidden = true; }
+});
+for (const control of [fallbackFps, sceneAux]) control.addEventListener("change", editOtherSettings);
+sceneGpuLock.addEventListener("change", () => { gpuLockEdited = true; editOtherSettings(); });
+editor.addEventListener("input", () => {
+  try {
+    const settings = JSON.parse(editor.value);
+    showSettings(settings);
+    fasEditError = otherEditError = "";
+    showFasPreview(settings);
+    updateEditMessage();
+  } catch (_) { document.getElementById("fasStrength").hidden = true; }
+});
 function execute(command) {
   return new Promise((resolve, reject) => {
     if (typeof window.ksu?.exec !== "function") return reject(new Error("请从 KernelSU 管理器打开。"));
@@ -69,26 +140,65 @@ async function refresh() {
   savedHash = text.slice(0, split).trim();
   if (!/^[a-f0-9]{64}$/.test(savedHash)) throw new Error("配置读取失败");
   editor.value = text.slice(split + 1);
-  showFasSettings(JSON.parse(editor.value));
-  fasEditError = "";
-  document.getElementById("status").textContent = await execute(`${backend} status`);
+  fasEditError = otherEditError = "";
+  const settings = JSON.parse(editor.value);
+  showSettings(settings);
+  const rawStatus = await execute(`${backend} status`);
+  document.getElementById("status").textContent = rawStatus;
+  const status = rawStatus.replace(/\r/g, "");
+  const features = (status.match(/^features=(.*)$/m)?.[1] ?? "").split(",");
+  supportsStrength = features.includes("fas_mode_strength_v1");
+  supportsFas = supportsStrength || features.includes("fas_tuning");
+  const activeMode = Object.keys(fasLabels)[Number(status.match(/^fas_mode=(\d+)$/m)?.[1])];
+  const base = status.match(/^fas_margin_base_mfps=(\d+)$/m)?.[1];
+  const effective = Number(status.match(/^fas_effective_mfps=(\d+)$/m)?.[1]);
+  const limit = supportsStrength ? status.match(/^fas_util_limit_mfps=(\d+)$/m)?.[1] : "3000";
+  const liveStatus = document.getElementById("fasLiveStatus");
+  if (activeMode && /^configured=1$/m.test(status)) {
+    const owner = status.match(/^owner=(\w+)$/m)?.[1];
+    const observing = /^observe=1$/m.test(status);
+    const frameActive = owner === "frame" && /^probe=1$/m.test(status) && !observing;
+    const details = [`内核已载入${fasLabels[activeMode]}档。`];
+    if (base !== undefined) details.push(`基础余量为 ${Number(base) / 1000} FPS。`);
+    if (limit !== undefined) details.push(`最多再下调 ${Number(limit) / 1000} FPS。`);
+    if (observing) details.push("当前仅观察。");
+    else if (owner === "scene") details.push("当前由 Scene 调度。");
+    else if (frameActive) {
+      details.push("当前由游戏 FAS 调度。");
+      if (effective > 0) details.push(`最近帧的内部目标为 ${effective / 1000} FPS。`);
+    }
+    liveStatus.textContent = details.join("");
+  } else liveStatus.textContent = "当前未报告已载入的 FAS 档位。";
+  document.getElementById("fasStrengthNote").textContent = supportsStrength
+    ? "60 FPS 起按基础值扣减，低于 60 FPS 按比例折算。"
+    : supportsFas
+      ? "当前内核使用旧版 FAS。高帧率档位按「帧率 ÷ 60」放大基础余量，自适应最多再下调 3 FPS。"
+      : "当前状态未报告 FAS 调优能力。";
+  showFasPreview(settings);
 }
 async function run(task) {
   if (busy) return;
-  busy = true; document.querySelectorAll("button").forEach(b => b.disabled = true);
+  busy = true;
+  formControls.forEach(control => control.disabled = true);
   message.textContent = ""; message.dataset.error = "false";
   try { await task(); }
   catch (error) { message.textContent = error.message; message.dataset.error = "true"; }
-  finally { busy = false; document.querySelectorAll("button").forEach(b => b.disabled = false); }
+  finally {
+    busy = false;
+    formControls.forEach(control => control.disabled = false);
+    sceneGpuLock.disabled = !sceneAux.checked;
+  }
 }
 document.getElementById("save").onclick = () => run(async () => {
+  if (fasBase.validity?.badInput || fasBase.value !== displayedBase || fasOverrides.value !== displayedOverrides)
+    editFasSettings(editingMode);
+  if (fasEditError || otherEditError) throw new Error(fasEditError || otherEditError);
   const settings = JSON.parse(editor.value);
-  if (fasEditError) throw new Error(fasEditError);
   const {payload} = frameSettingsProtocol(settings, seed, sceneSeed, auxSeed);
   let binary = "";
   for (let i = 0; i < payload.length; i += 8192) binary += String.fromCharCode(...payload.subarray(i, i + 8192));
   await execute(`printf %s '${btoa(binary)}' | base64 -d | ${backend} save ${savedHash}`);
-  await refresh(); message.textContent = "已保存并完成应用；请查看上方实际运行状态。";
+  await refresh(); message.textContent = "已保存并应用。内核状态显示在上方。";
 });
 document.getElementById("refresh").onclick = () => run(refresh);
 document.getElementById("rollback").onclick = () => run(async () => {
